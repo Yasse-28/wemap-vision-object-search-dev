@@ -1,0 +1,45 @@
+## Retail store config.
+
+offline:  # Build parameters for pipeline.offline.build_index; explicit CLI flags override YAML.
+  device: cuda  # Torch device for embedding, detection, localization refinement, and OCR stages.
+
+  inference:  # Throughput and input processing options.
+    batch_size: 8  # Number of cutouts/images processed per GPU batch.
+    object_crop_batch_size: 2  # Lower value reduces GPU memory for detected object crop embeddings.
+
+  localization:  # 3D localization and clustering options.
+    enabled: true  # Set to false to skip 3D object localization and clustering.
+
+  visual_refinement:  # Optional DINO visual refinement of localized clusters.
+    enabled: false  # Enable DINO visual refinement.
+    repo: facebookresearch/dinov2  # Torch Hub repository used for visual refinement embeddings.
+    model: dinov2_vitg14  # Torch Hub model name used for visual refinement embeddings.
+    image_size: 224  # Input image size for DINO visual refinement.
+    batch_size: 8  # Batch size for DINO visual embedding extraction.
+
+  ocr_refinement:  # Optional OCR refinement of localized text-bearing clusters.
+    enabled: true  # Enable OCR-based cluster splitting/merging.
+    lightweight_first: true  # Run lightweight PP-OCR first, then use VL fallback only where needed.
+    lightweight_lang: fr  # Language code for the lightweight OCR pass.
+    lightweight_preprocess: raw  # Crop preprocessing used by the lightweight OCR pass.
+    batch_size: 8  # Batch size for the VL OCR fallback.
+    preprocess: raw  # Crop preprocessing used by the VL OCR fallback.
+    lightweight_consensus_min_support_fraction: 0.6  # Fraction of non-empty lightweight reads that must agree.
+    lightweight_consensus_min_margin: 1  # Minimum support gap between the best and second-best OCR keys.
+
+# keyframe_filters:  # Optional pre-index keyframe filters; relative paths resolve from this YAML file.
+#   level_filter: 1  # Keep only keyframes from this georef level; null means all levels.
+#   polygon_geojson_path: /media/yacine/T7/Wemap/vps-data/maps/galeries-lafayette-saint-laurent-du-var/galerie-lafayette-saint-lauren-du-var-roi.geojson  # Keep keyframes inside GeoJSON [longitude, latitude] polygon.
+
+gdino_params:  # GroundingDINO detection and post-processing parameters.
+  prompt: "jacket . coat . shirt . sweater . dress . hat . scarf . shoes . bag . sunglasses . watch . mirror . bed . mattress . pillow . blanket . bedsheet . cushion . potted plant . vase . lamp . perfume bottle . extinguisher . smoke detector ."  # Dot-separated object categories.
+  score: 0.10             # GroundingDINO model confidence threshold.
+  iou_threshold: 0.20      # Greedy NMS IoU cutoff; lower values remove more overlapping boxes.
+  min_area_ratio: 0.003     # Drop boxes smaller than this fraction of image area.
+  max_area_ratio: 0.95    # Drop boxes larger than this fraction of image area.
+  crop_padding_px: 20     # Extra padding around each detected object crop, in pixels.
+  exclude_labels:  # Labels to discard after detection.
+    - "person"
+    - "passenger"
+    - "people"
+    - "pedestrian"

@@ -1,0 +1,61 @@
+# Hybrid offline pipeline config for train station venue.
+# Targets /localize (no offline clustering).
+# Run with:
+#   python -m pipeline.offline.build_index \
+#       --map_path <map_path> --config pipeline/config/config_hybrid_train_station.yaml
+
+venue: train_station
+
+offline:
+  # Batching + prefetch
+  mini_batch_size: 1          # ERPs per GPU forward call; bump to 6-8 on A10G
+  prefetch_workers: 2         # I/O + cubemap-extract threads (each finishes well before GPU)
+  prefetch_queue: 4           # ERP buffers queued ahead; 200 MB RAM budget
+  post_process_pending: 2     # max post-process tasks queued behind the GPU loop
+
+  # Post-processing filters (applied to the pooled YOLO+GDINO detections)
+  nms_iou: 0.55               # class-agnostic spherical (FoV-IoU) NMS over the
+                              # pooled YOLO+GDINO detections; 0 disables
+  min_area_ratio: 0.0
+  max_area_ratio: 0.95
+  min_aspect_ratio: 0.05
+  max_aspect_ratio: 20.0
+  max_proposals_per_face: 30  # cap per cubemap face after projection
+
+  # 3D localisation (positions for /localize shortcut path)
+  localization:
+    enabled: true
+    depth_dir: depths
+    min_depth_m: 0.05
+    max_depth_m: 25.0
+    skip_clustering: true     # clustering done online at request time
+
+yolo_params:
+  weights: yolov8s-worldv2.pt
+  imgsz: 1600
+  conf_broad: 0.05            # GENERIC_OBJECTS + PUBLIC_INFRA
+  conf_airport_specific: 0.03 # AIRPORT_OPS + SAFETY_SECURITY + TECHNICAL_MEP
+                              # Low threshold preserves safety-item recall
+
+gdino_params:
+  model: IDEA-Research/grounding-dino-tiny  # change to grounding-dino-base for higher recall
+  score: 0.06                 # GDINO model-level threshold
+  min_confidence: 0.10        # post-process minimum confidence
+  label: gdino_venue          # synthetic label stamped on all GDINO detections
+
+# Lightweight PP-OCR (optional — disabled by default)
+ocr:
+  enabled: true              # set to true to run PP-OCR after detection
+  textness_threshold: 0.02    # MetaCLIP textness score filter (objects above this get OCR)
+  candidate_chunk_size: 1000  # Stream OCR candidates from SQLite in bounded chunks.
+  progress_interval: 1000     # Log OCR progress every N attempted candidates; 0 disables.
+  max_candidates: 0           # 0 = unlimited; set e.g. 200000 for a hard global OCR budget.
+  max_candidates_per_keyframe: 0  # 0 = unlimited; set e.g. 3-10 for very large maps.
+  include_labels: []          # Optional normalized labels to OCR; empty means all labels.
+  exclude_labels: []          # Optional normalized labels to skip.
+  include_detection_sources: []  # Optional sources such as ["yolo"] or ["gdino"].
+  lightweight_lang: fr        # PaddleOCR language (fr, en, ...)
+  lightweight_device: ""      # Empty = auto from --device (cuda -> gpu:0); use cpu/gpu:0 to force.
+  lightweight_preprocess: raw # raw | upscale2 | upscale4_autocontrast | upscale6_autocontrast
+  lightweight_min_score: 0.7  # min PP-OCR confidence to accept a read
+  lightweight_single_letter_min_score: 0.85

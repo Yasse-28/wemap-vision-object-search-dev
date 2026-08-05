@@ -1,0 +1,172 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wemap-object-search-pipeline"
+version = "0.3.0"
+description = "Text-to-object search in geolocated 360 panoramas: offline prepare + online serving, mirroring wemap-vision-backend."
+readme = "README.md"
+requires-python = ">=3.11"
+
+# Core: what the mirrored trees (third_party/object_search, services/object_search_online)
+# import. The backend does not list these in third_party/object_search/requirements.txt
+# because its base image already carries them — so this list is reconstructed from the
+# actual imports. Keep it that way: an import in the mirror with no entry here is a
+# latent ImportError.
+dependencies = [
+    "numpy>=1.24",
+    "Pillow",
+    "tqdm",
+    "torch",
+    "torchvision",
+    # MetaClip2Model landed in transformers 4.57; the backend pins ==4.57.1.
+    # An older resolve fails at service startup, not at install time.
+    "transformers>=4.57.1",
+    "numba>=0.60",          # indexing/grid.py (@njit spatial pre-filter)
+    "opencv-python",        # inference/crop.py
+    "pandas",               # prepare/writer.py, benchmarks/lib.py
+    "pyarrow",
+    "fastapi>=0.109.2",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.0",
+    # The mirror uses psycopg2 (copy_expert, pgvector.psycopg2), not psycopg3.
+    "psycopg2-binary>=2.9.9",
+    "pgvector>=0.4.1",
+    "boto3",
+]
+
+[project.optional-dependencies]
+# Offline detection only — never installed in the online image, mirroring the
+# backend's requirements-prepare.txt split. The YOLO-World CLIP fork it needs is
+# a git dependency; install it separately:
+#   pip install 'git+https://github.com/ultralytics/CLIP.git@81ff68ed7ffcac3b40484c914f104f816757308d'
+prepare = ["ultralytics==8.3.230"]
+
+# Dev-only bricks under toolbox/ (absent from production).
+toolbox = [
+    "pyproj",       # toolbox/georef/georef.py
+    "tifffile",     # depth TIFF decode
+    "imagecodecs",  # zstd-compressed depth TIFFs
+]
+
+dev = [
+    "pytest>=7.0",
+    "black",
+    "mypy",
+    "ruff",
+    "httpx",  # fastapi TestClient
+]
+
+# The mirrored trees are NOT a src/ layout: production puts
+# third_party/object_search on PYTHONPATH, so `prepare`, `inference` and `indexing`
+# are top-level importable names. We reproduce that exactly rather than renaming
+# anything, because renaming would break the mirror.
+#
+# benchmarks/ and annotation_service/ are intentionally absent: they have no
+# __init__.py in the backend either — they are script directories, run with their
+# own directory as CWD.
+[tool.setuptools]
+package-dir = { "" = "third_party/object_search" }
+
+[tool.setuptools.packages.find]
+where = ["third_party/object_search"]
+include = ["prepare*", "inference*", "indexing*"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "third_party/object_search/prepare",              # test_prompts.py sits beside the code
+    "third_party/object_search/annotation_service/test",
+    "toolbox/tests",
+]
+# Four sys.path roots, matching how production runs each piece.
+pythonpath = [
+    ".",                                              # toolbox.*
+    "third_party/object_search",                      # prepare, inference, indexing
+    "third_party/object_search/annotation_service",   # flat: db, models, app
+    "services/object_search_online",                  # flat: service_state, v1_legacy
+]
+python_files = ["test_*.py"]
+norecursedirs = ["legacy", "node_modules", ".git", "*.egg-info"]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+force-exclude = "^/legacy/"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+extend-exclude = ["legacy"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+# The mirrored trees are copies of production and must not be edited to satisfy our
+# linter — that would break `scripts/check-mirror.sh`. Style is enforced on our own
+# code only. F401 is waived too (the backend carries two unused imports); the rest
+# of F stays on, so a genuine error like an undefined name still fails the build.
+[tool.ruff.lint.per-file-ignores]
+"third_party/object_search/**" = ["E", "W", "I", "F401"]
+"services/object_search_online/**" = ["E", "W", "I", "F401"]
+# toolbox/bricks/vendored/ is also copied production code (see its PROVENANCE.md).
+# Reflowing it would make the re-sync diff noisy for no benefit.
+"toolbox/bricks/vendored/**" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+# pgdata/ is the dev container's data directory: root-owned, so even listing it
+# raises PermissionError.
+exclude = ["^legacy/", "^infra/postgres/pgdata/", "^toolbox/node_modules/"]
+
+# The mirror is not type-checked, and that is deliberate.
+#
+# We cannot fix an error in a byte-for-byte copy of production without diverging
+# from it, so checking it would only produce findings we must suppress forever. Its
+# typing is the backend's responsibility. We still need the modules importable so
+# our own annotations resolve — hence `ignore_errors` rather than `exclude`.
+#
+# Run `scripts/check-types.sh`, which checks toolbox/ with the mirror on MYPYPATH.
+[[tool.mypy.overrides]]
+module = [
+    "prepare.*",
+    "inference.*",
+    "indexing.*",
+    "lib",
+    "build_index",
+    "build_index_pgvector",
+    "query",
+    "query_pgvector",
+    "app",
+    "db",
+    "models",
+    "service_state",
+    "v1_legacy",
+    "test.*",
+]
+ignore_errors = true
+disallow_untyped_defs = false
+warn_return_any = false
+
+# Same rule, applied consistently: we do not type-check code we *copied*, only code
+# we wrote. These modules are verbatim ports whose bodies must stay diffable against
+# the backend — `localize.py` differs from `v1_5_logic.py` in four import lines, and
+# annotating it (or wrapping its arrays in the `cast_batch` no-ops mypy wants) would
+# spend that property to satisfy a linter. `vendored/` is copied outright.
+#
+# Everything else under toolbox/ IS checked, including the tests.
+[[tool.mypy.overrides]]
+module = [
+    "toolbox.bricks.vendored.*",
+    "toolbox.bricks.localize",
+    "toolbox.bricks.candidates",
+    "toolbox.bricks.ingest",
+]
+ignore_errors = true
+disallow_untyped_defs = false
+warn_return_any = false

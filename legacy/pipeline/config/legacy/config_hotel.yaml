@@ -1,0 +1,45 @@
+## Train station config.
+
+offline:  # Build parameters for pipeline.offline.build_index; explicit CLI flags override YAML.
+  device: cuda  # Torch device for embedding, detection, localization refinement, and OCR stages.
+
+  inference:  # Throughput and input processing options.
+    batch_size: 2  # Number of cutouts/images processed per GPU batch.
+
+  localization:  # 3D localization and clustering options.
+    enabled: true  # Set to false to skip 3D object localization and clustering.
+
+  visual_refinement:  # Optional DINO visual refinement of localized clusters.
+    enabled: true  # Enable DINO visual refinement.
+    repo: facebookresearch/dinov2  # Torch Hub repository used for visual refinement embeddings.
+    model: dinov2_vitg14  # Torch Hub model name used for visual refinement embeddings.
+    image_size: 224  # Input image size for DINO visual refinement.
+    batch_size: 8  # Batch size for DINO visual embedding extraction.
+
+  ocr_refinement:  # Optional OCR refinement of localized text-bearing clusters.
+    enabled: true  # Enable OCR-based cluster splitting/merging.
+    lightweight_first: true  # Run lightweight PP-OCR first, then use VL fallback only where needed.
+    lightweight_lang: fr  # Language code for the lightweight OCR pass.
+    lightweight_preprocess: raw  # Crop preprocessing used by the lightweight OCR pass.
+    batch_size: 8  # Batch size for the VL OCR fallback.
+    preprocess: raw  # Crop preprocessing used by the VL OCR fallback.
+    lightweight_consensus_min_support_fraction: 0.6  # Fraction of non-empty lightweight reads that must agree.
+    lightweight_consensus_min_margin: 1  # Minimum support gap between the best and second-best OCR keys.
+    vl_fallback: false  # Use PaddleOCR-VL fallback after lightweight OCR when needed.
+
+gdino_params:  # GroundingDINO detection and post-processing parameters.
+  prompt: "bed . pillow . blanket . duvet . bedsheet . mattress . sofa . armchair . chair . table . desk . bedside table . lamp . ceiling light . television . remote control . telephone . minibar . refrigerator . coffee machine . kettle . microwave . sink . toilet . shower . bathtub . towel . mirror . hair dryer . wardrobe . clothes hanger . luggage cart . suitcase . backpack . keycard reader . elevator . escalator . stairs . handrail . fire extinguisher . fire alarm . smoke detector . sprinkler . emergency exit sign . security camera . intercom . speaker . digital display . information sign . direction sign . exit sign . vending machine . trash bin . cleaning cart . vacuum cleaner . laundry cart . linen cart . computer . monitor . keyboard . printer . cash register . office chair . potted plant ."  # Dot-separated object categories.
+  score: 0.06             # GroundingDINO model confidence threshold.
+  iou_threshold: 0.3      # Greedy NMS IoU cutoff; lower values remove more overlapping boxes.
+  min_area_ratio: 0.0     # Drop boxes smaller than this fraction of image area.
+  max_area_ratio: 0.95    # Drop boxes larger than this fraction of image area.
+  crop_padding_px: 20     # Extra padding around each detected object crop, in pixels.
+  exclude_labels:  # Labels to discard after detection.
+    - "person"
+    - "passenger"
+    - "people"
+    - "pedestrian"
+
+# keyframe_filters:  # Optional pre-index keyframe filters; relative paths resolve from this YAML file.
+#   level_filter: 0  # Keep only keyframes from this georef level; null means all levels.
+  # polygon_geojson_path: /media/yacine/T7/Wemap/vps-data/maps/sncf-paris-gare-du-nord/sncf-paris-gare-du-nord-roi.geojson  # Keep keyframes inside GeoJSON [longitude, latitude] polygon.

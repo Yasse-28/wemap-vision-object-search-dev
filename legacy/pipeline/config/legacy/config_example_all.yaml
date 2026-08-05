@@ -1,0 +1,88 @@
+## Full object-search offline build config example.
+## Copy this file and edit values for a specific map.
+
+offline:  # Build parameters for pipeline.offline.build_index; explicit CLI flags override YAML.
+  device: cuda  # Torch device; use cuda, cuda:0, or cpu.
+  skip_objects: false  # If true, build only cutout embeddings and skip GroundingDINO object detection.
+
+  inference:  # Throughput and input processing options.
+    batch_size: 8  # GPU batch size for cutout MetaCLIP and GroundingDINO.
+    cutout_workers: 2  # Worker threads for loading/projecting cutouts; use 0 for sequential loading.
+    cutout_prefetch: 8  # Maximum queued keyframes/cutouts when cutout_workers > 0.
+    max_detections_per_image: null  # Optional cap on detections per image/cutout; null keeps all.
+    object_crop_batch_size: 2  # Batch size for MetaCLIP embeddings of detected object crops; lower reduces GPU memory.
+
+  geometry:  # Equirectangular cutout geometry.
+    geometry: cubemap  # cubemap or horizon.
+    id_stride: 1024  # cutout_id = keyframe_id * id_stride + local_index.
+    cubemap_face_size: 512  # Cubemap face output size in pixels.
+    cubemap_fov_deg: 90.0  # Cubemap face field of view in degrees.
+    horizon_nb_of_cuts: 12  # Number of horizon ring cutouts when geometry is horizon.
+    horizon_fov: 60.0  # Horizon cutout field of view in degrees.
+    horizon_inclination: 0.0  # Horizon cutout inclination in degrees.
+    horizon_width: 720  # Horizon cutout width in pixels.
+    horizon_height: 720  # Horizon cutout height in pixels.
+
+  localization:  # 3D object localization and clustering options.
+    enabled: true  # Set false to skip 3D localization even when depths/georef.db exist.
+    depth_dir: depths  # Subdirectory under map_path containing depth zarr files.
+    clustering_eps_m: 3.0  # Spatial neighbor radius in meters for localization clustering.
+    min_depth_m: 0.5  # Minimum valid depth in meters.
+    max_depth_m: 25.0  # Maximum valid depth in meters.
+    embedding_similarity_threshold: 0.85  # Minimum object embedding cosine similarity for cluster edges.
+
+  visual_refinement:  # Optional DINO visual refinement of localized clusters.
+    enabled: false  # Enable visual cluster splitting/cleanup.
+    repo: facebookresearch/dinov2  # Torch Hub repository for visual embeddings.
+    model: dinov2_vitb14  # Torch Hub model name.
+    image_size: 256  # Input crop size for visual refinement.
+    batch_size: 16  # Batch size for visual embedding extraction.
+    similarity_threshold: 0.6  # Minimum DINO cosine similarity edge for visual components.
+    min_cluster_observations: 3  # Minimum cluster observations before visual refinement runs.
+    min_component_observations: 2  # Minimum observations required to keep a visual component.
+
+  ocr_refinement:  # Optional OCR refinement of localized text-bearing clusters.
+    enabled: false  # Enable OCR-based cluster splitting/merging.
+    lightweight_first: false  # Run lightweight PP-OCR before PaddleOCR-VL fallback.
+    lightweight_lang: fr  # Language code for the lightweight OCR pass.
+    lightweight_preprocess: raw  # raw, upscale2, upscale4_autocontrast, or upscale6_autocontrast.
+    lightweight_min_score: 0.7  # Minimum PP-OCR score accepted without VL fallback.
+    lightweight_single_letter_min_score: 0.85  # Minimum PP-OCR score for accepting one-letter text.
+    lightweight_consensus_min_support_fraction: 0.6  # Fraction of non-empty lightweight reads that must agree.
+    lightweight_consensus_min_margin: 1  # Minimum support gap between best and second-best OCR keys.
+    vl_fallback: true  # Use PaddleOCR-VL fallback after lightweight OCR when needed.
+    textness_threshold: 0.02  # MetaCLIP prompt-margin threshold for text-like crops.
+    min_anchor_observations: 2  # Minimum observations required for an OCR anchor group.
+    min_anchor_keyframes: 2  # Minimum distinct keyframes required for an OCR anchor group.
+    assignment_margin_m: 0.5  # Distance gap needed to assign OCR-empty observations to an OCR anchor.
+    preprocess: upscale4_autocontrast  # raw, upscale2, upscale4_autocontrast, or upscale6_autocontrast.
+    max_candidates: null  # Optional debug cap on total OCR candidate crops; null processes all.
+    max_candidates_per_cluster: null  # Optional cap on OCR candidates per cluster; null processes all.
+    batch_size: 4  # PaddleOCR-VL generation batch size.
+    max_new_tokens: 32  # Maximum new tokens generated per OCR crop.
+
+keyframe_filters:  # Optional pre-index keyframe filters; relative paths resolve from this YAML file.
+  level_filter: null  # Keep only keyframes from this georef level; null means all levels.
+  polygon_geojson_path: null  # GeoJSON Polygon/MultiPolygon path; keeps keyframes inside [longitude, latitude] polygon.
+
+gdino_params:  # GroundingDINO detection and post-processing parameters.
+  prompt: "sign . bench . ticket machine . elevator . stairs . fire extinguisher ."  # Dot-separated object categories.
+  score: 0.06  # GroundingDINO model confidence threshold; null uses model default.
+  iou_threshold: 0.3  # Greedy NMS IoU cutoff; lower values remove more overlapping boxes.
+  min_area_ratio: 0.0  # Drop boxes smaller than this fraction of image area.
+  max_area_ratio: 0.95  # Drop boxes larger than this fraction of image area.
+  min_confidence: 0.10  # Minimum post-processed detection confidence.
+  crop_padding_px: 20  # Extra padding around each detected object crop, in pixels.
+  exclude_labels:  # Labels to discard after detection.
+    - "person"
+    - "passenger"
+    - "people"
+    - "pedestrian"
+
+# Optional eval-style experiment entries. Use with: --experiment example_station
+# When --experiment is set, its prompt/confidence_threshold are used instead of gdino_params.
+# experiments:
+#   - name: example_station
+#     prompt: "sign . bench . ticket machine ."
+#     confidence_threshold: 0.10
+#     exclude_labels: ["person", "passenger", "people", "pedestrian"]

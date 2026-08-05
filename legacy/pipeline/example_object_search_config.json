@@ -1,0 +1,11 @@
+{
+  "maps": [
+    {
+      "id": "example-map-id"
+    },
+    {
+      "id": "custom-path-map",
+      "path": "maps/custom-folder-name"
+    }
+  ]
+}

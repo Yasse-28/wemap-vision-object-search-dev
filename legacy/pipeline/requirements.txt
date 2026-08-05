@@ -1,0 +1,17 @@
+# Minimal deps for the standalone online/offline pipeline.
+fastapi>=0.109.2
+python-multipart>=0.0.9
+uvicorn[standard]>=0.27.0
+pydantic>=2.0
+numpy>=1.24
+PyYAML>=6.0
+json5>=0.9
+torch
+transformers
+Pillow
+tqdm
+opencv-python
+zarr
+pyproj
+spatialmath-python
+scikit-learn

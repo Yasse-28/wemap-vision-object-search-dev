@@ -1,0 +1,59 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Data / build artifacts
+*.db
+*.db-wal
+*.db-shm
+*.tmp.db
+
+# Model weights (downloaded at runtime)
+*.pt
+*.pth
+*.onnx
+
+# Postgres data (Docker volume)
+infra/postgres/pgdata/
+
+# Node / TypeScript (toolbox/)
+node_modules/
+toolbox/**/dist/
+*.tsbuildinfo
+npm-debug.log*

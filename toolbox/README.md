@@ -1,0 +1,148 @@
+# Object Search Toolbox
+
+Local developer toolbox for inspecting object-search indexes, testing search
+and localization, and annotating map data. It groups the React frontend and
+the TypeScript workbench backend in one npm workspace.
+
+## Layout
+
+- `frontend/`: React and Vite UI.
+- `backend/`: TypeScript workbench API, static file server, and Python API proxy.
+
+Two separate Python services are required for the `/:mapId/object-search/...`
+routes (see [ADR 0002](../docs/adr/0002-align-on-backend-pipeline.md)):
+
+| Service | Port | What it does | Started by |
+|---|---|---|---|
+| `toolbox.bricks.service` | 45678 | `/{map_id}/object-search/localize` — enrichment, clustering, ranking. The dev-only stand-in for Django's object-search API. | this backend, on demand |
+| `services/object_search_online` | 8000 | `/object-search/by-text\|by-image` — MetaCLIP embedding + HNSW. This is production's GPU service, mirrored verbatim. | you, via `scripts/run-online-service.sh` |
+
+The toolbox never starts the second one: it loads MetaCLIP on the GPU, which is
+not something to trigger behind a button press. It also needs the local database
+(`docker compose -f ../infra/postgres/compose.yml up -d`).
+
+## Features
+
+After selecting a configured map, the UI provides:
+
+- **Object Search**: run text searches, offline localization, and online
+  localization; inspect scores, observations, keyframes, headings, and map
+  positions.
+- **Object Search Explorer**: inspect index metadata, keyframes, cutouts,
+  detections, OCR, and previews. The livemap and photosphere are displayed
+  side-by-side with a draggable splitter. Moving the photosphere updates its
+  viewing arc on the map. Bounding boxes can be enabled with `Show boxes`.
+  Its annotation mode creates reviewable point annotations by inverse-projecting
+  photosphere or cutout clicks through the keyframe depth map.
+- **OS Data Explorer** *(legacy maps only)*: inspect indexed cutouts and latent
+  data. It reads the standalone `object-search.db`, which is no longer produced —
+  the index lives in pgvector now. Routes return `501` with an explanation for
+  maps built after the migration. Prompt-latent computation was never ported.
+
+Text search and localization both work against the live pgvector index. Offline
+localization is gone — it meant exact cosine over an index held in RAM, which pgvector
+HNSW replaced — so the mode toggle now offers Text search and Localize only.
+
+Annotations remain in memory until saved. **Save** writes to the configured
+map's `annotations/annotations.geojson`, creating the directory and overwriting
+the file when it already exists. **Save As...** opens the browser file dialog.
+Each saved point can include an optional search prompt in addition to its
+class. GeoJSON stores the prompt, resolved location, image-click provenance,
+normalized ERP coordinates, and depth. Legacy point and polygon GeoJSON can
+still be loaded; polygons are displayed and preserved but new polygons cannot
+be drawn.
+
+Keyframe images are resolved from `GeoRefKeyframe.image_filename` (or the
+legacy `filename` column) when available, with `{keyframe_id}.jpg` used only as
+a fallback. This supports maps whose image files are named with UUIDs.
+
+## Install
+
+```bash
+cd object-search-toolbox
+npm install
+```
+
+## Development
+
+Run the workbench backend:
+
+```bash
+npm run dev:backend -- --config /path/to/config.json5
+```
+
+Both service URLs have working defaults (`--python-api http://127.0.0.1:45678`,
+`--ann-api http://127.0.0.1:8000`); pass them only to override.
+
+The config must contain a `maps` array. Relative map paths are resolved from
+the config file directory:
+
+```json5
+{
+  maps: [
+    {
+      id: "example-map",
+      path: "./maps/example-map",
+      emmid: 123,
+      // Georef id the map was ingested under, i.e. `ingest_cli --geo-ref-id`.
+      // Mismatch = zero results with no error. Defaults to 1.
+      geo_ref_id: 1,
+      // LEGACY, optional: only the OS Data Explorer reads this.
+      object_search_index_path: "/absolute/path/to/object-search.db",
+    },
+  ],
+}
+```
+
+Run the Vite frontend against the backend:
+
+```bash
+VITE_API_PROXY_TARGET=http://127.0.0.1:45700 npm run dev:frontend
+```
+
+Open the Vite UI at `http://127.0.0.1:5173/ui/`.
+
+To use the backend-served UI instead, build first and open:
+
+```text
+http://127.0.0.1:45700/ui/
+```
+
+The Object Search Explorer decodes depth maps through a local Python
+environment. Install `tifffile` for the uint16 TIFF depth the pipeline uses
+(`numcodecs` too, if you still have Zarr depth from before the migration), then
+select the interpreter when needed:
+
+```bash
+OBJECT_SEARCH_WORKBENCH_PYTHON=/path/to/python \
+  npm run dev:backend -- --config /path/to/config.json5
+```
+
+## Build
+
+```bash
+npm run build
+npm run build:frontend
+npm run build:backend
+```
+
+Start the compiled backend after building:
+
+```bash
+npm run start -- --config /path/to/config.json5 --python-api http://127.0.0.1:45678
+```
+
+## Architecture Boundary
+
+The TypeScript backend owns `/ui/api/...` workbench routes and serves the
+frontend. It proxies object-search model routes to the Python service without
+implementing ranking, embedding, or localization itself.
+
+Annotation ground truth is owned by `annotation_service`
+(`../third_party/object_search/annotation_service`), which the benchmark queries
+before each run. It replaced the `wemap-vision-tools` submodule in ADR 0002.
+
+This toolbox is dev-only and has no production counterpart. The contracts it
+must match are the mirrored trees in `../third_party/object_search/` and
+`../services/object_search_online/`, which are byte-for-byte copies of
+`wemap-vision-backend`.
