@@ -15,6 +15,16 @@ export REPO_ROOT
 PYTHON="${PYTHON:-python3}"
 export PYTHON
 
+# third_party/object_search is the wemap-vision-object-search submodule, mounted at
+# the path the backend itself uses — which is why this PYTHONPATH is unchanged from
+# before the split. Fail here rather than three imports deep in a test run.
+if [[ ! -d "$REPO_ROOT/third_party/object_search/prepare" ]]; then
+  echo "error: the pipeline submodule is not checked out at" >&2
+  echo "       $REPO_ROOT/third_party/object_search" >&2
+  echo "       run: git submodule update --init" >&2
+  exit 1
+fi
+
 export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/third_party/object_search${PYTHONPATH:+:$PYTHONPATH}"
 
 # Load .env if present, without clobbering anything already exported.

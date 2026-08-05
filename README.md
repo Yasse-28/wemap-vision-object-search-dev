@@ -1,25 +1,35 @@
-# wemap-vision-object-search — Object Search Platform
+# wemap-vision-object-search-dev — Object Search Dev Platform
 
-This repository is the **platform hub** for Wemap's text-to-object search in
+This repository is the **dev platform** for Wemap's text-to-object search in
 geolocated 360° panoramas: the place to run, inspect and iterate on the pipeline
 that ships in production.
 
-> **The pipeline here is a mirror of production.**
-> `third_party/object_search/` and `services/object_search_online/` are
-> byte-for-byte copies of `wemap-vision-backend`. Do not edit them here — fix the
-> backend and re-sync. `scripts/check-mirror.sh` enforces it.
+The pipeline itself is **not here**. It is `third_party/object_search/`, a
+submodule of [`wemap-vision-object-search`](https://github.com/wemap/wemap-vision-object-search),
+which is in turn a byte-for-byte mirror of `wemap-vision-backend`. Clone
+accordingly:
+
+```bash
+git clone --recurse-submodules <this repo>
+# already cloned?  git submodule update --init
+```
+
+> **Never edit anything under `third_party/object_search/`.** It is production
+> code; fix the backend and re-sync. `scripts/check-mirror.sh` enforces it.
+> Anything dev-only belongs in this repo instead.
 
 Architecture & rationale:
 [ADR 0001](docs/adr/0001-object-search-platform-structure.md) (the platform role),
 [ADR 0002](docs/adr/0002-align-on-backend-pipeline.md) (the alignment on
-production, and what it retired).
+production, and what it retired),
+[ADR 0003](docs/adr/0003-split-pipeline-into-a-submodule.md) (this split).
 
 ## What's here
 
 | Path | Role |
 |------|------|
-| [`third_party/object_search/`](third_party/object_search/) | **Mirror.** The offline `prepare` job (detection + MetaCLIP2 embeddings), the shared inference/indexing helpers, the pgvector benchmarks, and `annotation_service`. Copies of production — see [`PROVENANCE.md`](third_party/PROVENANCE.md). |
-| [`services/object_search_online/`](services/object_search_online/) | **Mirror.** Production's GPU service: embed + HNSW → a flat `[{id, similarity}]` list. |
+| [`third_party/object_search/`](third_party/object_search/) | **Mirror.** The offline `prepare` job (detection + MetaCLIP2 embeddings), the shared inference/indexing helpers, the pgvector benchmarks, and `annotation_service`. Copies of production — see [`PROVENANCE.md`](third_party/object_search/PROVENANCE.md). |
+| [`third_party/object_search/services/object_search_online/`](third_party/object_search/services/object_search_online/) | **Mirror.** Production's GPU service: embed + HNSW → a flat `[{id, similarity}]` list. |
 | [`toolbox/`](toolbox/) | **Owned dev tooling.** The Python `bricks` (what Django owns in production), the pose readers (v2 manifest + legacy `georef.db`), the HTTP benchmark, and the TypeScript UI to analyse, annotate and benchmark. |
 | [`legacy/`](legacy/) | The retired standalone lineage. Reference only — unmaintained, and excluded from packaging, tests and lint. |
 | [`docs/`](docs/) | Architecture decision records. |
@@ -54,7 +64,11 @@ service, which loads MetaCLIP on the GPU.
 
 ```bash
 conda create --name=wemap-vision python=3.11 && conda activate wemap-vision
-pip install -e ".[dev,toolbox,prepare]"
+
+# Two installs: the pipeline declares its own dependencies, this repo adds the
+# dev-only ones on top. Order matters only in that both must be present.
+pip install -e './third_party/object_search[prepare]'
+pip install -e '.[dev]'
 pip install 'git+https://github.com/ultralytics/CLIP.git@81ff68ed7ffcac3b40484c914f104f816757308d'
 cp .env.example .env      # fill in DATABASE_* and PGVECTOR_PASSWORD
 
@@ -110,12 +124,24 @@ See [`toolbox/README.md`](toolbox/README.md).
 ## Checks
 
 ```bash
+scripts/check-all.sh                                    # everything below, in order
+```
+
+Or one at a time:
+
+```bash
 scripts/check-mirror.sh /path/to/wemap-vision-backend   # the mirror has not drifted
 ruff check . && black --check .
-scripts/check-types.sh                                  # mypy, one pass per sys.path root
-pytest
-cd toolbox && npm run type-check
+scripts/check-types.sh                                  # mypy, toolbox/ only
+pytest                                                  # 136 tests: toolbox/tests
+(cd third_party/object_search && pytest)                # 20 tests: the mirror's own
+cd toolbox && npm run type-check && npm test -w backend
 ```
+
+**Two `pytest` runs, on purpose.** The submodule owns its 20 mirrored tests and runs
+them with its own config; recursing into it from here would drag in the
+`annotation_service` and `object_search_online` sys.path roots, whose flat `app.py`
+modules collide by name. `scripts/check-all.sh` runs both.
 
 `pytest` is hermetic by default; the nine integration tests in
 `toolbox/tests/test_integration_db.py` skip unless a database is reachable. They are

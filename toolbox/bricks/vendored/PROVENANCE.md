@@ -2,7 +2,7 @@
 
 These files are **copies of production code**, pulled out of the backend's Django
 app so the bricks can run without Django. They are not part of the strict mirror
-(`third_party/object_search/`, `services/object_search_online/`) because they live
+(the `third_party/object_search/` submodule) because they live
 outside the backend's object-search tree — but they carry the same obligation:
 **the backend is the source of truth. If it changes, re-sync here.**
 
@@ -22,7 +22,7 @@ Synced from `wemap/wemap-vision-backend` @ `365e6bc` on 2026-08-04.
 
 `proposal_cutouts.py` is different in kind from every other row above: it overrides a
 function that **is** in the strict mirror
-(`third_party/object_search/prepare/proposal_cutouts.py`). The mirror itself stays
+(`third_party/object_search/prepare/proposal_cutouts.py`, in the submodule). The mirror itself stays
 byte-identical — `check-mirror.sh` still passes — and `install()` rebinds the name in
 `prepare.pipeline` at runtime instead.
 

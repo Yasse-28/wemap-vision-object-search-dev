@@ -18,5 +18,7 @@ if [[ "${ENVIRONMENT_NAME:-}" != "onprem" ]]; then
   echo "         The service will try AWS Secrets Manager instead of DATABASE_*." >&2
 fi
 
-cd "$REPO_ROOT/services/object_search_online"
+# The service tree lives in the submodule. CWD, not just PYTHONPATH: app.py imports
+# bare `service_state` and `v1_legacy`, exactly as the production container does.
+cd "$REPO_ROOT/third_party/object_search/services/object_search_online"
 exec "$PYTHON" -m uvicorn app:app --host "$HOST" --port "$PORT"

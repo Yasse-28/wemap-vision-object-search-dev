@@ -15,7 +15,7 @@ routes (see [ADR 0002](../docs/adr/0002-align-on-backend-pipeline.md)):
 | Service | Port | What it does | Started by |
 |---|---|---|---|
 | `toolbox.bricks.service` | 45678 | `/{map_id}/object-search/localize` — enrichment, clustering, ranking. The dev-only stand-in for Django's object-search API. | this backend, on demand |
-| `services/object_search_online` | 8000 | `/object-search/by-text\|by-image` — MetaCLIP embedding + HNSW. This is production's GPU service, mirrored verbatim. | you, via `scripts/run-online-service.sh` |
+| `third_party/object_search/services/object_search_online` | 8000 | `/object-search/by-text\|by-image` — MetaCLIP embedding + HNSW. This is production's GPU service, mirrored verbatim. | you, via `scripts/run-online-service.sh` |
 
 The toolbox never starts the second one: it loads MetaCLIP on the GPU, which is
 not something to trigger behind a button press. It also needs the local database
@@ -144,5 +144,5 @@ before each run. It replaced the `wemap-vision-tools` submodule in ADR 0002.
 
 This toolbox is dev-only and has no production counterpart. The contracts it
 must match are the mirrored trees in `../third_party/object_search/` and
-`../services/object_search_online/`, which are byte-for-byte copies of
+`../third_party/object_search/services/object_search_online/`, which are byte-for-byte copies of
 `wemap-vision-backend`.

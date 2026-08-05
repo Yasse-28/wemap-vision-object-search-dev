@@ -8,12 +8,12 @@ do the pieces talk".
 
 ## The one thing to understand first
 
-Since [ADR 0002](../docs/adr/0002-align-on-backend-pipeline.md) this repo is a
-**mirror of the production object-search pipeline** in `wemap-vision-backend`,
-plus the dev tooling production does not need.
+Since [ADR 0003](../docs/adr/0003-split-pipeline-into-a-submodule.md) this repo is the
+**dev platform** around the production object-search pipeline, which it consumes
+as the `third_party/object_search/` submodule (itself a mirror of `wemap-vision-backend`).
 
-> `third_party/object_search/` and `services/object_search_online/` are
-> **byte-for-byte copies of the backend**. Do not edit them here. Fix the backend
+> `third_party/object_search/` and `third_party/object_search/services/object_search_online/` are
+> **byte-for-byte copies of the backend**. Do not edit them. Fix the backend
 > and re-sync; `scripts/check-mirror.sh` will otherwise fail.
 
 Anything that is *not* in production lives in `toolbox/` (dev-only, maintained) or
@@ -25,7 +25,7 @@ Anything that is *not* in production lives in `toolbox/` (dev-only, maintained) 
 |---|---|---|---|
 | **Mirror: prepare** | `third_party/object_search/prepare/` | Python | Offline job: ERP images → detector proposals → MetaCLIP2 embeddings. **Copy of production.** |
 | **Mirror: inference/indexing** | `third_party/object_search/{inference,indexing}/` | Python | Shared MetaCLIP2 embedder, ERP re-crop, Numba spatial pre-filter. **Copy of production.** |
-| **Mirror: online service** | `services/object_search_online/` | Python | GPU FastAPI: embed + HNSW → flat `[{id, similarity}]`. **Copy of production.** |
+| **Mirror: online service** | `third_party/object_search/services/object_search_online/` | Python | GPU FastAPI: embed + HNSW → flat `[{id, similarity}]`. **Copy of production.** |
 | **Mirror: annotation service** | `third_party/object_search/annotation_service/` | Python | Annotation CRUD + ground-truth export. **Copy of production** (minus its Terraform). |
 | **Bricks** | `toolbox/bricks/` | Python | Dev-only port of the four things Django owns in production: 3D lifting + pgvector ingest, candidate enrichment, clustering/ranking, and the depth bridge. |
 | **Pose readers** | `toolbox/bricks/map_manifest.py`, `toolbox/georef/` | Python | Dev-only, replacing the Django ORM: the v2 map manifest, and the legacy `georef.db`. |
@@ -171,7 +171,7 @@ already enriched instead of re-enriching through the index.
 
 ## Deep references
 
-- Sync point and what was deliberately left out: `../third_party/PROVENANCE.md`
+- Sync point and what was deliberately left out: `../third_party/object_search/PROVENANCE.md`
 - Vendored production helpers and their intended deltas: `../toolbox/bricks/vendored/PROVENANCE.md`
 - Why each retired area was retired: `../legacy/README.md`
 - Architecture decisions: `../docs/adr/`

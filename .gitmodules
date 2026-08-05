@@ -1,0 +1,4 @@
+[submodule "third_party/object_search"]
+	path = third_party/object_search
+	url = git@github.com:wemap/wemap-vision-object-search.git
+	branch = dev/0.3.1

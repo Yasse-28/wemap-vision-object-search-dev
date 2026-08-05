@@ -1,16 +1,21 @@
 # AI_CONTEXT — how to navigate this repo efficiently
 
-This repository is the **object-search platform** (see `README.md`,
-`docs/adr/0001-object-search-platform-structure.md` and
-`docs/adr/0002-align-on-backend-pipeline.md`). It holds a **mirror of the
-production object-search pipeline** from `wemap-vision-backend`, the dev tooling
-that production does not need, and an archive of the retired standalone lineage.
+This repository is the **object-search dev platform** (see `README.md` and
+`docs/adr/000{1,2,3}-*.md`). It holds the dev tooling that production does not
+need, an archive of the retired standalone lineage, and — as a **submodule** —
+the production pipeline itself.
 
-**Read this first:** `third_party/object_search/` and
-`services/object_search_online/` are **byte-for-byte copies of the backend**. Do
-not edit them here — fix the backend and re-sync. `scripts/check-mirror.sh`
-enforces it. Dev-only code goes in `toolbox/`; retired code lives in `legacy/`,
-which is unmaintained and excluded from packaging, tests and lint.
+**Read this first:** `third_party/object_search/` is the
+`wemap-vision-object-search` submodule, a **byte-for-byte copy of
+`wemap-vision-backend`** (its root *is* the backend's `third_party/object_search/`,
+and the online service sits at
+`third_party/object_search/services/object_search_online/`). Do not edit anything
+under it — fix the backend and re-sync there. `scripts/check-mirror.sh` enforces
+it. Dev-only code goes in `toolbox/`; retired code lives in `legacy/`, which is
+unmaintained and excluded from packaging, tests and lint.
+
+If `third_party/object_search/` looks empty, the submodule is not checked out:
+`git submodule update --init`.
 
 **This file and the `AI_CONTEXT/` directory exist so an agent can locate the
 code relevant to a task without reading the whole tree.** Reading everything is
@@ -35,8 +40,8 @@ fastest way to implement the wrong thing.
 | If the task concerns… | Read this description | Code lives in |
 |---|---|---|
 | Architecture, data flow, ports/paths, "where does X live" | [`AI_CONTEXT/overview.md`](AI_CONTEXT/overview.md) | (whole repo) |
-| Detection, venue prompts, ERP geometry, cutouts, the parquet contract | [`AI_CONTEXT/mirror-prepare.md`](AI_CONTEXT/mirror-prepare.md) | `third_party/object_search/{prepare,inference,indexing}/` |
-| ANN query path, DSN/env config, HNSW params, annotation ground truth | [`AI_CONTEXT/mirror-serving.md`](AI_CONTEXT/mirror-serving.md) | `services/object_search_online/`, `third_party/object_search/annotation_service/` |
+| Detection, venue prompts, ERP geometry, cutouts, the parquet contract | [`third_party/object_search/AI_CONTEXT/mirror-prepare.md`](third_party/object_search/AI_CONTEXT/mirror-prepare.md) | `third_party/object_search/{prepare,inference,indexing}/` |
+| ANN query path, DSN/env config, HNSW params, annotation ground truth | [`third_party/object_search/AI_CONTEXT/mirror-serving.md`](third_party/object_search/AI_CONTEXT/mirror-serving.md) | `third_party/object_search/services/object_search_online/`, `third_party/object_search/annotation_service/` |
 | Ingest, local schema, 3D lifting, enrichment, clustering, ranking, `localize`, keyframe poses | [`AI_CONTEXT/bricks.md`](AI_CONTEXT/bricks.md) | `toolbox/{bricks,georef}/` |
 | The dev/test/annotate/benchmark tool (TypeScript) | [`AI_CONTEXT/toolbox.md`](AI_CONTEXT/toolbox.md) | `toolbox/{backend,frontend}/`, `toolbox/benchmark/` |
 | What was retired and why | `legacy/README.md` | `legacy/` |
@@ -55,8 +60,9 @@ change.** These descriptions are only useful if they stay true. Specifically:
 - Change a data flow, default value, or cross-component contract (e.g. a port,
   path prefix, or DB field) → update `AI_CONTEXT/overview.md` too.
 - A structural/architectural decision → add or amend an ADR in `docs/adr/`.
-- **Re-sync a mirrored tree** → update the sync point in
-  `third_party/PROVENANCE.md`, and re-run `scripts/check-mirror.sh`.
+- **Re-sync the mirror** → that happens in the submodule, not here: update the sync
+  point in `third_party/object_search/PROVENANCE.md`, re-run
+  `scripts/check-mirror.sh`, then commit the new submodule pin in this repo.
 - **Touch a vendored helper** → update `toolbox/bricks/vendored/PROVENANCE.md` so
   the intended delta from production stays recorded.
 - Keep the external `../object-search-description.md` in sync as well (it is the
