@@ -17,27 +17,42 @@ import {
 } from "./http-utils.js";
 import { keyframeGraphPayload } from "./keyframe-graph.js";
 import {
-  cutoutDetectionsPayload,
-  indexClusterOcrPayload,
-  indexCutoutPayload,
-  indexCutoutPreviewPng,
   indexDepthPinPayload,
   indexKeyframeDepthPreviewPng,
   indexKeyframeEquirectPreviewPng,
-  indexObjectCropPng,
-  indexObjectsPayload,
   indexProjectWorldPointPayload,
-  indexStatusPayload,
   indexViewConePayload,
   keyframeMetadataPayload,
-  legacyCutoutPreviewPng,
+  metadataRowPayload,
+  metadataRowRenderPng,
+  metadataRowsPayload,
+  objectSearchMetadataStatusPayload,
   previewFromPathPng,
+  rowFilterParamsFromQuery,
   WorkbenchRouteError,
 } from "./workbench-index.js";
 
+/**
+ * A numeric query parameter, or the fallback.
+ *
+ * The `searchParams.get` result must be checked for null *before* `Number()`:
+ * `Number(null)` is 0, which is finite, so an absent parameter used to take the value
+ * 0 rather than the fallback. That silently meant `limit=0` (→ one row after
+ * clamping) and `nms_iou=0` (→ every box suppressed) on requests that passed neither.
+ */
 function queryNumber(url: URL, name: string, fallback: number): number {
-  const value = Number(url.searchParams.get(name));
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw.trim() === "") {
+    return fallback;
+  }
+  const value = Number(raw);
   return Number.isFinite(value) ? value : fallback;
+}
+
+/** Same, for an optional integer with no meaningful default. */
+function queryInteger(url: URL, name: string): number | null {
+  const value = queryNumber(url, name, Number.NaN);
+  return Number.isInteger(value) ? value : null;
 }
 
 function queryString(url: URL, name: string): string | null {
@@ -168,87 +183,77 @@ export async function handleWorkbenchUiMapRoute(
       sendJson(response, 200, await keyframeMetadataPayload(map, decodeURIComponent(suffix.split("/")[2])));
       return true;
     }
-    if (method === "GET" && /^\/cutouts\/[^/]+\/detections$/.test(suffix)) {
-      sendJson(response, 200, await cutoutDetectionsPayload(map, decodeURIComponent(suffix.split("/")[2])));
-      return true;
-    }
-    if (method === "GET" && /^\/cutouts\/[^/]+\/preview\.png$/.test(suffix)) {
-      sendPng(
-        response,
-        await legacyCutoutPreviewPng(
-          map,
-          decodeURIComponent(suffix.split("/")[2]),
-          queryString(url, "selected_object_id"),
-          url.searchParams.get("selected_only") === "true",
-          queryString(url, "selected_bbox"),
-        ),
-      );
-      return true;
-    }
     if (method === "GET" && suffix === "/preview.png") {
       sendPng(response, await previewFromPathPng(map, queryString(url, "preview_path")));
       return true;
     }
-    if (method === "GET" && suffix === "/object-search-index") {
-      sendJson(response, 200, await indexStatusPayload(map, queryString(url, "selected_keyframe_id")));
-      return true;
-    }
-    if (method === "GET" && suffix === "/object-search-index/objects") {
-      sendJson(response, 200, await indexObjectsPayload(map, queryString(url, "keyframe_id")));
-      return true;
-    }
-    if (method === "GET" && suffix === "/object-search-index/keyframe-graph") {
-      sendJson(response, 200, await keyframeGraphPayload(map));
-      return true;
-    }
-    if (method === "GET" && suffix === "/object-search-index/cluster-ocr") {
-      sendJson(response, 200, await indexClusterOcrPayload(map));
-      return true;
-    }
-    if (method === "GET" && /^\/object-search-index\/cutouts\/[^/]+$/.test(suffix)) {
-      sendJson(response, 200, await indexCutoutPayload(map, decodeURIComponent(suffix.split("/")[3])));
-      return true;
-    }
-    if (method === "GET" && /^\/object-search-index\/cutouts\/[^/]+\/preview\.png$/.test(suffix)) {
-      sendPng(
+    if (method === "GET" && suffix === "/object-search-metadata") {
+      sendJson(
         response,
-        await indexCutoutPreviewPng(map, decodeURIComponent(suffix.split("/")[3]), {
-          selectedObjectId: queryString(url, "selected_object_id"),
-          drawBoxes: url.searchParams.get("draw_boxes") !== "false",
-          nmsIou: queryNumber(url, "nms_iou", 1.0),
-          minBBoxArea: queryNumber(url, "min_bbox_area", 0.0),
-          maxBBoxArea: queryNumber(url, "max_bbox_area", 0.0),
-          showYolo: url.searchParams.get("show_yolo") !== "false",
-          showGdino: url.searchParams.get("show_gdino") !== "false",
+        200,
+        await objectSearchMetadataStatusPayload(
+          map,
+          queryString(url, "selected_keyframe_id"),
+          options.pythonApiBaseUrl,
+        ),
+      );
+      return true;
+    }
+    if (method === "GET" && suffix === "/object-search-metadata/rows") {
+      const keyframeIds = queryString(url, "keyframe_ids");
+      sendJson(
+        response,
+        200,
+        await metadataRowsPayload(map, {
+          keyframeIds: keyframeIds ? keyframeIds.split(",").filter(Boolean) : null,
+          offset: queryNumber(url, "offset", 0),
+          limit: queryNumber(url, "limit", 2000),
+          detectorSource: queryString(url, "detector_source"),
+          labelQuery: queryString(url, "label"),
+          withDepthOnly: url.searchParams.get("with_depth") === "true",
         }),
       );
       return true;
     }
-    if (method === "GET" && /^\/object-search-index\/keyframes\/[^/]+\/equirect-preview\.png$/.test(suffix)) {
+    if (method === "GET" && suffix === "/object-search-metadata/keyframe-graph") {
+      sendJson(response, 200, await keyframeGraphPayload(map));
+      return true;
+    }
+    if (method === "GET" && /^\/object-search-metadata\/rows\/\d+$/.test(suffix)) {
+      sendJson(response, 200, await metadataRowPayload(map, Number(suffix.split("/")[3])));
+      return true;
+    }
+    if (method === "GET" && /^\/object-search-metadata\/rows\/\d+\/render\.png$/.test(suffix)) {
+      sendPng(
+        response,
+        await metadataRowRenderPng(map, Number(suffix.split("/")[3]), {
+          size: queryNumber(url, "size", 512),
+          fovScale: queryNumber(url, "fov_scale", 1),
+        }),
+      );
+      return true;
+    }
+    if (method === "GET" && /^\/object-search-metadata\/keyframes\/[^/]+\/equirect-preview\.png$/.test(suffix)) {
       const drawBoxes = url.searchParams.get("draw_boxes") !== "false";
       sendImage(
         response,
         await indexKeyframeEquirectPreviewPng(map, decodeURIComponent(suffix.split("/")[3]), {
-          selectedObjectId: queryString(url, "selected_object_id"),
+          selectedRowIndex: queryInteger(url, "selected_row_index"),
           drawBoxes,
-          nmsIou: queryNumber(url, "nms_iou", 1.0),
-          minBBoxArea: queryNumber(url, "min_bbox_area", 0.0),
-          maxBBoxArea: queryNumber(url, "max_bbox_area", 0.0),
-          showYolo: url.searchParams.get("show_yolo") !== "false",
-          showGdino: url.searchParams.get("show_gdino") !== "false",
+          ...rowFilterParamsFromQuery((name) => url.searchParams.get(name)),
         }),
         drawBoxes ? "image/png" : "image/jpeg",
       );
       return true;
     }
-    if (method === "GET" && /^\/object-search-index\/keyframes\/[^/]+\/depth-preview\.png$/.test(suffix)) {
+    if (method === "GET" && /^\/object-search-metadata\/keyframes\/[^/]+\/depth-preview\.png$/.test(suffix)) {
       sendPng(
         response,
         await indexKeyframeDepthPreviewPng(map, decodeURIComponent(suffix.split("/")[3])),
       );
       return true;
     }
-    if (method === "POST" && /^\/object-search-index\/keyframes\/[^/]+\/depth-pin$/.test(suffix)) {
+    if (method === "POST" && /^\/object-search-metadata\/keyframes\/[^/]+\/depth-pin$/.test(suffix)) {
       sendJson(
         response,
         200,
@@ -260,7 +265,7 @@ export async function handleWorkbenchUiMapRoute(
       );
       return true;
     }
-    if (method === "POST" && /^\/object-search-index\/keyframes\/[^/]+\/view-cone$/.test(suffix)) {
+    if (method === "POST" && /^\/object-search-metadata\/keyframes\/[^/]+\/view-cone$/.test(suffix)) {
       sendJson(
         response,
         200,
@@ -272,7 +277,7 @@ export async function handleWorkbenchUiMapRoute(
       );
       return true;
     }
-    if (method === "POST" && /^\/object-search-index\/keyframes\/[^/]+\/project-world-point$/.test(suffix)) {
+    if (method === "POST" && /^\/object-search-metadata\/keyframes\/[^/]+\/project-world-point$/.test(suffix)) {
       sendJson(
         response,
         200,
@@ -282,28 +287,6 @@ export async function handleWorkbenchUiMapRoute(
           await requestJson(request),
         ),
       );
-      return true;
-    }
-    if (method === "GET" && /^\/object-search-index\/cutouts\/[^/]+\/objects\/[^/]+\/crop\.png$/.test(suffix)) {
-      sendPng(
-        response,
-        await indexObjectCropPng(
-          map,
-          decodeURIComponent(suffix.split("/")[3]),
-          [
-            queryNumber(url, "x0", 0),
-            queryNumber(url, "y0", 0),
-            queryNumber(url, "x1", 1),
-            queryNumber(url, "y1", 1),
-          ],
-        ),
-      );
-      return true;
-    }
-    if (method === "POST" && suffix === "/object-search-index/prompt-latent") {
-      sendJson(response, 501, {
-        detail: "Prompt latent is not ported to the TypeScript workbench backend yet.",
-      });
       return true;
     }
   } catch (error) {

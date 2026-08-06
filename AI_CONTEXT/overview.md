@@ -28,7 +28,7 @@ Anything that is *not* in production lives in `toolbox/` (dev-only, maintained) 
 | **Mirror: online service** | `third_party/object_search/services/object_search_online/` | Python | GPU FastAPI: embed + HNSW → flat `[{id, similarity}]`. **Copy of production.** |
 | **Mirror: annotation service** | `third_party/object_search/annotation_service/` | Python | Annotation CRUD + ground-truth export. **Copy of production** (minus its Terraform). |
 | **Bricks** | `toolbox/bricks/` | Python | Dev-only port of the four things Django owns in production: 3D lifting + pgvector ingest, candidate enrichment, clustering/ranking, and the depth bridge. |
-| **Pose readers** | `toolbox/bricks/map_manifest.py`, `toolbox/georef/` | Python | Dev-only, replacing the Django ORM: the v2 map manifest, and the legacy `georef.db`. |
+| **Pose reader** | `toolbox/bricks/map_manifest.py` | Python | Dev-only, replacing the Django ORM: reads the v2 map manifest. Mirrored in TS by `toolbox/backend/src/map-manifest.ts`. |
 | **Benchmark** | `toolbox/benchmark/` | Python | Dev-only: HTTP benchmark scoring localize against ground truth. |
 | **Toolbox UI** | `toolbox/{backend,frontend}/` | TypeScript | Dev tool: inspect, search, annotate, benchmark. Proxies the Python services; does no ML. |
 | **Legacy** | `legacy/` | Python | The retired standalone lineage. Reference only — not maintained, not linted, not tested. |
@@ -46,7 +46,7 @@ directory ships only its manifest, so fetch the pixels first with the sibling re
 `../retrieve-map-data` (`retrieve_map_data.py <map_dir>` → `images/` + `depths/`).
 
 ```
-images_360/*.jpg   (v2: images/*.jpg, alongside depths/*.tif)
+images/*.jpg   (alongside depths/*.tif)
   → toolbox.bricks.prepare_runner               ← NOT `python -m prepare`, see Gotchas
       pose source: image filename → keyframe id (+ venue, + geo_ref_id)
       then calls the mirrored prepare(), which does:
@@ -114,23 +114,19 @@ gap 2 of ADR 0001; **gap 1 remains** — livemap calls
 - Clustering: leader-canopy, `eps = 2.0 m`, `min_keyframes_per_cluster = 2`.
 - Local DB needs **both** `vector` and `postgis` — see `infra/postgres/Dockerfile`.
 
-## Pose sources and coordinate frames
+## Pose source and coordinate frames
 
-Two formats, and they differ in how much work they need:
+One format: the **v2 manifest** (`{map_id}_{version}_{date}_{time}.json`), a dump of
+the production objects. `x/y/z` are already EUS and `orientation` is already the
+`[w, x, y, z]` OpenGL→EUS quaternion, so **no conversion applies**. It also carries
+`venue_type` and the real `geo_ref_id`. See `toolbox/bricks/map_manifest.py`.
 
-- **v2 manifest** (`{map_id}_{version}_{date}_{time}.json`) — a dump of the production
-  objects. `x/y/z` are already EUS and `orientation` is already the `[w, x, y, z]`
-  OpenGL→EUS quaternion, so **no conversion applies**. It also carries `venue_type`
-  and the real `geo_ref_id`. See `toolbox/bricks/map_manifest.py`.
-- **v1 `georef.db`** — poses stored transposed, world-to-camera, in WDS/OpenCV. Three
-  flips compose to reach production's convention, in `toolbox/bricks/georef_source.py`:
+Keyframe ids are **indices into `geo_keyframes`** — the manifest has no integer id.
+Re-exporting it renumbers everything, so prepare and ingest must be re-run together.
 
-```
-position_eus    = ROT_WDS_TO_EUS @ inv(pose)[:3, 3]
-orientation_eus = quat(ROT_WDS_TO_EUS @ inv(pose)[:3, :3] @ ROT_OPENGL_TO_OPENCV)
-```
-
-`load_pose_source` prefers the manifest and falls back to `georef.db`.
+The one place a frame conversion survives is the toolbox's TS backend, whose routes
+speak WDS world-to-camera on the wire (`point_world_wds`). `map-manifest.ts` adapts
+EUS→WDS at the boundary; nothing else in the system uses WDS.
 
 EUS is East-Up-South: `+X` East, `+Y` Up, `+Z` South, so North is `-Z` and the
 OpenGL camera forward (`-Z`) means "looking North".
@@ -153,10 +149,12 @@ All three are covered by tests; read ADR 0002 §Traps before touching them.
 
 1. **Skipping `prepare_postprocess`** → no `depth` → every `object_position` NULL →
    `localize` returns `[]`, indistinguishable from "found nothing".
-2. **Frame conventions** — v1 only: three flips compose in `georef_source.py`; drop
-   one and objects land mirrored or 180° off. v2 manifests need no conversion.
-3. **Level datum** — level bands are heights above the origin in both formats; feed
-   `levels_for_altitudes` the EUS up coordinate, never the WGS84 altitude.
+2. **Frame conventions** — the manifest needs no conversion, but the TS backend's
+   EUS→WDS adapter does; get it wrong and objects land mirrored or 180° off, with no
+   error. Pinned by `toolbox/backend/src/map-manifest.test.ts`.
+3. **Level datum** — level bands are heights above the origin; feed
+   `levels_for_altitudes` the EUS up coordinate, never the WGS84 altitude. Null
+   bounds mean unbounded, not zero.
 4. **`python -m prepare` numbers keyframes positionally** (`enumerate`), so its
    `video_keyframe_id` is not the pose source's keyframe id. Feed that to ingest and
    candidates attach to whichever keyframes share those ids. Use
@@ -164,10 +162,16 @@ All three are covered by tests; read ADR 0002 §Traps before touching them.
 5. **Re-exporting a v2 manifest renumbers keyframes** — ids are `geo_keyframes`
    indices. Re-run prepare *and* ingest together after a new export.
 
-**Toolbox degradations.** The index-explorer panel still depends on the retired
-SQLite index and answers `501`; `localize-offline` is gone for good. Text search and
+**Toolbox state.** `localize-offline` is gone for good. Text search and
 `localize-online` both work — text search reads the rows the bricks `text` endpoint
-already enriched instead of re-enriching through the index.
+already enriched instead of re-enriching through an index. The object-search explorer
+browses `{map}/object-search/metadata.parquet` directly (read in TypeScript, see ADR
+0005); OCR and cluster ids have no source in v2 and that surface is gone.
+
+**Three keyframe sets, deliberately not merged.** The manifest's keyframes (have a
+pose), the parquet's (prepare ran on them) and pgvector's (survived ingest's 1.5 m
+pruning). `GET /{map_id}/object-search/index-coverage` on the bricks service reports
+the third; it is allowed to fail, and then keyframes read "unknown".
 
 ## Deep references
 

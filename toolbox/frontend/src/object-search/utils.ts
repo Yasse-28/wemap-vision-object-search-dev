@@ -82,50 +82,23 @@ export function formatNumber(value: number): string {
 }
 
 /**
- * URL for a cutout preview image.
+ * URL for one search result's preview image.
  *
- * Two backend routes serve previews, and which one applies depends on where the
- * image comes from:
+ * There is one source now: `/preview.png?preview_path=…` serves a file from the map
+ * directory as-is, and `thumbnail_key` — which `enrichedFromCandidates` puts in
+ * `preview_path` — points at the JPEG `prepare` already wrote. That thumbnail *is*
+ * the cutout, and it is the only image certain to be what MetaCLIP2 embedded.
  *
- * - `/cutouts/{id}/preview.png` renders the cutout **from the legacy SQLite index**
- *   and draws detection boxes on it. Only available for pre-ADR-0002 maps.
- * - `/preview.png?preview_path=…` serves a file from the map directory as-is. This
- *   is what current maps use: `thumbnail_key` points at the JPEG the `prepare` job
- *   already wrote, and that thumbnail *is* the cutout crop, so there is nothing to
- *   draw boxes on.
- *
- * A `preview_path` prefixed `index:` is an index reference, not a file, so it goes
- * to the index-backed route along with the box-drawing options.
+ * The `/cutouts/{id}/preview.png` route this used to fall back to rendered from the
+ * retired SQLite index and drew detection boxes; it is gone, and with it the `index:`
+ * preview-path scheme. A result with no `thumbnail_key` simply has no preview:
+ * pgvector does not carry `row_index`, so there is no way back to the parquet row a
+ * re-render would need.
  */
-export function cutoutPreviewUrl(
-  mapId: string,
-  cutoutId: string,
-  previewPath: string | null,
-  selectedObjectId: string | null,
-  selectedOnly = false,
-  selectedBbox: [number, number, number, number] | null = null,
-): string {
-  const base = `/ui/api/maps/${encodeURIComponent(mapId)}`;
-  const isPlainFile = previewPath != null && previewPath !== "" && !previewPath.startsWith("index:");
-
-  if (isPlainFile) {
-    const params = new URLSearchParams({ preview_path: previewPath });
-    return `${base}/preview.png?${params.toString()}`;
+export function cutoutPreviewUrl(mapId: string, previewPath: string | null): string {
+  if (!previewPath) {
+    return "";
   }
-
-  const params = new URLSearchParams();
-  if (previewPath) {
-    params.set("preview_path", previewPath);
-  }
-  if (selectedObjectId) {
-    params.set("selected_object_id", selectedObjectId);
-  }
-  if (selectedOnly) {
-    params.set("selected_only", "true");
-  }
-  if (selectedBbox) {
-    params.set("selected_bbox", selectedBbox.join(","));
-  }
-  const query = params.toString();
-  return `${base}/cutouts/${encodeURIComponent(cutoutId)}/preview.png${query ? `?${query}` : ""}`;
+  const params = new URLSearchParams({ preview_path: previewPath });
+  return `/ui/api/maps/${encodeURIComponent(mapId)}/preview.png?${params.toString()}`;
 }

@@ -14,23 +14,9 @@ export type MapSummary = {
   emmid: number | null;
   /** Georef id the map was ingested under; the partition key of the live index. */
   geo_ref_id: number;
-  /** LEGACY: path to a standalone `object-search.db`, if one exists. */
-  object_search_index_path: string | null;
-  /** Whether the map directory and its `georef.db` are present. */
+  /** Whether the map directory and a parseable v2 manifest are present. */
   object_search_available: boolean;
   unavailable_reason: string | null;
-  /**
-   * Whether a legacy `object-search.db` was found. Only the index-explorer panel
-   * needs it: that index is no longer produced, so the panel works for
-   * pre-ADR-0002 maps only.
-   */
-  legacy_index_available: boolean;
-  /**
-   * Whether a legacy `georef.db` is present. The workbench routes that read it
-   * directly — keyframe graph, depth pin, view cone, world-point projection — have no
-   * v2-manifest reader yet, so they only work for v1 maps.
-   */
-  georef_db_available: boolean;
 };
 
 export type MapsResponse = {
@@ -81,10 +67,7 @@ export async function fetchMaps(): Promise<MapSummary[]> {
   return (data as MapsResponse).maps.map((map) => ({
     ...map,
     geo_ref_id: map.geo_ref_id ?? 1,
-    object_search_index_path: map.object_search_index_path ?? null,
     object_search_available: map.object_search_available ?? true,
     unavailable_reason: map.unavailable_reason ?? null,
-    legacy_index_available: map.legacy_index_available ?? false,
-    georef_db_available: map.georef_db_available ?? false,
   }));
 }

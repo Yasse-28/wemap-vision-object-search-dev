@@ -58,8 +58,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 
@@ -100,9 +100,9 @@ class Level:
     # server did.
     #
     # PORT NOTE: production holds a GEOS geometry here and calls `.intersects()`.
-    # georef.db stores GeoJSON, and this repo has no GEOS/GDAL, so we keep the
-    # parsed GeoJSON dict and test containment with the pure-Python ray-cast in
-    # toolbox.georef.georef. Same semantics for the polygons we actually get.
+    # The v2 manifest carries GeoJSON, and this repo has no GEOS/GDAL, so we keep
+    # the parsed GeoJSON dict and test containment with the pure-Python ray-cast
+    # in `_geometry_contains`. Same semantics for the polygons we actually get.
     geometry: dict | None = None
 
 
@@ -163,12 +163,58 @@ def _wgs84_point(lat: float | None, lng: float | None) -> tuple[float, float] | 
 def _geometry_contains(geometry: dict, point: tuple[float, float]) -> bool:
     """Whether a GeoJSON footprint contains a ``(lat, lng)`` point.
 
-    Stands in for GEOS ``geometry.intersects(point)``. Imported lazily to keep
-    this module free of a hard dependency on the georef reader.
+    Stands in for GEOS ``geometry.intersects(point)``, which this repo cannot
+    call: it has no GEOS/GDAL, and the manifest carries GeoJSON rather than a
+    GEOS geometry. The ray-cast below is the substitute; see PROVENANCE.md.
     """
-    from toolbox.georef.georef import geojson_geometry_contains_lat_lon
+    lat, lng = point
+    return any(
+        _point_in_polygon(float(lng), float(lat), polygon)
+        for polygon in _polygon_coordinates(geometry)
+    )
 
-    return bool(geojson_geometry_contains_lat_lon(geometry, point))
+
+def _polygon_coordinates(geometry: dict) -> Iterable[list]:
+    """Every polygon ring-set in a GeoJSON geometry, feature or collection."""
+    if geometry.get("type") == "FeatureCollection":
+        for feature in geometry.get("features", []):
+            yield from _polygon_coordinates(feature)
+        return
+    if geometry.get("type") == "Feature":
+        yield from _polygon_coordinates(geometry.get("geometry") or {})
+        return
+    if geometry.get("type") == "Polygon":
+        coordinates = geometry.get("coordinates") or []
+        if coordinates:
+            yield coordinates
+        return
+    if geometry.get("type") == "MultiPolygon":
+        for polygon in geometry.get("coordinates") or []:
+            if polygon:
+                yield polygon
+
+
+def _point_in_polygon(x: float, y: float, polygon: list) -> bool:
+    """Inside the outer ring and outside every hole."""
+    if not polygon or not _point_in_ring(x, y, polygon[0]):
+        return False
+    return not any(_point_in_ring(x, y, hole) for hole in polygon[1:])
+
+
+def _point_in_ring(x: float, y: float, ring: list) -> bool:
+    """Even-odd ray cast against one linear ring."""
+    inside = False
+    n = len(ring)
+    if n < 3:
+        return False
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
 
 
 def eus_compass_heading_radians(v: Vector3) -> float:
@@ -265,47 +311,6 @@ class GeoTransform:
         object.__setattr__(self, "ecef_to_eus", matrix4.invert(eus_to_ecef))
 
     # ---- Factories ----------------------------------------------------------
-
-    @classmethod
-    def from_georef_db(cls, georef_db_path: Path) -> "GeoTransform":
-        """Build from an on-disk ``georef.db`` instead of a Django ``GeoRef`` row.
-
-        PORT NOTE: replaces production's ``from_geo_ref(geo_ref)``. Two things to
-        keep straight, because getting either wrong silently yields ``level=None``
-        for every candidate:
-
-        1. **Axis order.** ``GeoRef.local_origin`` is a Django ``PointField`` i.e.
-           ``(lng, lat, alt)``; georef.db stores named ``latitude``/``longitude``
-           columns. We read the names, so no ordering ambiguity here.
-        2. **Altitude datum.** georef.db's ``Level.min_altitude``/``max_altitude``
-           are *height above the georef origin*, not absolute altitude (see
-           ``GeoRef.apply_indoor_metadata``, which derives
-           ``heightFromGround = altitude - origin.altitude``). That matches what
-           ``levels_for_altitudes`` is fed everywhere in this codebase — the EUS
-           local-up coordinate — so the bands transfer across unchanged. Do not
-           "fix" this by adding the origin altitude.
-        """
-        from toolbox.georef.georef import load_georef_from_db
-
-        georef = load_georef_from_db(Path(georef_db_path))
-        if georef is None:
-            raise ValueError(f"Could not load a GeoRef from '{georef_db_path}'.")
-
-        origin = Coordinates(
-            lng=georef.origin_coordinates.get_longitude_deg(),
-            lat=georef.origin_coordinates.get_latitude_deg(),
-            alt=float(georef.origin_coordinates.altitude),
-        )
-        levels = tuple(
-            Level(
-                value=float(level.id),
-                min_altitude=level.floorHeightFromGround,
-                max_altitude=level.ceilingHeightFromGround,
-                geometry=level.geometry,
-            )
-            for level in georef.levels
-        )
-        return cls(origin=origin, levels=levels)
 
     @classmethod
     def from_local_origin(cls, local_origin) -> "GeoTransform":

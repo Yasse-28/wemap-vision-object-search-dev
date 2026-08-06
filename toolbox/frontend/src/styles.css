@@ -1590,6 +1590,45 @@ body.explorer-equirect-dragging {
   color: #245c33;
 }
 
+/* A recoverable-but-wrong state, e.g. metadata.parquet not post-processed. */
+.warning-box {
+  padding: 10px 14px;
+  border: 1px solid #b45309;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #7c3d10;
+}
+
+.warning-box p,
+.info-box p {
+  margin: 0 0 4px;
+}
+
+/* Stored thumbnail beside the widened re-render: same four numbers, two views. */
+.object-search-proposal-previews {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.object-search-proposal-previews figure {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+  max-width: 240px;
+}
+
+.object-search-proposal-previews img {
+  width: 100%;
+  border-radius: 6px;
+  background: #111;
+}
+
+.object-search-proposal-previews figcaption {
+  font-size: 11px;
+  color: #566;
+}
+
 .dismissible-alert {
   position: relative;
   padding-right: 40px;

@@ -7,19 +7,13 @@ export type MapEntry = {
   path: string;
   emmid: number | null;
   /**
-   * Georef id this map's candidates were ingested under, i.e. the
-   * `--geo-ref-id` passed to `toolbox.bricks.ingest_cli`. It is the partition key
-   * of `object_search_candidate` and of the partial HNSW index, so a mismatch
-   * returns zero hits with no error. Defaults to 1 on both sides.
+   * LEGACY: the georef id this map's candidates were ingested under. It is the
+   * partition key of `object_search_candidate` and of the partial HNSW index, and
+   * it now comes from the map's v2 manifest — the same place `ingest_cli` takes
+   * it — so the two cannot disagree. Still parsed for config compatibility;
+   * the python service warns when it is set. Defaults to 1.
    */
   geo_ref_id: number;
-  /**
-   * LEGACY: path to a standalone `object-search.db`. That SQLite index was
-   * retired with the standalone lineage (ADR 0002) — the index now lives in
-   * pgvector. Only the `/object-search-index/*` inspection routes still read it,
-   * and only for maps built before the migration.
-   */
-  object_search_index_path: string | null;
   /** Raw per-map `objectSearch` settings, passed through to the python service. */
   object_search: Record<string, unknown> | null;
 };
@@ -125,10 +119,6 @@ export async function loadMapEntries(configPath: string): Promise<MapEntry[]> {
       typeof raw.geo_ref_id === "number" && Number.isInteger(raw.geo_ref_id)
         ? raw.geo_ref_id
         : 1;
-    const objectSearchIndexPath =
-      typeof raw.object_search_index_path === "string"
-        ? raw.object_search_index_path
-        : null;
     const objectSearch =
       raw.objectSearch && typeof raw.objectSearch === "object" && !Array.isArray(raw.objectSearch)
         ? (raw.objectSearch as Record<string, unknown>)
@@ -140,7 +130,6 @@ export async function loadMapEntries(configPath: string): Promise<MapEntry[]> {
       path: resolveMapPath(configDir, raw.id, raw.path),
       emmid,
       geo_ref_id: geoRefId,
-      object_search_index_path: objectSearchIndexPath,
       object_search: objectSearch,
     };
   });

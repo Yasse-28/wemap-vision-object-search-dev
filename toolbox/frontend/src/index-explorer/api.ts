@@ -1,14 +1,21 @@
+/**
+ * Client for the `/object-search-metadata/*` routes.
+ *
+ * The prefix was `/object-search-index`, which promised a database that no longer
+ * exists. Renaming it means an old bookmark 404s instead of half-working — the right
+ * trade for a local dev tool.
+ */
+
 import type { BboxPostProcessParams } from "../object-search-explorer/bboxPostProcess";
 import { bboxPostProcessQueryParams } from "../object-search-explorer/bboxPostProcess";
 import type {
-  ClusterOcrRecord,
-  CutoutIndexPayload,
   DepthPinResponse,
-  IndexObjectRecord,
-  IndexStatusResponse,
   KeyframeGraphResponse,
+  MetadataRowDetail,
+  MetadataRowRecord,
+  MetadataRowsResponse,
+  MetadataStatusResponse,
   ProjectWorldPointResponse,
-  PromptLatentResponse,
   ViewConeResponse,
 } from "./types";
 
@@ -28,126 +35,137 @@ async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-function parseBbox(item: Record<string, unknown>): [number, number, number, number] | null {
-  const raw = Array.isArray(item.bbox)
-    ? item.bbox
-    : Array.isArray(item.bbox_coordinates)
-      ? item.bbox_coordinates
-      : [];
-  if (raw.length < 4) {
-    return null;
-  }
-  const bbox: [number, number, number, number] = [
-    Number(raw[0]),
-    Number(raw[1]),
-    Number(raw[2]),
-    Number(raw[3]),
-  ];
-  return bbox.every(Number.isFinite) ? bbox : null;
+function metadataUrl(mapId: string, suffix: string, query?: URLSearchParams): string {
+  const search = query?.toString();
+  return (
+    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-metadata${suffix}`
+    + (search ? `?${search}` : "")
+  );
 }
 
-function normalizeIndexObjectRecord(item: unknown): IndexObjectRecord | null {
+function normalizeRow(item: unknown): MetadataRowRecord | null {
   if (!item || typeof item !== "object") {
     return null;
   }
   const record = item as Record<string, unknown>;
-  const bbox = parseBbox(record);
-  if (!bbox) {
+  const rowIndex = Number(record.row_index);
+  const ratios = Array.isArray(record.erp_bbox_ratios)
+    ? record.erp_bbox_ratios.map(Number)
+    : [];
+  if (!Number.isInteger(rowIndex) || ratios.length < 4 || !ratios.every(Number.isFinite)) {
     return null;
   }
+  const nullableNumber = (value: unknown): number | null =>
+    value == null || !Number.isFinite(Number(value)) ? null : Number(value);
   return {
-    id: String(record.id ?? ""),
+    row_index: rowIndex,
     keyframe_id: String(record.keyframe_id ?? ""),
-    cutout_id: String(record.cutout_id ?? ""),
-    bbox,
-    bbox_coordinates: bbox,
-    label: String(record.label ?? ""),
-    detection_source: String(record.detection_source ?? ""),
-    ocr_text: String(record.ocr_text ?? ""),
-    ocr_tokens: String(record.ocr_tokens ?? ""),
-    ocr_key: String(record.ocr_key ?? ""),
-    ocr_source: String(record.ocr_source ?? ""),
-    textness:
-      record.textness == null || !Number.isFinite(Number(record.textness))
-        ? null
-        : Number(record.textness),
-    ocr_candidate: Boolean(record.ocr_candidate),
-    ocr_assigned: Boolean(record.ocr_assigned),
-    cluster_id:
-      record.cluster_id == null || !Number.isFinite(Number(record.cluster_id))
-        ? null
-        : Number(record.cluster_id),
+    label: record.label == null ? null : String(record.label),
+    detector_source: String(record.detector_source ?? ""),
+    detection_score: nullableNumber(record.detection_score),
+    depth: nullableNumber(record.depth),
+    thumbnail_key:
+      typeof record.thumbnail_key === "string" && record.thumbnail_key.length
+        ? record.thumbnail_key
+        : null,
+    theta_center: Number(record.theta_center),
+    phi_center: Number(record.phi_center),
+    angular_width: Number(record.angular_width),
+    angular_height: Number(record.angular_height),
+    angular_area_deg2: Number(record.angular_area_deg2),
+    erp_bbox_ratios: [ratios[0], ratios[1], ratios[2], ratios[3]],
   };
 }
 
-export async function fetchIndexStatus(
+export async function fetchMetadataStatus(
   mapId: string,
   selectedKeyframeId: string | null,
-): Promise<IndexStatusResponse> {
+): Promise<MetadataStatusResponse> {
   const params = new URLSearchParams();
   if (selectedKeyframeId) {
     params.set("selected_keyframe_id", selectedKeyframeId);
   }
-  const query = params.toString();
-  const response = await fetch(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index${query ? `?${query}` : ""}`,
-  );
-  return readJson(response);
+  return readJson(await fetch(metadataUrl(mapId, "", params)));
 }
 
-export async function fetchIndexObjects(
+/**
+ * Rows for a set of keyframes, in one request.
+ *
+ * The explorer used to issue one request per keyframe per page; the parquet is read
+ * whole and cached server-side, so a single call is both simpler and cheaper.
+ */
+export async function fetchMetadataRows(
   mapId: string,
-  keyframeId?: string | null,
-): Promise<IndexObjectRecord[]> {
+  options: { keyframeIds?: string[]; offset?: number; limit?: number } = {},
+): Promise<MetadataRowsResponse> {
   const params = new URLSearchParams();
-  if (keyframeId) {
-    params.set("keyframe_id", keyframeId);
+  if (options.keyframeIds?.length) {
+    params.set("keyframe_ids", options.keyframeIds.join(","));
   }
-  const query = params.toString();
-  const response = await fetch(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/objects${query ? `?${query}` : ""}`,
+  if (options.offset != null) {
+    params.set("offset", String(options.offset));
+  }
+  if (options.limit != null) {
+    params.set("limit", String(options.limit));
+  }
+  const payload = await readJson<MetadataRowsResponse>(
+    await fetch(metadataUrl(mapId, "/rows", params)),
   );
-  const payload = await readJson<{ objects: unknown[] }>(response);
-  return Array.isArray(payload.objects)
-    ? payload.objects.flatMap((item) => {
-        const parsed = normalizeIndexObjectRecord(item);
-        return parsed ? [parsed] : [];
-      })
-    : [];
-}
-
-export async function fetchKeyframeGraph(mapId: string): Promise<KeyframeGraphResponse> {
-  const response = await fetch(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/keyframe-graph`,
-  );
-  return readJson(response);
-}
-
-export async function fetchClusterOcr(mapId: string): Promise<ClusterOcrRecord[]> {
-  const response = await fetch(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/cluster-ocr`,
-  );
-  const payload = await readJson<{ records: ClusterOcrRecord[] }>(response);
-  return payload.records;
-}
-
-export async function fetchIndexCutout(
-  mapId: string,
-  cutoutId: string,
-): Promise<CutoutIndexPayload> {
-  const response = await fetch(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/cutouts/${encodeURIComponent(cutoutId)}`,
-  );
-  const payload = await readJson<CutoutIndexPayload>(response);
   return {
     ...payload,
-    detections: Array.isArray(payload.detections)
-      ? payload.detections.flatMap((item) => {
-          const parsed = normalizeIndexObjectRecord(item);
+    rows: Array.isArray(payload.rows)
+      ? payload.rows.flatMap((item) => {
+          const parsed = normalizeRow(item);
           return parsed ? [parsed] : [];
         })
       : [],
   };
+}
+
+export async function fetchMetadataRow(
+  mapId: string,
+  rowIndex: number,
+): Promise<MetadataRowDetail> {
+  const payload = await readJson<MetadataRowDetail>(
+    await fetch(metadataUrl(mapId, `/rows/${rowIndex}`)),
+  );
+  const row = normalizeRow(payload.row);
+  if (!row) {
+    throw new Error(`Row ${rowIndex} came back malformed.`);
+  }
+  return { ...payload, row };
+}
+
+export async function fetchKeyframeGraph(mapId: string): Promise<KeyframeGraphResponse> {
+  return readJson(await fetch(metadataUrl(mapId, "/keyframe-graph")));
+}
+
+/** The stored 336px thumbnail — the default, and the only image MetaCLIP2 saw. */
+export function rowThumbnailUrl(mapId: string, thumbnailKey: string): string {
+  const params = new URLSearchParams({ preview_path: thumbnailKey });
+  return `/ui/api/maps/${encodeURIComponent(mapId)}/preview.png?${params}`;
+}
+
+/**
+ * A re-rendered gnomonic view of one row, for context or when no thumbnail exists.
+ *
+ * `fovScale > 1` widens the view around the same centre. At `fovScale = 1` this is
+ * the proposal's true angular extent, which is **not** identical to the stored
+ * thumbnail: that one went through `build_padding_mask`, which crops wide boxes.
+ */
+export function rowRenderUrl(
+  mapId: string,
+  rowIndex: number,
+  options: { size?: number; fovScale?: number } = {},
+): string {
+  const params = new URLSearchParams();
+  if (options.size != null) {
+    params.set("size", String(options.size));
+  }
+  if (options.fovScale != null) {
+    params.set("fov_scale", String(options.fovScale));
+  }
+  return metadataUrl(mapId, `/rows/${rowIndex}/render.png`, params);
 }
 
 function appendBboxPostProcessParams(
@@ -157,8 +175,7 @@ function appendBboxPostProcessParams(
   if (!bboxPostProcess) {
     return;
   }
-  const extra = bboxPostProcessQueryParams(bboxPostProcess);
-  extra.forEach((value, key) => {
+  bboxPostProcessQueryParams(bboxPostProcess).forEach((value, key) => {
     params.set(key, value);
   });
 }
@@ -166,60 +183,27 @@ function appendBboxPostProcessParams(
 export function indexKeyframeEquirectPreviewUrl(
   mapId: string,
   keyframeId: string,
-  selectedObjectId: string | null,
+  selectedRowIndex: number | null,
   bboxPostProcess?: BboxPostProcessParams,
   options?: { drawBoxes?: boolean },
 ): string {
   const params = new URLSearchParams();
-  if (selectedObjectId) {
-    params.set("selected_object_id", selectedObjectId);
+  if (selectedRowIndex !== null) {
+    params.set("selected_row_index", String(selectedRowIndex));
   }
   if (options?.drawBoxes === false) {
     params.set("draw_boxes", "false");
   }
   appendBboxPostProcessParams(params, bboxPostProcess);
-  const query = params.toString();
-  return `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/keyframes/${encodeURIComponent(keyframeId)}/equirect-preview.png${query ? `?${query}` : ""}`;
+  return metadataUrl(
+    mapId,
+    `/keyframes/${encodeURIComponent(keyframeId)}/equirect-preview.png`,
+    params,
+  );
 }
 
-export function indexKeyframeDepthPreviewUrl(
-  mapId: string,
-  keyframeId: string,
-): string {
-  return `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/keyframes/${encodeURIComponent(keyframeId)}/depth-preview.png`;
-}
-
-export function indexCutoutPreviewUrl(
-  mapId: string,
-  cutoutId: string,
-  selectedObjectId: string | null,
-  options?: { drawBoxes?: boolean; bboxPostProcess?: BboxPostProcessParams },
-): string {
-  const params = new URLSearchParams();
-  if (selectedObjectId) {
-    params.set("selected_object_id", selectedObjectId);
-  }
-  if (options?.drawBoxes === false) {
-    params.set("draw_boxes", "false");
-  }
-  appendBboxPostProcessParams(params, options?.bboxPostProcess);
-  const query = params.toString();
-  return `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/cutouts/${encodeURIComponent(cutoutId)}/preview.png${query ? `?${query}` : ""}`;
-}
-
-export function indexObjectCropUrl(
-  mapId: string,
-  cutoutId: string,
-  objectId: string,
-  bbox: [number, number, number, number],
-): string {
-  const params = new URLSearchParams({
-    x0: String(bbox[0]),
-    y0: String(bbox[1]),
-    x1: String(bbox[2]),
-    y1: String(bbox[3]),
-  });
-  return `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/cutouts/${encodeURIComponent(cutoutId)}/objects/${encodeURIComponent(objectId)}/crop.png?${params}`;
+export function indexKeyframeDepthPreviewUrl(mapId: string, keyframeId: string): string {
+  return metadataUrl(mapId, `/keyframes/${encodeURIComponent(keyframeId)}/depth-preview.png`);
 }
 
 export async function resolveDepthPin(
@@ -229,13 +213,13 @@ export async function resolveDepthPin(
     projection: "erp" | "cutout";
     x_ratio: number;
     y_ratio: number;
-    cutout_id?: string;
+    row_index?: number;
     sample_radius?: number;
     min_depth_m?: number;
   },
 ): Promise<DepthPinResponse> {
   const response = await fetch(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/keyframes/${encodeURIComponent(keyframeId)}/depth-pin`,
+    metadataUrl(mapId, `/keyframes/${encodeURIComponent(keyframeId)}/depth-pin`),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -251,7 +235,7 @@ export async function projectWorldPoint(
   pointWorldWds: [number, number, number],
 ): Promise<ProjectWorldPointResponse> {
   const response = await fetch(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/keyframes/${encodeURIComponent(keyframeId)}/project-world-point`,
+    metadataUrl(mapId, `/keyframes/${encodeURIComponent(keyframeId)}/project-world-point`),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -272,22 +256,7 @@ export async function resolveViewCone(
   },
 ): Promise<ViewConeResponse> {
   const response = await fetch(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/keyframes/${encodeURIComponent(keyframeId)}/view-cone`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
-  return readJson(response);
-}
-
-export async function computePromptLatent(
-  mapId: string,
-  body: Record<string, unknown>,
-): Promise<PromptLatentResponse> {
-  const response = await fetch(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/object-search-index/prompt-latent`,
+    metadataUrl(mapId, `/keyframes/${encodeURIComponent(keyframeId)}/view-cone`),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

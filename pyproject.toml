@@ -14,7 +14,6 @@ requires-python = ">=3.11"
 #   pip install -e '.[dev]'
 # Listed here is only what the dev code adds on top.
 dependencies = [
-    "pyproj",       # toolbox/georef/georef.py
     "tifffile",     # depth TIFF decode
     "imagecodecs",  # zstd-compressed depth TIFFs
 ]

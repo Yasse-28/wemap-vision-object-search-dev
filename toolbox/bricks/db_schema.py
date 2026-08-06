@@ -8,7 +8,7 @@ Two tables:
   embedding are **not ours to rename**.
 - `geokeyframe` — a minimal local stand-in for `api.models.GeoKeyframe`, holding
   only what candidate enrichment joins on: the EUS position and the orientation
-  quaternion. Populated from `georef.db` by `georef_source`.
+  quaternion. Populated from the v2 map manifest by `georef_source`.
 
 ## Types are load-bearing here
 

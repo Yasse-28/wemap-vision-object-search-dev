@@ -1,7 +1,7 @@
 # AI_CONTEXT — how to navigate this repo efficiently
 
 This repository is the **object-search dev platform** (see `README.md` and
-`docs/adr/000{1,2,3}-*.md`). It holds the dev tooling that production does not
+`docs/adr/000{1,2,3,4,5}-*.md`). It holds the dev tooling that production does not
 need, an archive of the retired standalone lineage, and — as a **submodule** —
 the production pipeline itself.
 

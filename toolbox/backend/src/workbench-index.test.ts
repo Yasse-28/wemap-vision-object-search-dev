@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
 
 import type { MapEntry } from "./config.js";
 import {
@@ -12,8 +10,6 @@ import {
   keyframeHeadingDegreesFromPose,
   WorkbenchRouteError,
 } from "./workbench-index.js";
-
-const execFileAsync = promisify(execFile);
 
 test("derives compass heading from world-to-camera extrinsics", () => {
   const identity = [
@@ -33,30 +29,49 @@ test("derives compass heading from world-to-camera extrinsics", () => {
   assert.equal(keyframeHeadingDegreesFromPose(worldToCameraWest), 270);
 });
 
-function storedPoseHex(pose: number[][]): string {
-  const buffer = Buffer.alloc(16 * 8);
-  let offset = 0;
-  for (let row = 0; row < 4; row += 1) {
-    for (let col = 0; col < 4; col += 1) {
-      buffer.writeDoubleLE(pose[col][row], offset);
-      offset += 8;
-    }
-  }
-  return buffer.toString("hex");
-}
-
-async function createMap(pose: number[][]): Promise<{ map: MapEntry; cleanup: () => Promise<void> }> {
+/**
+ * A map directory holding a v2 manifest with three keyframes, the real one at
+ * index 2 — so the literal "2" in every test below still names it, and the
+ * index-is-the-id rule is actually exercised.
+ *
+ * The orientation is **[0, 0, 1, 0]**, not identity: 180° about the EUS up axis.
+ * These tests are written against a world-to-camera matrix of identity in WDS,
+ * and the adapter reaches that from `R_eus = diag(-1,-1,1) · I · diag(1,-1,-1)
+ * = diag(-1,1,-1)`, whose quaternion is `w=0, y=1`. It checks out semantically
+ * too: identity-in-WDS world-to-camera means heading 180° (asserted above), i.e.
+ * facing South — and 180° of yaw from North is South. Do not "fix" this to
+ * [1, 0, 0, 0]; that would rotate every expectation by 180°.
+ */
+async function createMap(
+  positionEus: [number, number, number],
+): Promise<{ map: MapEntry; cleanup: () => Promise<void> }> {
   const mapPath = await mkdtemp(path.join(os.tmpdir(), "object-search-projection-"));
-  const dbPath = path.join(mapPath, "georef.db");
-  const sql = `
-    CREATE TABLE GeoRef(latitude REAL, longitude REAL, altitude REAL);
-    INSERT INTO GeoRef VALUES(45.0, 6.0, 100.0);
-    CREATE TABLE Level(id INTEGER, min_altitude REAL, max_altitude REAL);
-    INSERT INTO Level VALUES(0, -10.0, 10.0);
-    CREATE TABLE GeoRefKeyframe(id INTEGER PRIMARY KEY, pose BLOB);
-    INSERT INTO GeoRefKeyframe VALUES(2, X'${storedPoseHex(pose)}');
-  `;
-  await execFileAsync(process.env.OBJECT_SEARCH_WORKBENCH_SQLITE ?? "sqlite3", [dbPath, sql]);
+  const filler = { x: 0, y: 0, z: 0, orientation: [1, 0, 0, 0] };
+  const manifest = {
+    // [lng, lat, alt] — PointField order, the reverse of the old GeoRef columns.
+    local_origin: [6.0, 45.0, 100.0],
+    map: { name: "test", uuid: "u", venue_type: "rail" },
+    geo_levels: [
+      { value: 0, min_altitude: -10.0, max_altitude: 10.0, geo_ref: 1, geometry: null },
+    ],
+    geo_keyframes: [
+      { ...filler, image_url: "https://e/images/0.jpg", depth_url: "https://e/depths/0.tif" },
+      { ...filler, image_url: "https://e/images/1.jpg", depth_url: "https://e/depths/1.tif" },
+      {
+        x: positionEus[0],
+        y: positionEus[1],
+        z: positionEus[2],
+        orientation: [0, 0, 1, 0],
+        image_url: "https://e/images/2.jpg",
+        depth_url: "https://e/depths/2.tif",
+      },
+    ],
+  };
+  await writeFile(
+    path.join(mapPath, "test_1_20260101_000000.json"),
+    JSON.stringify(manifest),
+    "utf8",
+  );
   return {
     map: {
       id: "test",
@@ -64,7 +79,6 @@ async function createMap(pose: number[][]): Promise<{ map: MapEntry; cleanup: ()
       path: mapPath,
       emmid: null,
       geo_ref_id: 1,
-      object_search_index_path: null,
       object_search: null,
     },
     cleanup: () => rm(mapPath, { recursive: true, force: true }),
@@ -72,12 +86,7 @@ async function createMap(pose: number[][]): Promise<{ map: MapEntry; cleanup: ()
 }
 
 test("projects a WDS point into an identity keyframe ERP", async () => {
-  const fixture = await createMap([
-    [1, 0, 0, 0],
-    [0, 1, 0, 0],
-    [0, 0, 1, 0],
-    [0, 0, 0, 1],
-  ]);
+  const fixture = await createMap([0, 0, 0]);
   try {
     const payload = await indexProjectWorldPointPayload(
       fixture.map,
@@ -94,12 +103,7 @@ test("projects a WDS point into an identity keyframe ERP", async () => {
 });
 
 test("applies destination world-to-camera extrinsics before ERP projection", async () => {
-  const fixture = await createMap([
-    [1, 0, 0, -1],
-    [0, 1, 0, 0],
-    [0, 0, 1, 0],
-    [0, 0, 0, 1],
-  ]);
+  const fixture = await createMap([-1, 0, 0]);
   try {
     const payload = await indexProjectWorldPointPayload(
       fixture.map,
@@ -117,12 +121,7 @@ test("applies destination world-to-camera extrinsics before ERP projection", asy
 });
 
 test("preserves arbitrary ERP directions through identity projection", async () => {
-  const fixture = await createMap([
-    [1, 0, 0, 0],
-    [0, 1, 0, 0],
-    [0, 0, 1, 0],
-    [0, 0, 0, 1],
-  ]);
+  const fixture = await createMap([0, 0, 0]);
   try {
     const expectedU = 0.93;
     const expectedV = 0.21;
@@ -148,12 +147,7 @@ test("preserves arbitrary ERP directions through identity projection", async () 
 });
 
 test("rejects malformed WDS points", async () => {
-  const fixture = await createMap([
-    [1, 0, 0, 0],
-    [0, 1, 0, 0],
-    [0, 0, 1, 0],
-    [0, 0, 0, 1],
-  ]);
+  const fixture = await createMap([0, 0, 0]);
   try {
     await assert.rejects(
       indexProjectWorldPointPayload(fixture.map, "2", { point_world_wds: [1, 2] }),
@@ -165,12 +159,7 @@ test("rejects malformed WDS points", async () => {
 });
 
 test("rejects a point at the destination camera origin", async () => {
-  const fixture = await createMap([
-    [1, 0, 0, 0],
-    [0, 1, 0, 0],
-    [0, 0, 1, 0],
-    [0, 0, 0, 1],
-  ]);
+  const fixture = await createMap([0, 0, 0]);
   try {
     await assert.rejects(
       indexProjectWorldPointPayload(fixture.map, "2", { point_world_wds: [0, 0, 0] }),

@@ -12,7 +12,14 @@ export type AnnotationClass = {
 export type AnnotationSource = {
   keyframeId: string;
   projection: "erp" | "cutout";
-  cutoutId: string | null;
+  /**
+   * `metadata.parquet` row the click came from, when `projection === "cutout"`.
+   *
+   * Was `cutoutId`, a standalone-index cutout id. Files written before the v2
+   * migration carry `source_cutout_id` instead and are still read — see
+   * `geojson.ts`, which keeps the old key on the way in but no longer writes it.
+   */
+  rowIndex: number | null;
   xRatio: number;
   yRatio: number;
   erpU: number;

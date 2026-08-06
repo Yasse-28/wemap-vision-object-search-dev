@@ -4,8 +4,8 @@ Ported from `backend/object_search/candidates.py`. Two changes:
 
 - the ORM query with its `Func(F(...), function="ST_X")` annotations becomes one
   raw SQL statement (same columns, same `object_position IS NOT NULL` filter);
-- `GeoRef` becomes a plain `geo_ref_id` plus a `GeoTransform` built from
-  `georef.db`, and the S3 URL envelope is dropped — the toolbox serves files from
+- `GeoRef` becomes a plain `geo_ref_id` plus a `GeoTransform` built from the v2
+  map manifest, and the S3 URL envelope is dropped — the toolbox serves files from
   the map directory.
 
 The enrichment *order* is load-bearing and preserved: object positions → WGS84 →
@@ -111,7 +111,7 @@ def load_enriched_candidates(
     eus_xyz = np.array([[r["px"], r["py"], r["pz"]] for r in rows], dtype=np.float64)
     wgs84 = geo_transform.local_positions_to_wgs84(eus_xyz)
     # NOTE: levels are resolved from the EUS local-up coordinate (eus_xyz[:, 1]),
-    # never the WGS84 altitude. georef.db's level bands are heights above the
+    # never the WGS84 altitude. The manifest's level bands are heights above the
     # georef origin, which is exactly what local-up measures. Passing wgs84[:, 2]
     # here would make every level None — silently disabling the level-compatibility
     # guard in clustering, which then merges objects across floors.

@@ -21,8 +21,8 @@ Owned by this backend:
 - `/ui/api/maps/:mapId/...` workbench routes, including depth projection,
   keyframe graph, view cones and local annotation map metadata. The
   `object-search-index/*` subset reads the retired standalone `object-search.db`
-  and returns `501` when absent; everything else is backed by `georef.db`, which
-  is a map-directory artifact and unaffected by the migration.
+  and returns `501` when absent; everything else is backed by the map's v2
+  manifest, read by `src/map-manifest.ts`.
 - `POST /ui/api/maps/:mapId/annotations`, which writes the supplied
   FeatureCollection to `{map.path}/annotations/annotations.geojson`
 - `GET /ui/*` static frontend files from `object-search-toolbox/frontend/dist`

@@ -84,8 +84,8 @@ the config file directory:
       id: "example-map",
       path: "./maps/example-map",
       emmid: 123,
-      // Georef id the map was ingested under, i.e. `ingest_cli --geo-ref-id`.
-      // Mismatch = zero results with no error. Defaults to 1.
+      // LEGACY, ignored: the georef id now comes from the map's v2 manifest,
+      // which is also where ingest took it. The python service warns if set.
       geo_ref_id: 1,
       // LEGACY, optional: only the OS Data Explorer reads this.
       object_search_index_path: "/absolute/path/to/object-search.db",

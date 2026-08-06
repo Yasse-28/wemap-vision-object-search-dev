@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-import type { IndexObjectRecord } from "../index-explorer/types";
+import type { MetadataRowRecord } from "../index-explorer/types";
 
 const FOV_DEFAULT = 60;
 const FOV_MIN = 30;
@@ -43,10 +43,10 @@ type Props = {
   // to `orientYawRad` (used to face a localization without changing keyframe).
   orientYawRad?: number;
   orientToken?: number;
-  detections: IndexObjectRecord[];
-  selectedObjectId: string | null;
+  detections: MetadataRowRecord[];
+  selectedRowIndex: number | null;
   depthPin: DepthPinMarker | null;
-  polygonForDetection: (item: IndexObjectRecord) => Array<[number, number]>;
+  polygonForDetection: (item: MetadataRowRecord) => Array<[number, number]>;
   onDepthPin: (xRatio: number, yRatio: number) => void;
   allowDepthPinOnMarker?: boolean;
   navigationCandidates?: NavigationCandidate[];
@@ -714,7 +714,7 @@ export default function EquirectPhotoSphereViewer(props: Props) {
         );
       }
       const geometry = new THREE.BufferGeometry().setFromPoints(points);
-      const selected = item.id === props.selectedObjectId;
+      const selected = item.row_index === props.selectedRowIndex;
       const material = new THREE.LineBasicMaterial({
         color: selected ? 0xff6b6b : 0x11b5ae,
         linewidth: selected ? 3 : 2,
@@ -757,7 +757,7 @@ export default function EquirectPhotoSphereViewer(props: Props) {
     props.depthPin,
     props.detections,
     props.polygonForDetection,
-    props.selectedObjectId,
+    props.selectedRowIndex,
   ]);
 
   const zoom = (delta: number) => {

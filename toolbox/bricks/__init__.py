@@ -19,7 +19,7 @@ bag of embeddings into map positions. Those are ported here, from the backend:
 
 Two substitutions run through all of them:
 
-- **Poses** come from an on-disk `georef.db` (`toolbox.georef`) instead of the
+- **Poses** come from the map's v2 manifest (`map_manifest`) instead of the
   `api_geokeyframe` / `GeoRef` tables. See `georef_source`.
 - **Files** come from a map directory instead of S3.
 

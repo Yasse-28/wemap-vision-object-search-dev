@@ -4,6 +4,8 @@
 - **Date:** 2026-08-04
 - **Deciders:** Yacine (maintainer)
 - **Amends:** [ADR 0001](0001-object-search-platform-structure.md) (three decisions superseded, see below)
+- **Amended by:** [ADR 0004](0004-v2-map-data-only.md) — decision 3's second pose
+  format (`georef.db`) is removed; the v2 manifest is now the only one.
 
 ## Context
 
@@ -61,6 +63,7 @@ repo had stopped being a faithful place to iterate on the real service.
      `venue_type` and the real `geo_ref_id`. **No frame conversion applies.**
    - **v1 (legacy)** — `georef.db`, read by `toolbox/georef/` (salvaged from the
      standalone), whose poses need three composing frame flips.
+     **Removed by [ADR 0004](0004-v2-map-data-only.md).**
 
    `load_pose_source` prefers the manifest. Its keyframe ids are `geo_keyframes`
    indices, which is safe because prepare and ingest read the same file — but it means
@@ -193,8 +196,10 @@ rather than errors. Each is pinned by a test.
 2. **Frame conventions — v1 only.** `georef.db` poses are transposed,
    world-to-camera, and in WDS/OpenCV; the bricks need camera-to-world in EUS/OpenGL.
    Three flips compose; drop one and objects land mirrored or 180° off, with no error.
-   `toolbox/tests/test_frame_conventions.py` checks the rotation path against the
-   geodesy path, which share no code. v2 manifests sidestep this entirely.
+   v2 manifests sidestep this entirely. *(Superseded by ADR 0004: the v1 path is
+   gone. The composition survives only as the TS backend's EUS→WDS adapter, pinned by
+   `toolbox/backend/src/map-manifest.test.ts`; the EUS axis convention itself is
+   pinned by `toolbox/tests/test_manifest_frames.py`.)*
 3. **Level datum.** Level bands are heights *above the georef origin* in both formats.
    Feed `levels_for_altitudes` a WGS84 altitude instead of the EUS up coordinate
    and every level comes back `None`, which silently disables the

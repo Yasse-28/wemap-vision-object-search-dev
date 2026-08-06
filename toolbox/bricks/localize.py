@@ -426,6 +426,11 @@ def localize_from_enriched_candidates(
                     "object_idx": cand.id,
                     "cutout_id": str(cand.id),
                     "keyframe_id": str(cand.video_keyframe_id),
+                    # The stored thumbnail is the only preview a cluster observation
+                    # can have: the toolbox used to render one from the standalone
+                    # SQLite index, which is gone, and pgvector does not carry
+                    # `row_index`, so there is no way back to the parquet row.
+                    "thumbnail": cand.thumbnail,
                     "coordinates": [cand.lat, cand.lng, cand.alt],
                     "bbox": list(PLACEHOLDER_BBOX),
                     "similarity_score": float(obj_sim),

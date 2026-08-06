@@ -7,11 +7,10 @@ the local ingest**. Two of its choices are wrong for us, one of them dangerously
 
 1. **`video_keyframe_id` is a positional index.** `prepare/cli.py` does
    `image_entries = list(enumerate(image_paths))`, so the id it writes into
-   `metadata.parquet` is 0, 1, 2… in sorted-path order — *not* `GeoRefKeyframe.id`.
-   `ingest_cli` then looks those ids up against `georef.db`. If none match you get a
-   `KeyError`; if some happen to match — and they often do, since georef ids are
-   usually small integers — candidates are silently attached to **the wrong
-   keyframes**, which puts every object in the wrong place with no error anywhere.
+   `metadata.parquet` is 0, 1, 2… in *sorted-path* order — not the manifest's
+   keyframe id. Both are small integers, so many of them collide by accident and
+   candidates get silently attached to **the wrong keyframes**, which puts every
+   object in the wrong place with no error anywhere.
 2. **It never passes `crops_output_dir`**, so `thumbnail_file` is `""` for every row
    and no cutout thumbnails are written at all.
 
@@ -22,17 +21,16 @@ the CLI.
 
 ## Resolving keyframe ids
 
-Ids come from the map's pose source (`georef_source.load_pose_source`):
+Ids come from the map manifest (`georef_source.load_pose_source`): the index in
+`geo_keyframes`, keyed on the `image_url` basename. Lookup is by full filename and
+never by stem — since ids are array indices, a stray `2.jpg` would otherwise pair an
+unrelated image with a real pose.
 
-- **v2 manifest** — the `geo_keyframes` index, keyed on the `image_url` basename.
-- **v1 `georef.db`** — `GeoRefKeyframe.id`, keyed on its filename column; maps whose
-  images are named `{id}.jpg` have no such column and fall back to `int(stem)`.
+Images that resolve to no keyframe are skipped and counted, because indexing an image
+whose pose we cannot find produces candidates that can never be positioned.
 
-Images that resolve to neither are skipped and counted, because indexing an image whose
-pose we cannot find produces candidates that can never be positioned.
-
-The venue also comes from the manifest (`map.venue_type`) unless overridden, so v2 maps
-need no `--venue`: passing the wrong one silently changes what gets indexed.
+The venue comes from the manifest too (`map.venue_type`), so there is no `--venue`
+flag: an override would silently change what gets indexed relative to production.
 """
 
 from __future__ import annotations
@@ -46,13 +44,10 @@ from prepare.pipeline import run_prepare
 
 from toolbox.bricks.georef_source import PoseSource, load_pose_source
 from toolbox.bricks.vendored import proposal_cutouts
-from toolbox.georef.keyframe_id import keyframe_id_from_image_path
 from toolbox.logging import logger
 
-# v1 maps kept ERP images in images_360/; v2 mirrors the S3 layout (images/, depths/).
-# First existing wins.
-IMAGES_DIRNAME_CANDIDATES = ("images_360", "images")
-DEFAULT_IMAGES_DIRNAME = IMAGES_DIRNAME_CANDIDATES[0]
+# The map directory mirrors the S3 layout: images/ beside depths/.
+DEFAULT_IMAGES_DIRNAME = "images"
 DEFAULT_OUTPUTS_DIRNAME = "object-search"
 # Must agree with prepare_postprocess.DEFAULT_THUMBNAIL_PREFIX, which is resolved
 # relative to the map directory when the toolbox serves a preview.
@@ -62,21 +57,12 @@ IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
 
 
 def resolve_images_dir(map_path: Path, images_dirname: str | None = None) -> Path:
-    """The ERP images directory: the caller's, else the first convention that exists."""
+    """The ERP images directory: the caller's, else `images/`."""
     map_path = Path(map_path)
-    if images_dirname:
-        images_dir = map_path / images_dirname
-        if not images_dir.is_dir():
-            raise FileNotFoundError(f"No ERP images directory at '{images_dir}'.")
-        return images_dir
-    for name in IMAGES_DIRNAME_CANDIDATES:
-        candidate = map_path / name
-        if candidate.is_dir():
-            return candidate
-    raise FileNotFoundError(
-        f"No ERP images directory in '{map_path}' "
-        f"(looked for {', '.join(IMAGES_DIRNAME_CANDIDATES)})."
-    )
+    images_dir = map_path / (images_dirname or DEFAULT_IMAGES_DIRNAME)
+    if not images_dir.is_dir():
+        raise FileNotFoundError(f"No ERP images directory at '{images_dir}'.")
+    return images_dir
 
 
 def collect_image_entries(
@@ -103,16 +89,15 @@ def collect_image_entries(
             f"No {'/'.join(IMAGE_SUFFIXES)} images in '{images_dir}'."
         )
 
-    # None when a v1 georef.db has no filename column; the helper then falls back to
-    # int(stem), which is right for maps whose images are named after the id.
+    # Lookup is by full filename, never by stem: manifest keyframe ids are
+    # `geo_keyframes` indices, so a file named `2.jpg` must not resolve to
+    # keyframe 2 — it would silently pair an unrelated image with a real pose.
     filename_to_id = source.image_filename_to_keyframe_id
 
     entries: list[tuple[int, Path]] = []
     skipped: list[str] = []
     for path in paths:
-        keyframe_id = keyframe_id_from_image_path(
-            path, image_filename_to_keyframe_id=filename_to_id
-        )
+        keyframe_id = filename_to_id.get(path.name)
         if keyframe_id is None:
             skipped.append(path.name)
             continue
@@ -120,7 +105,7 @@ def collect_image_entries(
 
     if skipped:
         logger.warning(
-            "Skipping %d/%d image(s) with no GeoRefKeyframe id (e.g. %s) — without a "
+            "Skipping %d/%d image(s) the manifest does not list (e.g. %s) — without a "
             "pose their candidates could never be positioned.",
             len(skipped),
             len(paths),
@@ -159,7 +144,6 @@ def collect_image_entries(
 def run(
     map_path: Path,
     *,
-    venue: str | None = None,
     output_dir: Path | None = None,
     images_dirname: str | None = None,
     limit: int | None = None,
@@ -170,8 +154,8 @@ def run(
 ) -> Path:
     """Detect, cut out and embed. Returns the directory holding the outputs.
 
-    `venue` defaults to the manifest's `map.venue_type`; pass it explicitly only to
-    override, or for v1 maps, which record no venue.
+    The venue comes from the manifest's `map.venue_type` — it selects the detection
+    prompts, so overriding it would index a different candidate set than production.
 
     `batch_size` and `cutout_batch` are unrelated despite the names: the first is the
     MetaCLIP embedding batch, the second bounds the ERP-replication peak during cutout
@@ -184,17 +168,16 @@ def run(
     crops_dir.mkdir(parents=True, exist_ok=True)
 
     source = load_pose_source(map_path)
-    if venue is None:
-        venue = source.venue_type
-        if venue is not None:
-            logger.info("Using venue '%s' from %s.", venue, source.path.name)
-        else:
-            logger.warning(
-                "No venue: %s records none, and none was passed. Detection falls back "
-                "to BROAD-only YOLO with GroundingDINO skipped, which indexes a "
-                "different candidate set than production would for this map.",
-                source.path.name,
-            )
+    venue = source.venue_type
+    if venue is not None:
+        logger.info("Using venue '%s' from %s.", venue, source.path.name)
+    else:
+        logger.warning(
+            "No venue: %s records none. Detection falls back to BROAD-only YOLO with "
+            "GroundingDINO skipped, which indexes a different candidate set than "
+            "production would for this map.",
+            source.path.name,
+        )
 
     entries = collect_image_entries(map_path, images_dirname, pose_source=source)
     if limit is not None:
@@ -242,23 +225,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Run the mirrored prepare job over a map directory, resolving real "
-            "keyframe ids from the map's v2 manifest (or legacy georef.db) — which "
-            "`python -m prepare` does not."
+            "keyframe ids from the map's v2 manifest — which `python -m prepare` "
+            "does not."
         )
     )
     parser.add_argument("map_path", type=Path, help="Map directory.")
-    parser.add_argument(
-        "--venue",
-        default=None,
-        help="Map.venue_type (rail/metro/airport/hotel/…). Defaults to the manifest's "
-        "venue_type; only v1 maps, which record none, need it.",
-    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument(
         "--images-dirname",
         default=None,
-        help="Defaults to the first present of "
-        f"{', '.join(IMAGES_DIRNAME_CANDIDATES)}.",
+        help=f"ERP images directory, relative to map_path (default: "
+        f"{DEFAULT_IMAGES_DIRNAME}).",
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
@@ -292,7 +269,6 @@ def main(argv: list[str] | None = None) -> int:
 
     run(
         args.map_path,
-        venue=args.venue,
         output_dir=args.output_dir,
         images_dirname=args.images_dirname,
         limit=args.limit,

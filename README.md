@@ -22,7 +22,10 @@ Architecture & rationale:
 [ADR 0001](docs/adr/0001-object-search-platform-structure.md) (the platform role),
 [ADR 0002](docs/adr/0002-align-on-backend-pipeline.md) (the alignment on
 production, and what it retired),
-[ADR 0003](docs/adr/0003-split-pipeline-into-a-submodule.md) (this split).
+[ADR 0003](docs/adr/0003-split-pipeline-into-a-submodule.md) (this split),
+[ADR 0004](docs/adr/0004-v2-map-data-only.md) (v2 map data only),
+[ADR 0005](docs/adr/0005-explorer-reads-the-parquet.md) (the explorer reads
+`metadata.parquet`).
 
 ## What's here
 
@@ -30,7 +33,7 @@ production, and what it retired),
 |------|------|
 | [`third_party/object_search/`](third_party/object_search/) | **Mirror.** The offline `prepare` job (detection + MetaCLIP2 embeddings), the shared inference/indexing helpers, the pgvector benchmarks, and `annotation_service`. Copies of production — see [`PROVENANCE.md`](third_party/object_search/PROVENANCE.md). |
 | [`third_party/object_search/services/object_search_online/`](third_party/object_search/services/object_search_online/) | **Mirror.** Production's GPU service: embed + HNSW → a flat `[{id, similarity}]` list. |
-| [`toolbox/`](toolbox/) | **Owned dev tooling.** The Python `bricks` (what Django owns in production), the pose readers (v2 manifest + legacy `georef.db`), the HTTP benchmark, and the TypeScript UI to analyse, annotate and benchmark. |
+| [`toolbox/`](toolbox/) | **Owned dev tooling.** The Python `bricks` (what Django owns in production), the v2 manifest pose reader, the HTTP benchmark, and the TypeScript UI to analyse, annotate and benchmark. |
 | [`legacy/`](legacy/) | The retired standalone lineage. Reference only — unmaintained, and excluded from packaging, tests and lint. |
 | [`docs/`](docs/) | Architecture decision records. |
 | `infra/postgres/` | Local pgvector **+ PostGIS** dev database. |
@@ -77,20 +80,17 @@ docker compose -f infra/postgres/compose.yml up -d
 
 ### Build an index for a map
 
-A map directory holds the ERP images (`images/`, or `images_360/` on v1 maps),
-`depths/*.tif`, and a **pose source**:
-
-| Map generation | Pose source |
-|---|---|
-| **v2 (current)** | `{map_id}_{version}_{date}_{time}.json` — poses already in EUS, plus the venue and the real `geo_ref_id` |
-| v1 (legacy) | `georef.db` |
+A map directory mirrors the S3 layout — `images/*.jpg`, `depths/*.tif` — plus the
+**v2 manifest** `{map_id}_{version}_{date}_{time}.json`, which carries the poses
+(already in EUS), the venue and the real `geo_ref_id`.
 
 ```bash
 scripts/build-index.sh /path/to/map
 ```
 
-For v2 maps the venue and georef id come from the manifest, so no flags are needed;
-pass `--venue` / `--geo-ref-id` for v1 maps, which record neither.
+Everything the build needs about the map comes from that manifest, so there are no
+`--venue` / `--geo-ref-id` flags to get wrong. The legacy `georef.db` format is no
+longer read; see `docs/adr/0004-v2-map-data-only.md`.
 
 That runs three steps, none of them optional:
 

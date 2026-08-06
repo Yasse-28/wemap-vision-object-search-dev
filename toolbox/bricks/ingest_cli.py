@@ -1,10 +1,10 @@
 """Local entrypoint for the object-search ingest step.
 
 Ported from `backend/object_search/management/commands/object_search_ingest.py`.
-For a given map directory and georef id this:
+For a given map directory this:
 
-  1. Loads keyframe poses from the map's v2 manifest (or legacy `georef.db`)
-     and upserts them into `geokeyframe`.
+  1. Loads keyframe poses and the georef id from the map's v2 manifest, and
+     upserts the poses into `geokeyframe`.
   2. Spatially thins keyframes to keep only those >= min_distance apart.
   3. Reads `metadata.parquet` + `embeddings.npy` from disk for every prepare
      output directory found under the map.
@@ -223,10 +223,10 @@ def _read_capture_outputs(
 def _upsert_geokeyframes(
     conn: Connection, geo_ref_id: int, poses: dict[int, KeyframePose]
 ) -> None:
-    """Write `georef.db` poses into the local `geokeyframe` stand-in table.
+    """Write manifest poses into the local `geokeyframe` stand-in table.
 
-    `GeoRefKeyframe.id` doubles as both the geokeyframe and video-keyframe id —
-    see `georef_source`.
+    The `geo_keyframes` index doubles as both the geokeyframe and video-keyframe
+    id — see `georef_source`.
     """
     rows = [
         (
@@ -262,27 +262,26 @@ def run_ingest(
     conn: Connection,
     *,
     map_path: Path,
-    geo_ref_id: int | None = None,
     min_distance: float = DEFAULT_MIN_DISTANCE,
     outputs_dirname: str = DEFAULT_OUTPUTS_DIRNAME,
 ) -> int:
     """Ingest every prepare output under `map_path`. Returns the row count.
 
-    `geo_ref_id` defaults to the one the v2 manifest records, which is the id
-    production uses. v1 maps record none, so there it must be passed.
+    The georef id comes from the manifest — it is the partition key of the
+    candidate table and of the partial HNSW index, so taking it from anywhere else
+    risks a mismatch with what the online service queries, which returns zero hits
+    with no error.
     """
     with _step("Loading keyframe poses"):
         source = load_pose_source(map_path)
         poses = source.poses
-        if geo_ref_id is None:
-            if source.geo_ref_id is None:
-                raise ValueError(
-                    f"{source.path.name} records no geo_ref_id (legacy format), so "
-                    "--geo-ref-id is required. It must match the id the online service "
-                    "is queried with."
-                )
-            geo_ref_id = int(source.geo_ref_id)
-            logger.info("Using geo_ref_id %s from %s.", geo_ref_id, source.path.name)
+        if source.geo_ref_id is None:
+            raise ValueError(
+                f"{source.path.name} records no geo_ref_id: its geo_levels carry no "
+                "'geo_ref'. The manifest is the only source for it — re-export it."
+            )
+        geo_ref_id = int(source.geo_ref_id)
+        logger.info("Using geo_ref_id %s from %s.", geo_ref_id, source.path.name)
         db_schema.ensure_schema(conn)
         _upsert_geokeyframes(conn, geo_ref_id, poses)
         conn.commit()
@@ -389,14 +388,8 @@ def main(argv: list[str] | None = None) -> int:
             "build the per-georef partial HNSW index."
         )
     )
-    parser.add_argument("map_path", type=Path, help="Map directory (holds georef.db).")
     parser.add_argument(
-        "--geo-ref-id",
-        type=int,
-        default=None,
-        help="Georef id to index under. Defaults to the one the v2 manifest records; "
-        "required for legacy georef.db maps. Must match what the online service is "
-        "queried with.",
+        "map_path", type=Path, help="Map directory (holds the v2 manifest)."
     )
     parser.add_argument(
         "--min-distance",
@@ -424,7 +417,6 @@ def main(argv: list[str] | None = None) -> int:
     with connect() as conn:
         run_ingest(
             conn,
-            geo_ref_id=args.geo_ref_id,
             map_path=args.map_path,
             min_distance=args.min_distance,
             outputs_dirname=args.outputs_dirname,

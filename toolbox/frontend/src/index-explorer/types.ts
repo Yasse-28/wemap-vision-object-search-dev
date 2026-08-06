@@ -1,45 +1,85 @@
-export type ExplorerView = "browse" | "prompt-latent";
+/**
+ * Wire types for the object-search **metadata** routes.
+ *
+ * These used to describe the retired standalone SQLite index, and with it a
+ * cutout → objects hierarchy, per-object OCR and cluster records. None of that
+ * exists in v2: a `metadata.parquet` row *is* both the cutout and the detection,
+ * OCR was never ported, and clustering happens at query time. What is left is a
+ * flat row table plus a per-keyframe range index.
+ *
+ * The directory name is a leftover of the panel that lived here
+ * (`IndexExplorerPanel`, deleted with this migration); the module is now shared by
+ * the object-search and object-search-explorer panels.
+ */
 
-export type IndexObjectRecord = {
-  id: string;
+/** One `metadata.parquet` row, as `/object-search-metadata/rows` serves it. */
+export type MetadataRowRecord = {
+  row_index: number;
   keyframe_id: string;
-  cutout_id: string;
-  bbox: [number, number, number, number];
-  bbox_coordinates?: [number, number, number, number];
-  label: string;
-  detection_source: string;
-  ocr_text: string;
-  ocr_tokens: string;
-  ocr_key: string;
-  ocr_source: string;
-  textness: number | null;
-  ocr_candidate: boolean;
-  ocr_assigned: boolean;
-  cluster_id: number | null;
+  label: string | null;
+  detector_source: string;
+  detection_score: number | null;
+  /** Metres at the view centre; null means invisible to `localize`. */
+  depth: number | null;
+  /** Path relative to the map directory, or null when crops were not stored. */
+  thumbnail_key: string | null;
+  theta_center: number;
+  phi_center: number;
+  angular_width: number;
+  angular_height: number;
+  /** Angular footprint, the v2 replacement for the cubemap era's pixel bbox area. */
+  angular_area_deg2: number;
+  /**
+   * Reconstructed ERP box `[u0, v0, u1, v1]` in ratio units, **unwrapped** — `u`
+   * may fall slightly outside `[0, 1]` near the seam, which is what the photosphere
+   * overlay wants (it reads `u` as a yaw). Reconstructed from float16 angles, so it
+   * is accurate to a few ERP pixels, not exact.
+   */
+  erp_bbox_ratios: [number, number, number, number];
 };
 
-export type IndexSummary = {
-  index_path: string;
-  manifest: Record<string, unknown>;
-  keyframe_ids: string[];
-  cutout_ids_by_keyframe: Record<string, string[]>;
-  object_count_by_cutout: Record<string, number>;
-  ocr_text_count: number;
-  ocr_key_count: number;
-  ocr_candidate_count: number;
-  ocr_assigned_count: number;
-  ocr_source_counts: Record<string, number>;
-  cluster_ocr_count: number;
-  default_prompts: string[];
+/** One keyframe's slice of the parquet, plus its pgvector state. */
+export type KeyframeSummary = {
+  id: string;
+  row_count: number;
+  row_start: number;
+  row_end: number;
+  with_depth: number;
+  /** null = unknown (no pgvector answer), 0 = pruned at ingest, >0 = indexed. */
+  ingested: number | null;
+  /** Rows ingested but with a NULL `object_position` — invisible to `localize`. */
+  no_position: number | null;
 };
 
-export type IndexStatusResponse = {
+export type MetadataSummary = {
+  metadata_path: string;
+  row_count: number;
+  postprocessed: boolean;
+  keyframes: KeyframeSummary[];
+  detector_source_counts: Record<string, number>;
+  with_depth_count: number;
+  coverage: {
+    ingested_total: number;
+    no_position_total: number;
+    keyframe_count: number;
+  } | null;
+};
+
+export type MetadataStatusResponse = {
+  /** Whether a `metadata.parquet` was found and parsed. */
   available: boolean;
-  index_path: string | null;
+  metadata_path: string | null;
   map_path?: string;
-  object_search_index_path?: string | null;
   checked_paths?: string[];
-  summary?: IndexSummary;
+  capture_count: number;
+  postprocessed: boolean;
+  manifest_keyframe_count: number;
+  error: string | null;
+  summary: MetadataSummary | null;
+  /**
+   * Every keyframe in the manifest, not only the indexed ones: the photosphere,
+   * depth preview, depth pin, view cone and keyframe graph need poses alone.
+   */
   markers?: Array<{
     id: string;
     latitude: number;
@@ -50,6 +90,21 @@ export type IndexStatusResponse = {
     radius: number;
   }>;
   resolved_marker_count?: number;
+};
+
+export type MetadataRowsResponse = {
+  total: number;
+  offset: number;
+  limit: number;
+  postprocessed: boolean;
+  rows: MetadataRowRecord[];
+};
+
+export type MetadataRowDetail = {
+  row: MetadataRowRecord;
+  /** The stored thumbnail, served through `/preview.png?preview_path=`. */
+  preview_path: string | null;
+  preview_debug: Record<string, unknown>;
 };
 
 export type KeyframeGraphResponse = {
@@ -67,18 +122,11 @@ export type KeyframeGraphResponse = {
   error?: string;
 };
 
-export type CutoutIndexPayload = {
-  detections: IndexObjectRecord[];
-  preview_ref: string;
-  preview_debug: Record<string, unknown>;
-};
-
 export type DepthPinResponse = {
   available: boolean;
   keyframe_id: string;
-  cutout_id: string | null;
+  row_index: number | null;
   projection: "erp" | "cutout";
-  face: string | null;
   erp_u: number;
   erp_v: number;
   erp_col: number;
@@ -120,42 +168,4 @@ export type ViewConeResponse = {
   };
   polygon: Array<[number, number]>;
   level: string | null;
-};
-
-export type ClusterOcrRecord = {
-  cluster_id: number;
-  ocr_text: string;
-  ocr_tokens: string;
-  ocr_key: string;
-  ocr_observation_count: number;
-  ocr_source: string;
-};
-
-export type LatentPoint = {
-  object_id: string;
-  keyframe_id: string;
-  cutout_id: string;
-  x: number;
-  y: number;
-  size: number;
-  similarity: number;
-  active: boolean;
-  color: string;
-};
-
-export type PromptLatentResponse = {
-  available: boolean;
-  default_prompts?: string[];
-  message?: string;
-  query_labels?: string[];
-  selected_query?: string;
-  embedding_backend?: string;
-  warnings?: string[];
-  color_min?: number;
-  color_max?: number;
-  threshold?: number;
-  projection?: string;
-  projection_meta?: Record<string, number>;
-  points?: LatentPoint[];
-  topk?: Array<Record<string, unknown>>;
 };

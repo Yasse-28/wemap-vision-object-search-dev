@@ -28,12 +28,12 @@ diverge, production wins. A "small improvement" here is a bug.
 | `localize.py` | `v1_5_logic.py` | `cluster_detections_leader_canopy`, `compute_cluster_statistics`, `rank_localization_clusters`, `localize_from_enriched_candidates`, `build_localize_response`, `LocalizationParams`, `UNRESOLVED_LEVEL=-1`, `PLACEHOLDER_BBOX` |
 | `prepare_runner.py` | `object_search_prepare.py` (its `image_entries` construction) | `collect_image_entries`, `run` |
 | `prepare_postprocess.py` | `object_search_prepare.py::_sample_depths` | `postprocess_metadata`, `sample_depths` |
-| `map_manifest.py` | *(no counterpart — replaces the ORM, v2)* | `load_map_manifest`, `find_manifest`, `MapManifest`, `ManifestKeyframe` |
+| `map_manifest.py` | *(no counterpart — replaces the ORM)* | `load_map_manifest`, `find_manifest`, `MapManifest`, `ManifestKeyframe` |
 | `vendored/proposal_cutouts.py` | overrides the **mirror's** `prepare/proposal_cutouts.py` | `create_proposal_cutouts`, `install`, `DEFAULT_CUTOUT_BATCH=10` — memory-only delta, see gotcha 9 |
-| `georef_source.py` | *(no counterpart — replaces the ORM)* | `load_pose_source`, `PoseSource`, `KeyframePose`, `load_keyframe_poses` (v1), `ROT_WDS_TO_EUS`, `ROT_OPENGL_TO_OPENCV` |
+| `georef_source.py` | *(no counterpart — replaces the ORM)* | `load_pose_source`, `PoseSource`, `KeyframePose` — a thin façade over `map_manifest` |
 | `db_schema.py` | `api/models.py` + migrations | `ensure_schema`, `CREATE_CANDIDATE`, `CREATE_GEOKEYFRAME` |
 | `db.py` | — | `build_dsn`, `connect` (reads the mirror's `DATABASE_*`) |
-| `service.py` | `v1_5_views.py` | `create_app`, `query_by_text`, `query_by_image`, `LocalizeRequest`, `load_map_entries` |
+| `service.py` | `v1_5_views.py` | `create_app`, `query_by_text`, `query_by_image`, `LocalizeRequest`, `load_map_entries`, `index_coverage` (**dev-only, no production counterpart**: per-keyframe `ingested`/`no_position` counts, so the toolbox can tell prepared-but-pruned keyframes from indexed ones without a `pg` client of its own) |
 | `vendored/` | `utils/`, `depth/service/decode.py`, `viewer360/`, `v1_legacy.py` | Copies — see its `PROVENANCE.md` |
 
 `localize.py` differs from production in **four import lines only**. Treat any
@@ -43,7 +43,7 @@ behavioural change to it as a bug.
 
 | Production | Here |
 |---|---|
-| `GeoKeyframe` / `GeoRef` / `GeoLevel` ORM | the v2 map manifest (`map_manifest`), or a legacy `georef.db` via `toolbox/georef/` |
+| `GeoKeyframe` / `GeoRef` / `GeoLevel` ORM | the v2 map manifest (`map_manifest`) |
 | S3 `get_object` | files under the map directory |
 | `django.db.connection` | an injected psycopg2 connection |
 | `api.utils.spatial_sampling.select_keyframes_by_distance` | `indexing.grid.filter_by_distance` — the mirror's original, of which the backend helper is itself a vendored copy. This port *removes* a vendoring. |
@@ -75,45 +75,42 @@ normal use the only thing validating this encoding is the server accepting it.
 
 ## Frames
 
-**v2 manifests need no conversion** — they store what `api_geokeyframe` stores (EUS
+**Manifests need no conversion** — they store what `api_geokeyframe` stores (EUS
 position, `[w, x, y, z]` orientation), plus `venue_type` and the real `geo_ref_id`.
+Nothing in the Python half flips an axis.
 
-**v1 `georef.db`** poses are transposed, world-to-camera, in WDS/OpenCV, so three
-flips compose to reach production's convention:
-
-```
-position_eus    = ROT_WDS_TO_EUS @ inv(pose)[:3, 3]
-orientation_eus = quat(ROT_WDS_TO_EUS @ inv(pose)[:3, :3] @ ROT_OPENGL_TO_OPENCV)
-```
-
-`ROT_WDS_TO_EUS = diag(-1, -1, 1)`: East = -West, Up = -Down, South = South.
+The one surviving conversion lives in the TS backend
+(`toolbox/backend/src/map-manifest.ts`), whose routes speak WDS world-to-camera on
+the wire. It composes `diag(-1,-1,1)` and `diag(1,-1,-1)`; see its docstring.
 
 Also note: one id plays the role of **both** `geokeyframe_id` and
-`video_keyframe_id` here — the `geo_keyframes` index for v2, `GeoRefKeyframe.id` for
-v1. Production distinguishes them, we do not.
+`video_keyframe_id` here — the `geo_keyframes` index. Production distinguishes them,
+we do not.
 
 ## Gotchas
 
 1. **Never chain `python -m prepare` into ingest.** Its CLI numbers keyframes with
-   `enumerate`, so `video_keyframe_id` is a position, not the pose source's keyframe
-   id; it also passes no `crops_output_dir`, so no thumbnails are written.
+   `enumerate`, so `video_keyframe_id` is a position, not the manifest's keyframe id;
+   it also passes no `crops_output_dir`, so no thumbnails are written.
    `prepare_runner` resolves real ids first — the same thing the Django command does.
-   For v2, ids are `geo_keyframes` indices, so **re-exporting the manifest renumbers
-   them**: re-run prepare and ingest together.
+   Ids are `geo_keyframes` indices, so **re-exporting the manifest renumbers them**:
+   re-run prepare and ingest together.
 2. **`prepare_postprocess` is not optional, and skipping it is silent.** `prepare`
    emits no `depth` column; without it `bulk_copy` writes NULL, every
    `object_position` is NULL, enrichment filters every row, and `localize` returns
    `[]` — indistinguishable from "the model found nothing".
-3. **Three frame flips compose.** Drop one and objects land mirrored or 180° off with
-   no error. `toolbox/tests/test_frame_conventions.py` checks the rotation path
-   against the geodesy path; they share no code.
+3. **The EUS axis convention is unchecked elsewhere.** `toolbox/tests/test_manifest_frames.py`
+   pins it by making the geodesy path and the rotation path agree on a compass
+   bearing; they share no code. Read x/y/z in the wrong order and objects land
+   mirrored or 180° off, with no error.
 4. **Levels are heights above the origin.** `levels_for_altitudes` must be fed the
    EUS *up* coordinate (`eus_xyz[:, 1]`), never the WGS84 altitude. Get it backwards
    and every level is `None`, which silently disables the level-compatibility guard
    and merges objects across floors.
-5. **`geo_ref_id` must match on both sides.** It is the partition key of the table
-   and of the partial HNSW index; a mismatch between `ingest_cli --geo-ref-id` and
-   the config's `geo_ref_id` returns zero hits with no error. Both default to 1.
+5. **`geo_ref_id` comes from the manifest, and only from there.** It is the partition
+   key of the table and of the partial HNSW index, so a mismatch between what ingest
+   wrote and what the service queries returns zero hits with no error. That is why
+   neither `ingest_cli` nor `service` accepts it as an override any more.
 6. **`create_partial_hnsw_index` needs autocommit** (`CREATE INDEX CONCURRENTLY`
    cannot run in a transaction) and polls `pg_try_advisory_lock` rather than blocking
    — a blocking `pg_advisory_lock` would hold a transaction open and deadlock against
@@ -138,7 +135,9 @@ v1. Production distinguishes them, we do not.
 
 A map directory holds only the manifest; the pixels are fetched separately into
 `{map}/images/` and `{map}/depths/` — the names `prepare_runner.resolve_images_dir`
-and `prepare_postprocess.sample_depths` look for. The sibling repo
+and `prepare_postprocess.sample_depths` look for. Both resolve files **only** by the
+basename the manifest records; there is no id-derived fallback, because ids are array
+indices and `2.tif` would silently match the wrong keyframe. The sibling repo
 `../retrieve-map-data` does that (`retrieve_map_data.py <map_dir>`), reading the
 same manifest and using the same basename rule. `scripts/build-index.sh` fails
 early and by name when either directory is absent.

@@ -1,8 +1,8 @@
-import { readdir, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
-import path from "node:path";
 
 import { loadMapEntries, type MapEntry } from "./config.js";
+import { loadMapManifest } from "./map-manifest.js";
 import {
   parseArgs,
   proxyRequest,
@@ -30,29 +30,9 @@ function isObjectSearchRoute(pathname: string): boolean {
   return /^\/[^/]+\/object-search(?:\/|$)/.test(pathname);
 }
 
-async function isFile(target: string): Promise<boolean> {
-  try {
-    return (await stat(target)).isFile();
-  } catch {
-    return false;
-  }
-}
-
 async function isDirectory(target: string): Promise<boolean> {
   try {
     return (await stat(target)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-/** `{map_id}_{version}_{date}_{time}.json` — the v2 pose source. */
-const V2_MANIFEST_PATTERN = /^.+_\d+_\d{8}_\d{6}\.json$/;
-
-/** Whether the map directory holds a v2 manifest. */
-async function hasV2Manifest(mapPath: string): Promise<boolean> {
-  try {
-    return (await readdir(mapPath)).some((name) => V2_MANIFEST_PATTERN.test(name));
   } catch {
     return false;
   }
@@ -63,43 +43,37 @@ async function hasV2Manifest(mapPath: string): Promise<boolean> {
  *
  * Availability used to mean "has an object-search.db". That SQLite index is gone
  * (ADR 0002) — the index lives in pgvector now, which we cannot cheaply probe from
- * here. So the check is what this process *can* see on disk: the map directory, and a
- * pose source, without which nothing downstream resolves a position.
+ * here. So the check is what this process *can* see on disk: the map directory, and
+ * a **parseable v2 manifest**, without which nothing downstream resolves a position.
  *
- * A pose source is a **v2 manifest** or a legacy **`georef.db`**. Checking only the
- * latter would mark every current map unavailable.
+ * Parsing rather than name-matching is deliberate: a file whose name fits the
+ * pattern but whose contents are broken used to report `available: true` and then
+ * fail with a 500 deep inside a panel. The parse is cached by mtime, so the
+ * repeated polling of this route costs one read per manifest revision.
  *
  * A map that passes this check but was never ingested surfaces as an empty result
- * list rather than an error. That is the one honest gap in this signal, and it is
- * why the legacy index flag below is reported separately instead of being folded in.
+ * list rather than an error — the one honest gap in this signal. The explorer's own
+ * status route reports what *it* found (`metadata.parquet`, pgvector coverage), which
+ * is the place to look when a map opens but has no rows.
  */
 async function mapSummaries(configPath: string): Promise<Record<string, unknown>[]> {
   const maps = await loadMapEntries(configPath);
   return Promise.all(
     maps.map(async (map: MapEntry) => {
       let reason: string | null = null;
-      const hasGeorefDb = await isFile(path.join(map.path, "georef.db"));
       if (!(await isDirectory(map.path))) {
         reason = `Map directory not found: ${map.path}`;
-      } else if (!hasGeorefDb && !(await hasV2Manifest(map.path))) {
-        reason =
-          `No pose source in ${map.path} — expected a v2 manifest `
-          + "('{map_id}_{version}_{date}_{time}.json') or a legacy georef.db. "
-          + "Keyframe poses come from one of them.";
+      } else {
+        try {
+          await loadMapManifest(map.path);
+        } catch (error) {
+          reason = error instanceof Error ? error.message : String(error);
+        }
       }
-      const legacyIndexPath =
-        map.object_search_index_path ?? path.join(map.path, "object-search.db");
       return {
         ...map,
         object_search_available: reason == null,
         unavailable_reason: reason,
-        // Drives the index-explorer panel, which still reads the retired SQLite
-        // index and is therefore only usable for pre-migration maps.
-        legacy_index_available: await isFile(legacyIndexPath),
-        // The workbench routes that read georef.db directly (keyframe graph, depth
-        // pin, view cone, world-point projection) have no v2 reader yet, so they are
-        // v1-only for now. Reported so the UI can say why rather than just fail.
-        georef_db_available: hasGeorefDb,
       };
     }),
   );

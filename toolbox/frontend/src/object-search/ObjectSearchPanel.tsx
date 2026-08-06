@@ -7,17 +7,13 @@ import type { MapSummary } from "../api";
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
 import type { FocusTarget, LivemapMarker, LivemapSegment } from "../annotations/types";
 import {
-  fetchIndexStatus,
   fetchKeyframeGraph,
+  fetchMetadataStatus,
   indexKeyframeEquirectPreviewUrl,
 } from "../index-explorer/api";
-import type { IndexStatusResponse, KeyframeGraphResponse } from "../index-explorer/types";
-import {
-  fetchCutoutDetections,
-  runObjectSearch,
-} from "./api";
+import type { KeyframeGraphResponse, MetadataStatusResponse } from "../index-explorer/types";
+import { runObjectSearch } from "./api";
 import type {
-  DetectionRecord,
   EnrichedResult,
   KeyframeGroup,
   ObjectLocalization,
@@ -229,8 +225,6 @@ function ObjectSearchPanel(props: Props) {
 
   const [selectedKeyframeId, setSelectedKeyframeId] = useState<string | null>(null);
   const [selectedCutoutId, setSelectedCutoutId] = useState<string | null>(null);
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
-  const [detections, setDetections] = useState<DetectionRecord[]>([]);
   const [selectedLocIdx, setSelectedLocIdx] = useState(0);
   const [selectedObsIdx, setSelectedObsIdx] = useState(0);
   const [clusterFocus, setClusterFocus] = useState<
@@ -240,7 +234,7 @@ function ObjectSearchPanel(props: Props) {
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   // ── New: keyframe / map state ──────────────────────────────────────────────
-  const [indexStatus, setIndexStatus] = useState<IndexStatusResponse | null>(null);
+  const [indexStatus, setIndexStatus] = useState<MetadataStatusResponse | null>(null);
   const [keyframeGraph, setKeyframeGraph] = useState<KeyframeGraphResponse | null>(null);
   const [showKeyframeMarkers, setShowKeyframeMarkers] = useState(true);
   const [showKeyframeGraph, setShowKeyframeGraph] = useState(true);
@@ -275,7 +269,9 @@ function ObjectSearchPanel(props: Props) {
   useEffect(() => {
     if (!props.isMapKnown) return;
     let cancelled = false;
-    fetchIndexStatus(props.mapId, null)
+    // Only `markers` is used here — every keyframe with a pose, which is now the
+    // case whether or not the map has object-search metadata.
+    fetchMetadataStatus(props.mapId, null)
       .then((s) => {
         if (!cancelled) setIndexStatus(s);
       })
@@ -315,25 +311,6 @@ function ObjectSearchPanel(props: Props) {
       null
     );
   }, [selectedGroup, selectedCutoutId]);
-
-  useEffect(() => {
-    if (!selectedCutout) {
-      setDetections([]);
-      return;
-    }
-    const cutoutId = selectedCutout.cutout_id ?? selectedCutout.id;
-    let cancelled = false;
-    fetchCutoutDetections(props.mapId, cutoutId)
-      .then((items) => {
-        if (!cancelled) setDetections(items);
-      })
-      .catch(() => {
-        if (!cancelled) setDetections([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.mapId, selectedCutout]);
 
   const allLocalizations =
     result && result.mode !== "text" ? result.localizations : ([] as ObjectLocalization[]);
@@ -663,15 +640,9 @@ function ObjectSearchPanel(props: Props) {
     return null;
   }, [clusterFocus, activeKeyframeMarker, result, selectedGroup, selectedLoc]);
 
-  const previewUrl =
-    selectedCutout?.preview_path && selectedCutout.cutout_id
-      ? cutoutPreviewUrl(
-          props.mapId,
-          selectedCutout.cutout_id ?? selectedCutout.id,
-          selectedCutout.preview_path,
-          selectedObjectId,
-        )
-      : null;
+  const previewUrl = selectedCutout?.preview_path
+    ? cutoutPreviewUrl(props.mapId, selectedCutout.preview_path)
+    : null;
 
   // ── Submit ─────────────────────────────────────────────────────────────────
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -694,7 +665,6 @@ function ObjectSearchPanel(props: Props) {
       const next = await runObjectSearch({
         mapId: props.mapId,
         mapPath: props.map.path,
-        indexPath: props.map.object_search_index_path,
         searchMode,
         queryInputMode,
         text: text.trim(),
@@ -711,7 +681,6 @@ function ObjectSearchPanel(props: Props) {
       setResult(next);
       setSelectedKeyframeId(null);
       setSelectedCutoutId(null);
-      setSelectedObjectId(null);
       setSelectedLocIdx(0);
       setSelectedObsIdx(0);
       setClusterFocus(null);
@@ -802,7 +771,6 @@ function ObjectSearchPanel(props: Props) {
       if (result.mode === "text") {
         setSelectedKeyframeId(markerId);
         setSelectedCutoutId(null);
-        setSelectedObjectId(null);
       }
     },
     [
@@ -1047,7 +1015,7 @@ function ObjectSearchPanel(props: Props) {
                   initialYawRad={initialPhotosphereView.yawRad}
                   initialTextureYRatio={initialPhotosphereView.textureYRatio}
                   detections={[]}
-                  selectedObjectId={null}
+                  selectedRowIndex={null}
                   depthPin={null}
                   polygonForDetection={() => []}
                   onDepthPin={() => {}}
@@ -1463,9 +1431,6 @@ function ObjectSearchPanel(props: Props) {
                     selectedCutout={selectedCutout}
                     selectedCutoutId={selectedCutoutId}
                     onSelectCutout={setSelectedCutoutId}
-                    selectedObjectId={selectedObjectId}
-                    onSelectObject={setSelectedObjectId}
-                    detections={detections}
                     previewUrl={previewUrl}
                   />
                 </section>
@@ -1692,9 +1657,6 @@ function TextInspector(props: {
   selectedCutout: EnrichedResult | null;
   selectedCutoutId: string | null;
   onSelectCutout: (id: string) => void;
-  selectedObjectId: string | null;
-  onSelectObject: (id: string | null) => void;
-  detections: DetectionRecord[];
   previewUrl: string | null;
 }) {
   if (!props.group) {
@@ -1719,22 +1681,6 @@ function TextInspector(props: {
           {cutoutOptions.map((id) => (
             <option key={id} value={id}>
               {id}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Object overlay
-        <select
-          value={props.selectedObjectId ?? ""}
-          onChange={(event) =>
-            props.onSelectObject(event.target.value ? event.target.value : null)
-          }
-        >
-          <option value="">All boxes</option>
-          {props.detections.map((det) => (
-            <option key={det.id} value={det.id}>
-              {det.label ?? det.id}
             </option>
           ))}
         </select>
@@ -1854,7 +1800,6 @@ function LocalizeInspector(props: {
                   {loc.observations.map((obs, obsIndex) => {
                     const isSelectedDetection =
                       isSelectedCluster && obsIndex === props.selectedObsIdx;
-                    const objectId = `object-${obs.objectIdx}`;
                     return (
                       <button
                         key={`${locIndex}-${obs.objectIdx}-${obsIndex}`}
@@ -1866,14 +1811,7 @@ function LocalizeInspector(props: {
                       >
                         <span className="object-search-detection-image-wrap">
                           <img
-                            src={cutoutPreviewUrl(
-                              props.mapId,
-                              obs.cutoutId,
-                              null,
-                              objectId,
-                              true,
-                              obs.bbox,
-                            )}
+                            src={cutoutPreviewUrl(props.mapId, obs.thumbnail)}
                             alt={`Detection ${obsIndex + 1} in cluster ${locIndex + 1}`}
                             loading="lazy"
                           />
@@ -1927,15 +1865,7 @@ function SelectedObservationPanel(props: {
     );
   }
 
-  const objectId = `object-${props.observation.objectIdx}`;
-  const previewUrl = cutoutPreviewUrl(
-    props.mapId,
-    props.observation.cutoutId,
-    null,
-    objectId,
-    true,
-    props.observation.bbox,
-  );
+  const previewUrl = cutoutPreviewUrl(props.mapId, props.observation.thumbnail);
 
   return (
     <section className="object-search-selected-observation">

@@ -70,8 +70,8 @@ export function buildAnnotationGeoJSON(
         ? {
             source_keyframe_id: annotation.source.keyframeId,
             source_projection: annotation.source.projection,
-            ...(annotation.source.cutoutId
-              ? { source_cutout_id: annotation.source.cutoutId }
+            ...(annotation.source.rowIndex !== null
+              ? { source_row_index: annotation.source.rowIndex }
               : {}),
             source_x_ratio: annotation.source.xRatio,
             source_y_ratio: annotation.source.yRatio,
@@ -213,9 +213,12 @@ export function parseAnnotationGeoJSON(
         ? {
             keyframeId: sourceKeyframeId,
             projection: sourceProjection,
-            cutoutId:
-              typeof properties.source_cutout_id === "string"
-                ? properties.source_cutout_id
+            // `source_cutout_id` is the pre-v2 key: a standalone cutout id, which was
+            // numeric in practice. Read it so old ground truth still loads.
+            rowIndex: Number.isInteger(Number(properties.source_row_index))
+              ? Number(properties.source_row_index)
+              : Number.isInteger(Number(properties.source_cutout_id))
+                ? Number(properties.source_cutout_id)
                 : null,
             xRatio: sourceValues[0],
             yRatio: sourceValues[1],

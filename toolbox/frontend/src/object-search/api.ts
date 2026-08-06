@@ -1,6 +1,5 @@
 import type {
   ApiDebugInfo,
-  DetectionRecord,
   EnrichedResult,
   KeyframeDebugMetadata,
   ObjectLocalization,
@@ -110,6 +109,8 @@ function parseObservation(item: Record<string, unknown>): ObjectObservation | nu
     objectIdx: Number(item.object_idx ?? 0),
     cutoutId: String(item.cutout_id ?? ""),
     keyframeId: String(item.keyframe_id ?? ""),
+    thumbnail:
+      typeof item.thumbnail === "string" && item.thumbnail.length ? item.thumbnail : null,
     coordinates:
       coordinates && coordinates.length >= 3
         ? [Number(coordinates[0]), Number(coordinates[1]), Number(coordinates[2])]
@@ -287,38 +288,6 @@ export function enrichedFromCandidates(raw: unknown): EnrichedResult[] {
       resolution_status: lat != null && lon != null ? "resolved" : "unresolved",
       resolution_error: null,
     };
-  });
-}
-
-export async function fetchCutoutDetections(
-  mapId: string,
-  cutoutId: string,
-): Promise<DetectionRecord[]> {
-  const data = await fetchJson(
-    `/ui/api/maps/${encodeURIComponent(mapId)}/cutouts/${encodeURIComponent(cutoutId)}/detections`,
-  );
-  if (!data || typeof data !== "object" || !Array.isArray((data as { detections?: unknown }).detections)) {
-    return [];
-  }
-  return (data as { detections: unknown[] }).detections.flatMap((item) => {
-    if (!item || typeof item !== "object") {
-      return [];
-    }
-    const record = item as Record<string, unknown>;
-    const bbox = parseBbox(record);
-    if (!bbox) {
-      return [];
-    }
-    return [{
-      id: String(record.id ?? ""),
-      label: record.label == null ? null : String(record.label),
-      confidence:
-        record.confidence == null || !Number.isFinite(Number(record.confidence))
-          ? null
-          : Number(record.confidence),
-      source: record.source == null ? null : String(record.source),
-      bbox,
-    }];
   });
 }
 

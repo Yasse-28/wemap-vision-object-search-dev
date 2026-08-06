@@ -23,23 +23,25 @@ import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnot
 import type { LivemapMarker, LivemapPolygon, LivemapSegment } from "../annotations/types";
 import DismissibleAlert from "../DismissibleAlert";
 import {
-  fetchIndexCutout,
-  fetchIndexObjects,
-  fetchIndexStatus,
   fetchKeyframeGraph,
-  indexCutoutPreviewUrl,
+  fetchMetadataRow,
+  fetchMetadataRows,
+  fetchMetadataStatus,
   indexKeyframeDepthPreviewUrl,
   indexKeyframeEquirectPreviewUrl,
   projectWorldPoint,
   resolveDepthPin,
+  rowRenderUrl,
+  rowThumbnailUrl,
 } from "../index-explorer/api";
 import type {
-  CutoutIndexPayload,
   DepthPinResponse,
-  IndexObjectRecord,
-  IndexStatusResponse,
-  IndexSummary,
   KeyframeGraphResponse,
+  KeyframeSummary,
+  MetadataRowDetail,
+  MetadataRowRecord,
+  MetadataStatusResponse,
+  MetadataSummary,
 } from "../index-explorer/types";
 import BboxPostProcessControls from "./BboxPostProcessControls";
 import { bboxArea, postProcessDetections } from "./bboxPostProcess";
@@ -53,11 +55,8 @@ type Props = {
   isMapKnown: boolean;
 };
 
-type CutoutRow = {
-  keyframeId: string;
-  cutoutId: string;
-  objectCount: number;
-};
+/** How a keyframe stands with respect to the live pgvector index. */
+type KeyframeIndexState = "indexed" | "pruned" | "not-prepared" | "unknown";
 
 type SortMode = "keyframe" | "objects-desc" | "objects-asc";
 type PanoramaViewMode = "image" | "depth";
@@ -65,7 +64,7 @@ type DepthImagePin = {
   requestId: string;
   source: "erp" | "cutout";
   keyframeId: string;
-  cutoutId: string | null;
+  rowIndex: number | null;
   xRatio: number;
   yRatio: number;
   erpXRatio: number | null;
@@ -86,13 +85,16 @@ type PhotosphereNavigationCandidate = {
   localZ: number;
 };
 
-const PAGE_SIZE_OPTIONS = [6, 12, 24, 48];
+// Keyframes per page, not proposals: one ERP carries 70-270 proposals, so the old
+// [6, 12, 24, 48] would have put well over a thousand thumbnails in one grid.
+const PAGE_SIZE_OPTIONS = [1, 2, 4, 8];
 const COLUMN_OPTIONS = [1, 2, 3, 4, 5];
 const KEYFRAME_MARKER_COLOR = "#9ca3af";
 const KEYFRAME_MARKER_SELECTED_COLOR = "#16a34a";
 const KEYFRAME_MARKER_RADIUS = 6;
 const KEYFRAME_MARKER_SELECTED_RADIUS = 8;
-const CUBEMAP_FACE_ORDER = ["front", "back", "left", "right", "top", "bottom"] as const;
+/** Keyframes with rows in the parquet but pruned from pgvector at ingest time. */
+const KEYFRAME_MARKER_PRUNED_COLOR = "#f97316";
 const EquirectPhotoSphereViewer = lazy(() => import("./EquirectPhotoSphereViewer"));
 const DEPTH_PIN_MIN_DEPTH_M = 0.25;
 const VIEW_CONE_HALF_ANGLE_DEG = 25;
@@ -163,92 +165,42 @@ function projectKeyframeToLocalFloor(
   };
 }
 
-function buildCutoutRows(summary: IndexSummary): CutoutRow[] {
-  return summary.keyframe_ids.flatMap((keyframeId) =>
-    (summary.cutout_ids_by_keyframe[keyframeId] ?? []).map((cutoutId) => ({
-      keyframeId,
-      cutoutId,
-      objectCount: summary.object_count_by_cutout[cutoutId] ?? 0,
-    })),
-  );
-}
-
-function manifestNumber(manifest: Record<string, unknown> | null, key: string, fallback: number): number {
-  const value = Number(manifest?.[key]);
-  return Number.isFinite(value) ? value : fallback;
-}
-
-function cubemapFace(cutoutId: string, manifest: Record<string, unknown> | null): string {
-  const stride = Math.max(1, manifestNumber(manifest, "id_stride", 1024));
-  const localIndex = Number(cutoutId) % stride;
-  return CUBEMAP_FACE_ORDER[localIndex] ?? "front";
-}
-
-function cubemapPixelToEquirect(
-  u: number,
-  v: number,
-  faceName: string,
-  faceSize: number,
-  fovDeg: number,
-): [number, number] {
-  const f = 0.5 * faceSize / Math.tan(0.5 * fovDeg * Math.PI / 180);
-  const c = (faceSize - 1) / 2;
-  let x = (u - c) / f;
-  let y = (v - c) / f;
-  let z = 1;
-  const norm = Math.hypot(x, y, z);
-  x /= norm;
-  y /= norm;
-  z /= norm;
-  let px = x;
-  let py = y;
-  let pz = z;
-  switch (faceName) {
-    case "back":
-      px = -x;
-      pz = -z;
-      break;
-    case "left":
-      px = -z;
-      pz = x;
-      break;
-    case "right":
-      px = z;
-      pz = -x;
-      break;
-    case "top":
-      py = -z;
-      pz = y;
-      break;
-    case "bottom":
-      py = z;
-      pz = -y;
-      break;
-  }
-  const lon = Math.atan2(px, pz);
-  const lat = Math.asin(Math.max(-1, Math.min(1, py)));
-  return [((lon / (2 * Math.PI) + 0.5) % 1 + 1) % 1, lat / Math.PI + 0.5];
-}
-
-function bboxPolygonRatios(
-  item: IndexObjectRecord,
-  manifest: Record<string, unknown> | null,
-): Array<[number, number]> {
-  const faceSize = Math.max(1, manifestNumber(manifest, "cubemap_face_size", 512));
-  const fov = Math.max(1, manifestNumber(manifest, "cubemap_fov_deg", 90));
-  const faceName = cubemapFace(item.cutout_id, manifest);
-  const corners: Array<[number, number]> = [
-    [item.bbox[0], item.bbox[1]],
-    [item.bbox[2], item.bbox[1]],
-    [item.bbox[2], item.bbox[3]],
-    [item.bbox[0], item.bbox[3]],
+/**
+ * The four corners of a row's reconstructed ERP box, in texture ratios.
+ *
+ * The box arrives ready-made in `erp_bbox_ratios`, so there is no geometry here any
+ * more — the 45 lines of cubemap algebra this replaces lived in two copies (here and
+ * in the backend) and had to agree. `u` is intentionally left unwrapped: the viewer
+ * reads it as a yaw, where 1.02 and 0.02 are the same direction.
+ */
+function bboxPolygonRatios(row: MetadataRowRecord): Array<[number, number]> {
+  const [u0, v0, u1, v1] = row.erp_bbox_ratios;
+  return [
+    [u0, v0],
+    [u1, v0],
+    [u1, v1],
+    [u0, v1],
   ];
-  return corners.map(([x, y]) => cubemapPixelToEquirect(x, y, faceName, faceSize, fov));
+}
+
+/**
+ * Tri-state per keyframe, because "has a pose", "has proposals" and "is in the live
+ * index" are three different things and conflating them is what this panel exists to
+ * prevent. `unknown` means Postgres did not answer — never an error.
+ */
+function keyframeIndexState(summary: KeyframeSummary | undefined): KeyframeIndexState {
+  if (!summary) {
+    return "not-prepared";
+  }
+  if (summary.ingested === null) {
+    return "unknown";
+  }
+  return summary.ingested > 0 ? "indexed" : "pruned";
 }
 
 
 function ObjectSearchExplorerPanel(props: Props) {
-  const [status, setStatus] = useState<IndexStatusResponse | null>(null);
+  const [status, setStatus] = useState<MetadataStatusResponse | null>(null);
   const [keyframeGraph, setKeyframeGraph] = useState<KeyframeGraphResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -262,16 +214,15 @@ function ObjectSearchExplorerPanel(props: Props) {
     readStoredBoolean(KEYFRAME_GRAPH_STORAGE_KEY, true),
   );
   const [sortMode, setSortMode] = useState<SortMode>("keyframe");
-  const [pageSize, setPageSize] = useState(12);
+  const [pageSize, setPageSize] = useState(1);
   const [columns, setColumns] = useState(3);
   const [page, setPage] = useState(1);
   const [visualSplitPercent, setVisualSplitPercent] = useState(45);
   const [isResizingVisualSplit, setIsResizingVisualSplit] = useState(false);
 
-  const [selectedCutoutId, setSelectedCutoutId] = useState<string | null>(null);
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
-  const [cutoutPayload, setCutoutPayload] = useState<CutoutIndexPayload | null>(null);
-  const [isLoadingCutout, setIsLoadingCutout] = useState(false);
+  const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
+  const [rowDetail, setRowDetail] = useState<MetadataRowDetail | null>(null);
+  const [isLoadingRow, setIsLoadingRow] = useState(false);
   const [equirectPreviewError, setEquirectPreviewError] = useState<string | null>(null);
   const [equirectPreviewSrc, setEquirectPreviewSrc] = useState<string | null>(null);
   const [equirectPreviewKeyframeId, setEquirectPreviewKeyframeId] = useState<string | null>(null);
@@ -296,18 +247,32 @@ function ObjectSearchExplorerPanel(props: Props) {
   const preservedCompassBearingDegRef = useRef<number | null>(null);
   const preservedTextureYRatioRef = useRef(0.5);
   const visualSplitRef = useRef<HTMLDivElement | null>(null);
-  const detectionRowRefs = useRef(new Map<string, HTMLTableRowElement>());
+  const detectionRowRefs = useRef(new Map<number, HTMLTableRowElement>());
   const shouldFocusSelectedDetectionRef = useRef(false);
   const { params: bboxPostProcess, setParams: setBboxPostProcess, resetParams: resetBboxPostProcess } =
     useBboxPostProcessParams();
-  const [indexObjects, setIndexObjects] = useState<IndexObjectRecord[]>([]);
+  const [metadataRows, setMetadataRows] = useState<MetadataRowRecord[]>([]);
   const annotation = useExplorerAnnotationWorkspace(props.mapId);
 
-  const summary = status?.summary ?? null;
-  const manifest = summary?.manifest ?? null;
+  const summary: MetadataSummary | null = status?.summary ?? null;
   const polygonForPhotosphereDetection = useCallback(
-    (item: IndexObjectRecord) => bboxPolygonRatios(item, manifest),
-    [manifest],
+    (row: MetadataRowRecord) => bboxPolygonRatios(row),
+    [],
+  );
+  /**
+   * `indexOf` over a 400-element array, in the middle of a render, is how this used
+   * to answer "is this keyframe indexed?" — several times per frame.
+   */
+  const keyframeSummaryById = useMemo(() => {
+    const byId = new Map<string, KeyframeSummary>();
+    for (const item of summary?.keyframes ?? []) {
+      byId.set(item.id, item);
+    }
+    return byId;
+  }, [summary?.keyframes]);
+  const preparedKeyframeIds = useMemo(
+    () => (summary?.keyframes ?? []).map((item) => item.id),
+    [summary?.keyframes],
   );
 
   useEffect(() => {
@@ -328,7 +293,7 @@ function ObjectSearchExplorerPanel(props: Props) {
     let cancelled = false;
     setIsLoading(true);
     setError(null);
-    fetchIndexStatus(props.mapId, null)
+    fetchMetadataStatus(props.mapId, null)
       .then((payload) => {
         if (cancelled) {
           return;
@@ -427,61 +392,39 @@ function ObjectSearchExplorerPanel(props: Props) {
     };
   }, [props.mapId, props.isMapKnown]);
 
-  const boxCountsByCutout = useMemo(() => {
-    const grouped = new Map<string, IndexObjectRecord[]>();
-    for (const item of indexObjects) {
-      const list = grouped.get(item.cutout_id) ?? [];
-      list.push(item);
-      grouped.set(item.cutout_id, list);
+  /**
+   * The page's rows after post-processing, grouped by keyframe.
+   *
+   * One row is one proposal *and* one detection in v2, so the old three-level
+   * `keyframe → cutout → objects` walk collapses to a single grouping.
+   */
+  const filteredRowsByKeyframe = useMemo(() => {
+    const grouped = new Map<string, MetadataRowRecord[]>();
+    for (const row of metadataRows) {
+      const list = grouped.get(row.keyframe_id) ?? [];
+      list.push(row);
+      grouped.set(row.keyframe_id, list);
     }
-    const counts = new Map<string, { raw: number; filtered: number }>();
-    for (const [cutoutId, detections] of grouped) {
-      const filtered = postProcessDetections(detections, bboxPostProcess);
-      counts.set(cutoutId, { raw: detections.length, filtered: filtered.length });
-    }
-    return counts;
-  }, [indexObjects, bboxPostProcess]);
-
-  const filteredObjectsByCutout = useMemo(() => {
-    const grouped = new Map<string, IndexObjectRecord[]>();
-    for (const item of indexObjects) {
-      const list = grouped.get(item.cutout_id) ?? [];
-      list.push(item);
-      grouped.set(item.cutout_id, list);
-    }
-    const out = new Map<string, IndexObjectRecord[]>();
-    for (const [cutoutId, detections] of grouped) {
-      out.set(cutoutId, postProcessDetections(detections, bboxPostProcess));
+    const out = new Map<string, MetadataRowRecord[]>();
+    for (const [keyframeId, rows] of grouped) {
+      out.set(keyframeId, postProcessDetections(rows, bboxPostProcess));
     }
     return out;
-  }, [indexObjects, bboxPostProcess]);
+  }, [metadataRows, bboxPostProcess]);
 
-  const allRows = useMemo(() => {
-    return summary ? buildCutoutRows(summary) : [];
-  }, [summary]);
-
-  const visibleRows = useMemo(() => {
-    const rows = allRows
-      .filter((row) => keyframeFilter === "all" || row.keyframeId === keyframeFilter)
-      .filter((row) => includeEmpty || row.objectCount > 0);
-    const sortedRows = [...rows];
+  /** Keyframes that have proposals, in parquet order — the browsable unit. */
+  const visibleKeyframes = useMemo(() => {
+    const keyframes = (summary?.keyframes ?? [])
+      .filter((item) => keyframeFilter === "all" || item.id === keyframeFilter)
+      .filter((item) => includeEmpty || item.row_count > 0);
+    const sorted = [...keyframes];
     if (sortMode === "objects-desc") {
-      sortedRows.sort(
-        (a, b) =>
-          b.objectCount - a.objectCount ||
-          a.keyframeId.localeCompare(b.keyframeId) ||
-          a.cutoutId.localeCompare(b.cutoutId),
-      );
+      sorted.sort((a, b) => b.row_count - a.row_count || a.id.localeCompare(b.id));
     } else if (sortMode === "objects-asc") {
-      sortedRows.sort(
-        (a, b) =>
-          a.objectCount - b.objectCount ||
-          a.keyframeId.localeCompare(b.keyframeId) ||
-          a.cutoutId.localeCompare(b.cutoutId),
-      );
+      sorted.sort((a, b) => a.row_count - b.row_count || a.id.localeCompare(b.id));
     }
-    return sortedRows;
-  }, [allRows, includeEmpty, keyframeFilter, sortMode]);
+    return sorted;
+  }, [summary?.keyframes, includeEmpty, keyframeFilter, sortMode]);
 
   const emmid = props.map?.emmid ?? null;
   const { height: livemapFrameHeight, isDragging: isResizingLivemap, startResize: startLivemapResize } =
@@ -489,19 +432,42 @@ function ObjectSearchExplorerPanel(props: Props) {
   const { height: equirectFrameHeight, isDragging: isResizingEquirect, startResize: startEquirectResize } =
     useEquirectFrameHeight();
 
-  const selectedKeyframeForMap = keyframeFilter !== "all" ? keyframeFilter : null;
-  const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const pageRows = visibleRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const pageKeyframeIds = [...new Set(pageRows.map((row) => row.keyframeId))];
-  const pageKeyframeIdsKey = pageKeyframeIds.join("|");
-  const selectedRow =
-    allRows.find((row) => row.cutoutId === selectedCutoutId) ?? null;
-  const selectedRowOnPage = pageRows.find((row) => row.cutoutId === selectedCutoutId) ?? null;
-  const activeRow = selectedRowOnPage ?? pageRows[0] ?? null;
+  const firstNavigableKeyframeId = useMemo(() => {
+    let best: string | null = null;
+    for (const marker of status?.markers ?? []) {
+      if (best === null || Number(marker.id) < Number(best)) {
+        best = marker.id;
+      }
+    }
+    return best;
+  }, [status?.markers]);
 
+  const selectedKeyframeForMap = keyframeFilter !== "all" ? keyframeFilter : null;
+  // Pagination is keyframe-major: one ERP and its proposals is how the panel is
+  // actually used, and it keeps the row fetch to one request per page.
+  const totalPages = Math.max(1, Math.ceil(visibleKeyframes.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const pageKeyframes = visibleKeyframes.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize,
+  );
+  const pageKeyframeIds = pageKeyframes.map((item) => item.id);
+  const pageKeyframeIdsKey = pageKeyframeIds.join("|");
+  const pageRows = pageKeyframeIds.flatMap(
+    (keyframeId) => filteredRowsByKeyframe.get(keyframeId) ?? [],
+  );
+  const pageRowIndexKey = pageRows.map((row) => row.row_index).join("|");
+  const selectedPageRow =
+    pageRows.find((row) => row.row_index === selectedRowIndex) ?? null;
+  const activeRow = selectedPageRow ?? pageRows[0] ?? null;
+
+  // Falls back to the first keyframe with a pose, so the panorama, the depth preview
+  // and the depth pin still work on a map that was never prepared — that is the whole
+  // point of not gating this panel on the metadata.
   const activeKeyframeId =
-    keyframeFilter !== "all" ? keyframeFilter : activeRow?.keyframeId ?? null;
+    keyframeFilter !== "all"
+      ? keyframeFilter
+      : activeRow?.keyframe_id ?? pageKeyframeIds[0] ?? firstNavigableKeyframeId;
   const activeKeyframeMarker =
     status?.markers?.find((marker) => marker.id === activeKeyframeId) ?? null;
 
@@ -545,28 +511,37 @@ function ObjectSearchExplorerPanel(props: Props) {
   ]);
 
   const graphHoverMarkers: LivemapMarker[] = useMemo(() => {
-    if (!showKeyframeGraph || !status?.markers || !summary?.keyframe_ids.length) {
+    if (!showKeyframeGraph || !status?.markers?.length) {
       return [];
     }
-    const indexedKeyframes = new Set(summary.keyframe_ids);
-    return status.markers
-      .filter((marker) => indexedKeyframes.has(marker.id))
-      .map((marker) => {
-        const isSelected = marker.id === selectedKeyframeForMap;
-        return {
-          id: marker.id,
-          latitude: marker.latitude,
-          longitude: marker.longitude,
-          level: marker.level,
-          color: isSelected ? KEYFRAME_MARKER_SELECTED_COLOR : KEYFRAME_MARKER_COLOR,
-          radius: isSelected ? KEYFRAME_MARKER_SELECTED_RADIUS : KEYFRAME_MARKER_RADIUS,
-          scaleWithZoom: true,
-        };
-      });
+    // Keyframes with no proposals at all are dropped; those that have proposals but
+    // were pruned at ingest are shown in a third colour rather than passed off as
+    // indexed, which is the distinction the pgvector coverage exists to expose.
+    return status.markers.flatMap((marker) => {
+      const keyframe = keyframeSummaryById.get(marker.id);
+      if (!keyframe) {
+        return [];
+      }
+      const isSelected = marker.id === selectedKeyframeForMap;
+      const state = keyframeIndexState(keyframe);
+      return [{
+        id: marker.id,
+        latitude: marker.latitude,
+        longitude: marker.longitude,
+        level: marker.level,
+        color: isSelected
+          ? KEYFRAME_MARKER_SELECTED_COLOR
+          : state === "pruned"
+            ? KEYFRAME_MARKER_PRUNED_COLOR
+            : KEYFRAME_MARKER_COLOR,
+        radius: isSelected ? KEYFRAME_MARKER_SELECTED_RADIUS : KEYFRAME_MARKER_RADIUS,
+        scaleWithZoom: true,
+      }];
+    });
   }, [
     showKeyframeGraph,
     status?.markers,
-    summary?.keyframe_ids,
+    keyframeSummaryById,
     selectedKeyframeForMap,
   ]);
 
@@ -575,7 +550,7 @@ function ObjectSearchExplorerPanel(props: Props) {
   }, [depthPin?.requestId]);
 
   const showLivemapResizer =
-    emmid !== null && !!summary?.keyframe_ids.length && (status?.markers?.length ?? 0) > 0;
+    emmid !== null && (status?.markers?.length ?? 0) > 0;
   const initialPhotosphereView = useMemo(() => {
     const headingDeg = activeKeyframeMarker?.heading_deg;
     const bearingDeg = preservedCompassBearingDegRef.current;
@@ -604,11 +579,11 @@ function ObjectSearchExplorerPanel(props: Props) {
     ) {
       return [];
     }
-    const indexedKeyframes = new Set(summary?.keyframe_ids ?? []);
     return status.markers.flatMap((marker) => {
+      // Any keyframe with a pose is navigable: walking the panorama does not need
+      // the map to have been prepared, let alone ingested.
       if (
         marker.id === activeKeyframeId ||
-        !indexedKeyframes.has(marker.id) ||
         marker.level !== activeKeyframeMarker.level
       ) {
         return [];
@@ -634,7 +609,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     activeKeyframeId,
     activeKeyframeMarker,
     status?.markers,
-    summary?.keyframe_ids,
   ]);
 
   const cone = useMemo<LivemapCone | null>(() => {
@@ -666,12 +640,12 @@ function ObjectSearchExplorerPanel(props: Props) {
     if (!showKeyframeGraph || !keyframeGraph?.available) {
       return [];
     }
-    const indexedKeyframes = new Set(summary?.keyframe_ids ?? []);
     return keyframeGraph.edges.flatMap((edge) => {
       if (
+        preparedKeyframeIds.length &&
         edge.keyframe_id_1 &&
         edge.keyframe_id_2 &&
-        (!indexedKeyframes.has(edge.keyframe_id_1) || !indexedKeyframes.has(edge.keyframe_id_2))
+        (!keyframeSummaryById.has(edge.keyframe_id_1) || !keyframeSummaryById.has(edge.keyframe_id_2))
       ) {
         return [];
       }
@@ -689,7 +663,7 @@ function ObjectSearchExplorerPanel(props: Props) {
         interactive: true,
       }));
     });
-  }, [keyframeGraph, showKeyframeGraph, summary?.keyframe_ids]);
+  }, [keyframeGraph, showKeyframeGraph, keyframeSummaryById, preparedKeyframeIds]);
   const keyframeLinkSegments: LivemapSegment[] = useMemo(() => {
     if (!keyframeLink) {
       return [];
@@ -727,16 +701,15 @@ function ObjectSearchExplorerPanel(props: Props) {
 
   const selectGraphKeyframe = useCallback(
     (keyframeId: string) => {
-      if (!summary?.keyframe_ids.includes(keyframeId)) {
+      if (!status?.markers?.some((marker) => marker.id === keyframeId)) {
         return;
       }
       setKeyframeFilter(keyframeId);
-      setSelectedCutoutId(null);
-      setSelectedObjectId(null);
+      setSelectedRowIndex(null);
       setDepthPin(null);
       setDepthPinPopoverOpen(false);
     },
-    [summary?.keyframe_ids],
+    [status?.markers],
   );
 
   const handlePhotosphereViewChange = useCallback(
@@ -780,7 +753,7 @@ function ObjectSearchExplorerPanel(props: Props) {
             ...current,
             source: "erp",
             keyframeId: activeKeyframeId,
-            cutoutId: null,
+            rowIndex: null,
             xRatio: payload.erp_u,
             yRatio: payload.erp_v,
             erpXRatio: payload.erp_u,
@@ -803,7 +776,7 @@ function ObjectSearchExplorerPanel(props: Props) {
             ...current,
             source: "erp",
             keyframeId: activeKeyframeId,
-            cutoutId: null,
+            rowIndex: null,
             erpXRatio: null,
             erpYRatio: null,
             status: "error",
@@ -823,21 +796,24 @@ function ObjectSearchExplorerPanel(props: Props) {
     props.mapId,
   ]);
 
+  // One request for the whole page, where the cubemap explorer issued one per
+  // keyframe per page. The backend holds the parsed parquet, so this is a slice.
   useEffect(() => {
     if (!props.isMapKnown || !status?.available || !pageKeyframeIds.length) {
-      setIndexObjects([]);
+      setMetadataRows([]);
       return;
     }
     let cancelled = false;
-    Promise.all(pageKeyframeIds.map((keyframeId) => fetchIndexObjects(props.mapId, keyframeId)))
-      .then((groups) => {
+    fetchMetadataRows(props.mapId, { keyframeIds: pageKeyframeIds })
+      .then((payload) => {
         if (!cancelled) {
-          setIndexObjects(groups.flat());
+          setMetadataRows(payload.rows);
         }
       })
-      .catch(() => {
+      .catch((err: Error) => {
         if (!cancelled) {
-          setIndexObjects([]);
+          setMetadataRows([]);
+          setError(err.message);
         }
       });
     return () => {
@@ -845,34 +821,37 @@ function ObjectSearchExplorerPanel(props: Props) {
     };
   }, [props.mapId, props.isMapKnown, status?.available, pageKeyframeIdsKey]);
 
-  const activeKeyframeDetections = useMemo(() => {
-    if (!activeKeyframeId) {
-      return [];
-    }
-    const cutoutIds = summary?.cutout_ids_by_keyframe[activeKeyframeId] ?? [];
-    return cutoutIds.flatMap((cutoutId) => filteredObjectsByCutout.get(cutoutId) ?? []);
-  }, [activeKeyframeId, filteredObjectsByCutout, summary?.cutout_ids_by_keyframe]);
-  const activeKeyframeRawDetectionCount = useMemo(() => {
-    if (!activeKeyframeId || !summary) {
-      return 0;
-    }
-    return (summary.cutout_ids_by_keyframe[activeKeyframeId] ?? []).reduce(
-      (count, cutoutId) => count + (summary.object_count_by_cutout[cutoutId] ?? 0),
-      0,
-    );
-  }, [activeKeyframeId, summary]);
-  const rawDetections = cutoutPayload?.detections ?? [];
-  const filteredDetections = useMemo(
-    () => postProcessDetections(rawDetections, bboxPostProcess),
-    [rawDetections, bboxPostProcess],
+  const activeKeyframeDetections = useMemo(
+    () => (activeKeyframeId ? filteredRowsByKeyframe.get(activeKeyframeId) ?? [] : []),
+    [activeKeyframeId, filteredRowsByKeyframe],
   );
+  const activeKeyframeRawDetectionCount = activeKeyframeId
+    ? keyframeSummaryById.get(activeKeyframeId)?.row_count ?? 0
+    : 0;
+  const rawDetections = useMemo(
+    () => (activeKeyframeId ? metadataRows.filter((row) => row.keyframe_id === activeKeyframeId) : []),
+    [activeKeyframeId, metadataRows],
+  );
+  const filteredDetections = activeKeyframeDetections;
+  /** Square degrees now, not ERP pixels — see bboxPostProcess. */
   const bboxAreaSliderMax = useMemo(() => {
     if (!rawDetections.length) {
-      return 100_000;
+      return 400;
     }
-    const maxArea = Math.max(...rawDetections.map((item) => bboxArea(item.bbox)));
-    return Math.max(1_000, Math.ceil(maxArea / 500) * 500);
+    const maxArea = Math.max(...rawDetections.map((item) => bboxArea(item)));
+    return Math.max(10, Math.ceil(maxArea / 10) * 10);
   }, [rawDetections]);
+  /**
+   * Keyframes that can be stepped through in the panorama: every keyframe with a
+   * pose, whether or not it was prepared or ingested.
+   */
+  const navigableKeyframeIds = useMemo(
+    () =>
+      (status?.markers ?? [])
+        .map((marker) => marker.id)
+        .sort((a, b) => Number(a) - Number(b)),
+    [status?.markers],
+  );
 
   const keyframeEquirectPreviewUrl = activeKeyframeId
     ? indexKeyframeEquirectPreviewUrl(
@@ -891,14 +870,14 @@ function ObjectSearchExplorerPanel(props: Props) {
       ? keyframeDepthPreviewUrl
       : keyframeEquirectPreviewUrl;
   const adjacentKeyframePreviewUrls = useMemo(() => {
-    if (!activeKeyframeId || !summary) {
+    if (!activeKeyframeId) {
       return [];
     }
-    const index = summary.keyframe_ids.indexOf(activeKeyframeId);
+    const index = navigableKeyframeIds.indexOf(activeKeyframeId);
     if (index < 0) {
       return [];
     }
-    return [summary.keyframe_ids[index - 1], summary.keyframe_ids[index + 1]]
+    return [navigableKeyframeIds[index - 1], navigableKeyframeIds[index + 1]]
       .filter((keyframeId): keyframeId is string => Boolean(keyframeId))
       .map((keyframeId) =>
         indexKeyframeEquirectPreviewUrl(
@@ -909,7 +888,7 @@ function ObjectSearchExplorerPanel(props: Props) {
           { drawBoxes: false },
         ),
       );
-  }, [activeKeyframeId, props.mapId, summary]);
+  }, [activeKeyframeId, props.mapId, navigableKeyframeIds]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1060,21 +1039,12 @@ function ObjectSearchExplorerPanel(props: Props) {
   }, [activeKeyframeId, keyframePreviewUrl, panoramaViewMode]);
 
   useEffect(() => {
-    setSelectedObjectId((current) => {
-      if (current && filteredDetections.some((item) => item.id === current)) {
-        return current;
-      }
-      return filteredDetections[0]?.id ?? null;
-    });
-  }, [filteredDetections, selectedCutoutId]);
-
-  useEffect(() => {
-    if (!shouldFocusSelectedDetectionRef.current || !selectedObjectId) {
+    if (!shouldFocusSelectedDetectionRef.current || selectedRowIndex === null) {
       return;
     }
     shouldFocusSelectedDetectionRef.current = false;
-    detectionRowRefs.current.get(selectedObjectId)?.focus();
-  }, [selectedObjectId]);
+    detectionRowRefs.current.get(selectedRowIndex)?.focus();
+  }, [selectedRowIndex]);
 
   const livemapFocus = useMemo(() => {
     if (annotation.focusTarget) {
@@ -1104,49 +1074,47 @@ function ObjectSearchExplorerPanel(props: Props) {
     }
   }, [currentPage, page]);
 
+  // Keep the selection on the page: post-processing can remove the selected row.
   useEffect(() => {
-    if (!visibleRows.length) {
-      setSelectedCutoutId(null);
+    if (!pageRows.length) {
+      setSelectedRowIndex(null);
       return;
     }
-    setSelectedCutoutId((current) =>
-      current && visibleRows.some((row) => row.cutoutId === current)
+    setSelectedRowIndex((current) =>
+      current !== null && pageRows.some((row) => row.row_index === current)
         ? current
-        : visibleRows[0].cutoutId,
+        : pageRows[0].row_index,
     );
-  }, [visibleRows]);
+  }, [pageRowIndexKey]);
 
   useEffect(() => {
-    if (!selectedCutoutId || !status?.available) {
-      setCutoutPayload(null);
-      setSelectedObjectId(null);
+    if (selectedRowIndex === null || !status?.available) {
+      setRowDetail(null);
       return;
     }
     let cancelled = false;
-    setIsLoadingCutout(true);
-    fetchIndexCutout(props.mapId, selectedCutoutId)
+    setIsLoadingRow(true);
+    fetchMetadataRow(props.mapId, selectedRowIndex)
       .then((payload) => {
-        if (cancelled) {
-          return;
+        if (!cancelled) {
+          setRowDetail(payload);
         }
-        setCutoutPayload(payload);
-        setSelectedObjectId(null);
       })
       .catch((err: Error) => {
         if (!cancelled) {
           setError(err.message);
-          setCutoutPayload(null);
+          setRowDetail(null);
         }
       })
       .finally(() => {
         if (!cancelled) {
-          setIsLoadingCutout(false);
+          setIsLoadingRow(false);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [props.mapId, selectedCutoutId, status?.available]);
+  }, [props.mapId, selectedRowIndex, status?.available]);
 
   if (!props.isMapKnown) {
     return (
@@ -1164,55 +1132,52 @@ function ObjectSearchExplorerPanel(props: Props) {
     );
   }
 
-  if (!status?.available || !summary) {
-    const checkedPaths = status?.checked_paths ?? [];
-    return (
-      <section className="object-search-explorer-panel page-section">
-        {error ? (
-          <DismissibleAlert variant="error" onDismiss={() => setError(null)}>
-            {error}
-          </DismissibleAlert>
-        ) : (
-          <p className="info-box">
-            No object-search index database (object-search.db) found for this map.
-          </p>
-        )}
-        {status?.map_path || props.map?.path ? (
-          <p className="path-text">Map path: {status?.map_path ?? props.map?.path}</p>
-        ) : null}
-        {checkedPaths.length ? (
-          <ul className="checked-paths-list">
-            {checkedPaths.map((path) => (
-              <li key={path}>
-                <code>{path}</code>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </section>
-    );
-  }
+  /**
+   * The metadata warning is scoped to the row table below, not to the panel.
+   *
+   * Everything visual here — photosphere, depth preview, depth pin, view cone,
+   * keyframe graph, livemap markers, annotations — runs off the v2 manifest. Gating
+   * the whole panel on an index is what made a perfectly usable v2 map render as a
+   * single "no object-search.db found" box.
+   */
+  const metadataNotice = !status?.available
+    ? {
+        variant: "info" as const,
+        text:
+          status?.error
+          ?? "No object-search metadata (object-search/metadata.parquet) for this map.",
+        checkedPaths: status?.checked_paths ?? [],
+      }
+    : !status.postprocessed
+      ? {
+          variant: "warning" as const,
+          text:
+            "This metadata.parquet has not been post-processed: no thumbnail_key and no "
+            + "depth column, so proposal previews and 3D positions are unavailable. Run "
+            + "`python -m toolbox.bricks.prepare_postprocess <map_path>`.",
+          checkedPaths: [] as string[],
+        }
+      : null;
 
-  const totalObjects = Object.values(summary.object_count_by_cutout).reduce(
-    (sum, count) => sum + count,
-    0,
-  );
+  const totalRows = summary?.row_count ?? 0;
   const selectedDetection =
-    filteredDetections.find((item) => item.id === selectedObjectId) ?? null;
+    pageRows.find((row) => row.row_index === selectedRowIndex) ?? rowDetail?.row ?? null;
   const activeKeyframeIndex = activeKeyframeId
-    ? summary.keyframe_ids.indexOf(activeKeyframeId)
+    ? navigableKeyframeIds.indexOf(activeKeyframeId)
     : -1;
   const hasPreviousKeyframe = activeKeyframeIndex > 0;
   const hasNextKeyframe =
-    activeKeyframeIndex >= 0 && activeKeyframeIndex < summary.keyframe_ids.length - 1;
+    activeKeyframeIndex >= 0 && activeKeyframeIndex < navigableKeyframeIds.length - 1;
+  const activeKeyframeSummary = activeKeyframeId
+    ? keyframeSummaryById.get(activeKeyframeId)
+    : undefined;
 
   const selectKeyframe = (keyframeId: string) => {
-    if (!summary.keyframe_ids.includes(keyframeId) || keyframeId === activeKeyframeId) {
+    if (!navigableKeyframeIds.includes(keyframeId) || keyframeId === activeKeyframeId) {
       return;
     }
     setKeyframeFilter(keyframeId);
-    setSelectedCutoutId(null);
-    setSelectedObjectId(null);
+    setSelectedRowIndex(null);
     setDepthPin(null);
     setDepthPinPopoverOpen(false);
   };
@@ -1285,10 +1250,10 @@ function ObjectSearchExplorerPanel(props: Props) {
       return;
     }
     const nextIndex = Math.min(
-      summary.keyframe_ids.length - 1,
+      navigableKeyframeIds.length - 1,
       Math.max(0, activeKeyframeIndex + direction),
     );
-    const nextKeyframeId = summary.keyframe_ids[nextIndex];
+    const nextKeyframeId = navigableKeyframeIds[nextIndex];
     if (!nextKeyframeId || nextKeyframeId === activeKeyframeId) {
       return;
     }
@@ -1299,9 +1264,10 @@ function ObjectSearchExplorerPanel(props: Props) {
     if (!filteredDetections.length) {
       return;
     }
-    const currentIndex = selectedObjectId
-      ? filteredDetections.findIndex((item) => item.id === selectedObjectId)
-      : -1;
+    const currentIndex =
+      selectedRowIndex !== null
+        ? filteredDetections.findIndex((item) => item.row_index === selectedRowIndex)
+        : -1;
     const nextIndex =
       currentIndex === -1
         ? direction > 0
@@ -1312,10 +1278,10 @@ function ObjectSearchExplorerPanel(props: Props) {
             Math.max(0, currentIndex + direction),
           );
     const nextDetection = filteredDetections[nextIndex];
-    if (nextDetection.id !== selectedObjectId) {
+    if (nextDetection.row_index !== selectedRowIndex) {
       shouldFocusSelectedDetectionRef.current = true;
     }
-    setSelectedObjectId(nextDetection.id);
+    setSelectedRowIndex(nextDetection.row_index);
   };
 
   const handleDetectionRowKeyDown = (
@@ -1380,14 +1346,14 @@ function ObjectSearchExplorerPanel(props: Props) {
     keyframeId: string,
     xRatio: number,
     yRatio: number,
-    cutoutId: string | null = null,
+    rowIndex: number | null = null,
   ) => {
     const requestId = `${Date.now()}-${Math.random()}`;
     if (annotation.enabled) {
       annotation.beginDraft(requestId, {
         keyframeId,
         projection: source,
-        cutoutId,
+        rowIndex,
         xRatio,
         yRatio,
       });
@@ -1396,7 +1362,7 @@ function ObjectSearchExplorerPanel(props: Props) {
       requestId,
       source,
       keyframeId,
-      cutoutId,
+      rowIndex,
       xRatio,
       yRatio,
       erpXRatio: source === "erp" ? xRatio : null,
@@ -1414,7 +1380,7 @@ function ObjectSearchExplorerPanel(props: Props) {
       projection: source,
       x_ratio: xRatio,
       y_ratio: yRatio,
-      cutout_id: cutoutId ?? undefined,
+      row_index: rowIndex ?? undefined,
       sample_radius: 3,
       min_depth_m: DEPTH_PIN_MIN_DEPTH_M,
     })
@@ -1467,9 +1433,9 @@ function ObjectSearchExplorerPanel(props: Props) {
       <div className="object-search-explorer-header">
         <div>
           <p className="eyebrow">Object Search Explorer</p>
-          <h2>Cutouts and detected boxes</h2>
+          <h2>Proposals and reconstructed boxes</h2>
         </div>
-        <p className="path-text">{summary.index_path}</p>
+        <p className="path-text">{summary?.metadata_path ?? status?.map_path ?? ""}</p>
       </div>
 
       {error ? (
@@ -1494,11 +1460,47 @@ function ObjectSearchExplorerPanel(props: Props) {
         </DismissibleAlert>
       ) : null}
 
+      {metadataNotice ? (
+        <div className={metadataNotice.variant === "info" ? "info-box" : "warning-box"}>
+          <p>{metadataNotice.text}</p>
+          {metadataNotice.checkedPaths.length ? (
+            <ul className="checked-paths-list">
+              {metadataNotice.checkedPaths.map((checkedPath) => (
+                <li key={checkedPath}>
+                  <code>{checkedPath}</code>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p className="map-caption">
+            The panorama, depth preview, depth pin, view cone and annotations below do not
+            need it — they read the map manifest.
+          </p>
+        </div>
+      ) : null}
+
+      {/*
+        "Keyframes with a pose" and "keyframes with proposals" are two different
+        numbers, and a third — how many made it into pgvector — differs again.
+        Reporting them separately is the whole point of this row.
+      */}
       <div className="metrics-row">
-        <span>Keyframes {summary.keyframe_ids.length}</span>
-        <span>Cutouts {allRows.length}</span>
-        <span>Objects {totalObjects}</span>
-        <span>Visible {visibleRows.length}</span>
+        <span>Keyframes with a pose {status?.manifest_keyframe_count ?? 0}</span>
+        <span>Keyframes with proposals {summary?.keyframes.length ?? 0}</span>
+        <span>Proposals {totalRows}</span>
+        <span>With depth {summary?.with_depth_count ?? 0}</span>
+        {summary?.coverage ? (
+          <span>
+            Ingested {summary.coverage.ingested_total}
+            {summary.coverage.no_position_total
+              ? ` (${summary.coverage.no_position_total} without a 3D position)`
+              : ""}
+          </span>
+        ) : summary ? (
+          <span title="The bricks service did not answer; keyframes show as unknown.">
+            Ingested unknown
+          </span>
+        ) : null}
       </div>
 
       <ExplorerAnnotationControls workspace={annotation} />
@@ -1558,8 +1560,6 @@ function ObjectSearchExplorerPanel(props: Props) {
               <p className="info-box">
                 Map preview unavailable: no <code>emmid</code> configured for this map.
               </p>
-            ) : !summary.keyframe_ids.length ? (
-              <p className="muted">The index does not contain any keyframes.</p>
             ) : !(status?.markers?.length ?? 0) ? (
               <p className="muted">
                 No keyframe coordinates could be resolved from local map metadata.
@@ -1654,8 +1654,8 @@ function ObjectSearchExplorerPanel(props: Props) {
                   />
                 </div>
                 <p className="map-caption">
-                  {status?.markers?.length ?? 0} / {summary.keyframe_ids.length} keyframes have
-                  resolvable map coordinates.
+                  {status?.markers?.length ?? 0} keyframes have a resolvable pose;{" "}
+                  {summary?.keyframes.length ?? 0} of them carry proposals.
                   {showKeyframeGraph
                     ? " Hover the graph to reveal the closest keyframe; click the graph or revealed point to filter cutouts."
                     : " Enable the graph to reveal nearby keyframes on hover."}
@@ -1716,7 +1716,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                   </select>
                 </label>
                 <span className="muted">
-                  Detections {activeKeyframeRawDetectionCount} | Filtered bboxes{" "}
+                  Proposals {activeKeyframeRawDetectionCount} | Kept{" "}
                   {activeKeyframeDetections.length}
                 </span>
                 <label className="inline-check">
@@ -1753,7 +1753,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                           ? activeKeyframeDetections
                           : []
                       }
-                      selectedObjectId={selectedObjectId}
+                      selectedRowIndex={selectedRowIndex}
                       depthPin={
                         equirectPreviewKeyframeId === activeKeyframeId &&
                         depthPin?.keyframeId === activeKeyframeId &&
@@ -1782,7 +1782,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                 {panoramaViewMode === "depth"
                   ? "Depth preview is colorized from near red to far blue; invalid depth pixels are black."
                   : showPhotosphereBoxes
-                  ? "Post-processed bounding boxes from all cutouts in this keyframe, projected onto the photosphere."
+                  ? "Proposal boxes reconstructed from the stored float16 angles — accurate to a few ERP pixels, not exact."
                   : "Bounding boxes are hidden for smoother photosphere navigation."}
               </p>
               {depthPin?.keyframeId === activeKeyframeId ? (
@@ -1886,8 +1886,8 @@ function ObjectSearchExplorerPanel(props: Props) {
       <ExplorerAnnotationList workspace={annotation} />
 
       <CollapsibleSection
-        title="Cutout/keyframe explorer"
-        summary={`${visibleRows.length} visible | ${allRows.length} cutouts`}
+        title="Proposal explorer"
+        summary={`${pageRows.length} shown | ${visibleKeyframes.length} keyframes`}
         sectionClassName="object-search-explorer-browser"
         defaultOpen
       >
@@ -1904,12 +1904,21 @@ function ObjectSearchExplorerPanel(props: Props) {
                   onChange={(event) => setKeyframeFilter(event.target.value)}
                 >
                   <option value="all">All keyframes</option>
-                  {summary.keyframe_ids.map((keyframeId) => (
-                    <option key={keyframeId} value={keyframeId}>
-                      {keyframeId} |{" "}
-                      {(summary.cutout_ids_by_keyframe[keyframeId] ?? []).length} cutouts
-                    </option>
-                  ))}
+                  {/*
+                    Every keyframe with a pose, not only the prepared ones: this select
+                    also drives which panorama is shown, and a keyframe with no
+                    proposals is still worth looking at.
+                  */}
+                  {navigableKeyframeIds.map((keyframeId) => {
+                    const keyframe = keyframeSummaryById.get(keyframeId);
+                    return (
+                      <option key={keyframeId} value={keyframeId}>
+                        {keyframeId} |{" "}
+                        {keyframe ? `${keyframe.row_count} proposals` : "not prepared"}
+                        {keyframe?.ingested === 0 ? " | pruned" : ""}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             </div>
@@ -1922,13 +1931,13 @@ function ObjectSearchExplorerPanel(props: Props) {
                   onChange={(event) => setSortMode(event.target.value as SortMode)}
                 >
                   <option value="keyframe">Keyframe order</option>
-                  <option value="objects-desc">Most boxes first</option>
-                  <option value="objects-asc">Fewest boxes first</option>
+                  <option value="objects-desc">Most proposals first</option>
+                  <option value="objects-asc">Fewest proposals first</option>
                 </select>
               </label>
 
             <label>
-              Cutouts per page
+              Keyframes per page
               <select
                 value={String(pageSize)}
                 onChange={(event) => setPageSize(Number(event.target.value))}
@@ -1962,7 +1971,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                   checked={includeEmpty}
                   onChange={(event) => setIncludeEmpty(event.target.checked)}
                 />
-                Include empty cutouts
+                Include keyframes with no proposals
               </label>
             </div>
           </div>
@@ -1988,79 +1997,52 @@ function ObjectSearchExplorerPanel(props: Props) {
           </div>
 
           {!pageRows.length ? (
-            <p className="muted">No cutouts match the current filters.</p>
+            <p className="muted">
+              {summary
+                ? "No proposals match the current filters."
+                : "No proposals: this map has no object-search metadata."}
+            </p>
           ) : (
             <div
               className="object-search-cutout-grid"
               style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
             >
               {pageRows.map((row) => {
-                const boxCounts = boxCountsByCutout.get(row.cutoutId);
-                const overlayDetections = filteredObjectsByCutout.get(row.cutoutId) ?? [];
-                const faceSize = Math.max(1, manifestNumber(manifest, "cubemap_face_size", 512));
-                const boxCountLabel = boxCounts
-                  ? `${boxCounts.filtered} / ${boxCounts.raw} boxes`
-                  : `${row.objectCount} boxes`;
+                // The stored thumbnail is the default: it is the only image certain to
+                // be what MetaCLIP2 embedded. A re-render is the fallback for maps
+                // prepared without crops.
+                const previewUrl = row.thumbnail_key
+                  ? rowThumbnailUrl(props.mapId, row.thumbnail_key)
+                  : rowRenderUrl(props.mapId, row.row_index, { size: 336 });
                 return (
                   <button
                     className={`object-search-cutout-card${
-                      row.cutoutId === selectedCutoutId ? " is-selected" : ""
+                      row.row_index === selectedRowIndex ? " is-selected" : ""
                     }`}
                     type="button"
-                    key={row.cutoutId}
-                    onClick={() => {
-                      setSelectedCutoutId(row.cutoutId);
-                      setSelectedObjectId(null);
-                    }}
+                    key={row.row_index}
+                    onClick={() => setSelectedRowIndex(row.row_index)}
                   >
                     <span className="object-search-cutout-image-wrap">
                       <img
-                        src={indexCutoutPreviewUrl(
-                          props.mapId,
-                          row.cutoutId,
-                          null,
-                          { drawBoxes: false },
-                        )}
-                        alt={`Cutout ${row.cutoutId} with filtered detected boxes`}
+                        src={previewUrl}
+                        alt={`Proposal ${row.row_index}${row.label ? ` (${row.label})` : ""}`}
                         title="Click to place a depth pin"
                         loading="lazy"
                         onClick={(event) => {
                           event.stopPropagation();
-                          setSelectedCutoutId(row.cutoutId);
-                          setSelectedObjectId(null);
+                          setSelectedRowIndex(row.row_index);
                           const { xRatio, yRatio } = readClickRatio(event);
-                          placeDepthPin("cutout", row.keyframeId, xRatio, yRatio, row.cutoutId);
+                          placeDepthPin(
+                            "cutout",
+                            row.keyframe_id,
+                            xRatio,
+                            yRatio,
+                            row.row_index,
+                          );
                         }}
                       />
-                      {overlayDetections.length ? (
-                        <svg
-                          className="object-search-bbox-overlay"
-                          viewBox={`0 0 ${faceSize} ${faceSize}`}
-                          aria-hidden="true"
-                        >
-                          {overlayDetections.map((item) => {
-                            const [x0, y0, x1, y1] = item.bbox;
-                            return (
-                              <g key={item.id}>
-                                <rect
-                                  x={x0}
-                                  y={y0}
-                                  width={Math.max(0, x1 - x0)}
-                                  height={Math.max(0, y1 - y0)}
-                                  className={item.id === selectedObjectId ? "is-selected" : ""}
-                                  vectorEffect="non-scaling-stroke"
-                                />
-                                {item.label ? (
-                                  <text x={x0 + 3} y={Math.max(12, y0 - 4)}>
-                                    {item.label}
-                                  </text>
-                                ) : null}
-                              </g>
-                            );
-                          })}
-                        </svg>
-                      ) : null}
-                      {depthPin?.source === "cutout" && depthPin.cutoutId === row.cutoutId ? (
+                      {depthPin?.source === "cutout" && depthPin.rowIndex === row.row_index ? (
                         <span
                           className={`object-search-depth-pin is-${depthPin.status}`}
                           style={{
@@ -2071,9 +2053,16 @@ function ObjectSearchExplorerPanel(props: Props) {
                       ) : null}
                     </span>
                     <span className="object-search-cutout-card-meta">
-                      <strong>{row.cutoutId}</strong>
+                      <strong>
+                        {row.row_index} {row.label ? `| ${row.label}` : ""}
+                      </strong>
                       <small>
-                        keyframe {row.keyframeId} | {boxCountLabel}
+                        keyframe {row.keyframe_id} | {row.detector_source || "?"}
+                        {row.detection_score !== null
+                          ? ` ${row.detection_score.toFixed(2)}`
+                          : ""}
+                        {" | "}
+                        {row.depth !== null ? `${row.depth.toFixed(1)} m` : "no depth"}
                       </small>
                     </span>
                   </button>
@@ -2084,15 +2073,65 @@ function ObjectSearchExplorerPanel(props: Props) {
         </div>
 
         <aside className="object-search-explorer-inspector">
-          <h3>Selected cutout</h3>
-          {selectedRow ? (
+          <h3>Selected proposal</h3>
+          {selectedDetection ? (
             <>
               <div className="metrics-row">
-                <span>Keyframe {selectedRow.keyframeId}</span>
-                <span>Cutout {selectedRow.cutoutId}</span>
+                <span>Keyframe {selectedDetection.keyframe_id}</span>
+                <span>Row {selectedDetection.row_index}</span>
                 <span>
-                  {filteredDetections.length} / {rawDetections.length} boxes
+                  {filteredDetections.length} / {rawDetections.length} proposals kept
                 </span>
+                {activeKeyframeSummary ? (
+                  <span
+                    title={
+                      activeKeyframeSummary.ingested === null
+                        ? "The bricks service did not answer."
+                        : `${activeKeyframeSummary.ingested} rows in pgvector`
+                    }
+                  >
+                    {keyframeIndexState(activeKeyframeSummary)}
+                  </span>
+                ) : null}
+              </div>
+
+              {/*
+                The stored thumbnail (left) is what MetaCLIP2 saw, masked to a square by
+                build_padding_mask. The re-render (right) is the proposal's true angular
+                extent at a widened FOV — the same four numbers, two different views.
+              */}
+              <div className="object-search-proposal-previews">
+                {selectedDetection.thumbnail_key ? (
+                  <figure>
+                    <img
+                      src={rowThumbnailUrl(props.mapId, selectedDetection.thumbnail_key)}
+                      alt={`Stored thumbnail for proposal ${selectedDetection.row_index}`}
+                      loading="lazy"
+                    />
+                    <figcaption>Stored thumbnail (embedded)</figcaption>
+                  </figure>
+                ) : null}
+                <figure>
+                  <img
+                    src={rowRenderUrl(props.mapId, selectedDetection.row_index, {
+                      size: 512,
+                      fovScale: 2,
+                    })}
+                    alt={`Context view for proposal ${selectedDetection.row_index}`}
+                    loading="lazy"
+                    onClick={(event) => {
+                      const { xRatio, yRatio } = readClickRatio(event);
+                      placeDepthPin(
+                        "cutout",
+                        selectedDetection.keyframe_id,
+                        xRatio,
+                        yRatio,
+                        selectedDetection.row_index,
+                      );
+                    }}
+                  />
+                  <figcaption>Context re-render, 2x FOV (reconstructed)</figcaption>
+                </figure>
               </div>
 
               <BboxPostProcessControls
@@ -2104,105 +2143,82 @@ function ObjectSearchExplorerPanel(props: Props) {
                 onReset={resetBboxPostProcess}
               />
 
-              {isLoadingCutout ? <p className="muted">Loading bbox metadata...</p> : null}
+              {isLoadingRow ? <p className="muted">Loading row metadata...</p> : null}
 
               {rawDetections.length && !filteredDetections.length ? (
-                <p className="info-box">All boxes were removed by the current post-processing filters.</p>
+                <p className="info-box">
+                  All proposals were removed by the current post-processing filters.
+                </p>
               ) : null}
 
-              {filteredDetections.length ? (
-                <>
-                  <label>
-                    Detected box
-                    <select
-                      value={selectedObjectId ?? ""}
-                      onChange={(event) => setSelectedObjectId(event.target.value)}
-                    >
+              <CollapsibleSection title="Selected row JSON" defaultOpen={false}>
+                <pre className="debug-json">
+                  {JSON.stringify(selectedDetection, null, 2)}
+                </pre>
+              </CollapsibleSection>
+
+              <CollapsibleSection
+                title="Proposals in this keyframe"
+                summary={`${filteredDetections.length} kept`}
+                defaultOpen
+              >
+                <div className="table-wrap object-search-box-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Row</th>
+                        <th>Label</th>
+                        <th>Source</th>
+                        <th>Score</th>
+                        <th>Area (deg²)</th>
+                        <th>Depth</th>
+                      </tr>
+                    </thead>
+                    <tbody>
                       {filteredDetections.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.id} | bbox {item.bbox.join(", ")}
-                        </option>
+                        <tr
+                          key={item.row_index}
+                          ref={(node) => {
+                            if (node) {
+                              detectionRowRefs.current.set(item.row_index, node);
+                            } else {
+                              detectionRowRefs.current.delete(item.row_index);
+                            }
+                          }}
+                          className={item.row_index === selectedRowIndex ? "is-selected" : ""}
+                          tabIndex={0}
+                          aria-selected={item.row_index === selectedRowIndex}
+                          onClick={(event) => {
+                            setSelectedRowIndex(item.row_index);
+                            event.currentTarget.focus();
+                          }}
+                          onKeyDown={handleDetectionRowKeyDown}
+                        >
+                          <td>{item.row_index}</td>
+                          <td>{item.label || "-"}</td>
+                          <td>{item.detector_source || "-"}</td>
+                          <td>
+                            {item.detection_score === null
+                              ? "-"
+                              : item.detection_score.toFixed(3)}
+                          </td>
+                          <td>{bboxArea(item).toFixed(2)}</td>
+                          <td>{item.depth === null ? "-" : `${item.depth.toFixed(2)} m`}</td>
+                        </tr>
                       ))}
-                    </select>
-                  </label>
+                    </tbody>
+                  </table>
+                </div>
+              </CollapsibleSection>
 
-                  {selectedDetection ? (
-                    <CollapsibleSection title="Selected object JSON" defaultOpen={false}>
-                      <pre className="debug-json">
-                        {JSON.stringify(
-                          {
-                            ...selectedDetection,
-                            bbox_area: Math.round(bboxArea(selectedDetection.bbox)),
-                          },
-                          null,
-                          2,
-                        )}
-                      </pre>
-                    </CollapsibleSection>
-                  ) : null}
-
-                  <CollapsibleSection
-                    title="Filtered detected boxes"
-                    summary={`${filteredDetections.length} boxes`}
-                    defaultOpen
-                  >
-                    <div className="table-wrap object-search-box-table">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>ID</th>
-                            <th>Label</th>
-                            <th>Source</th>
-                            <th>Bbox</th>
-                            <th>Area</th>
-                            <th>OCR</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredDetections.map((item) => (
-                            <tr
-                              key={item.id}
-                              ref={(node) => {
-                                if (node) {
-                                  detectionRowRefs.current.set(item.id, node);
-                                } else {
-                                  detectionRowRefs.current.delete(item.id);
-                                }
-                              }}
-                              className={item.id === selectedObjectId ? "is-selected" : ""}
-                              tabIndex={0}
-                              aria-selected={item.id === selectedObjectId}
-                              onClick={(event) => {
-                                setSelectedObjectId(item.id);
-                                event.currentTarget.focus();
-                              }}
-                              onKeyDown={handleDetectionRowKeyDown}
-                            >
-                              <td>{item.id}</td>
-                              <td>{item.label || "-"}</td>
-                              <td>{item.detection_source || "-"}</td>
-                              <td>{item.bbox.join(", ")}</td>
-                              <td>{Math.round(bboxArea(item.bbox))}</td>
-                              <td>{item.ocr_key || item.ocr_text || "-"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </CollapsibleSection>
-
-                  <CollapsibleSection title="Preview debug" defaultOpen={false}>
-                    <pre className="debug-json">
-                      {JSON.stringify(cutoutPayload?.preview_debug ?? {}, null, 2)}
-                    </pre>
-                  </CollapsibleSection>
-                </>
-              ) : !isLoadingCutout ? (
-                <p className="muted">No detected boxes are stored for this cutout.</p>
-              ) : null}
+              <CollapsibleSection title="Preview debug" defaultOpen={false}>
+                <pre className="debug-json">
+                  {JSON.stringify(rowDetail?.preview_debug ?? {}, null, 2)}
+                </pre>
+              </CollapsibleSection>
             </>
           ) : (
-            <p className="muted">Select a cutout to inspect its bounding boxes.</p>
+            <p className="muted">Select a proposal to inspect it.</p>
           )}
         </aside>
       </div>

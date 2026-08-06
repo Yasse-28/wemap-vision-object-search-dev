@@ -16,9 +16,11 @@ called out here and in the ADR.
 
 ## On-disk conventions assumed
 
-    {map}/depths/{depth_url basename}   v2: the exact filename the manifest records
-    {map}/depths/{image stem}.tif       v1 fallback
-    {map}/depths/{kf_id}.tif            v1 fallback — first existing wins
+    {map}/depths/{depth_url basename}   the exact filename the manifest records
+
+That filename is the only thing tried. Keyframe ids are `geo_keyframes` indices, so
+a `{kf_id}.tif` fallback would happily serve an unrelated depth map for a valid
+request — silently, and with a plausible result.
 
 Zarr depth is not supported: the mirrored pipeline's depth format is the frozen
 sqrt-quantised uint16 TIFF. The standalone's zarr reader went to `legacy/`.
@@ -47,20 +49,12 @@ DEFAULT_THUMBNAIL_PREFIX = "object-search/thumbnails/"
 DEFAULT_DEPTH_DIRNAME = "depths"
 
 
-def _resolve_depth_path(
-    depth_dir: Path, kf_id: int, stem: str | None, depth_filename: str | None
-) -> Path | None:
-    """First existing of the manifest's filename, `{stem}.tif`, `{kf_id}.tif`."""
-    candidates: list[Path] = []
-    if depth_filename:
-        candidates.append(depth_dir / depth_filename)
-    if stem:
-        candidates.append(depth_dir / f"{stem}.tif")
-    candidates.append(depth_dir / f"{kf_id}.tif")
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
+def _resolve_depth_path(depth_dir: Path, depth_filename: str | None) -> Path | None:
+    """The depth map the manifest names for this keyframe, if it is on disk."""
+    if not depth_filename:
+        return None
+    candidate = depth_dir / depth_filename
+    return candidate if candidate.is_file() else None
 
 
 def sample_depths(
@@ -80,12 +74,7 @@ def sample_depths(
 
     depth_dir = Path(map_path) / DEFAULT_DEPTH_DIRNAME
     source = pose_source or load_pose_source(map_path)
-    depth_by_id = source.depth_filename_by_keyframe_id or {}
-    # v1 has no recorded depth filename; derive a stem from the image mapping instead.
-    stem_by_id = {
-        int(kf_id): Path(name).stem
-        for name, kf_id in (source.image_filename_to_keyframe_id or {}).items()
-    }
+    depth_by_id = source.depth_filename_by_keyframe_id
 
     vk_ids = metadata["video_keyframe_id"].to_numpy()
     theta_all = metadata["theta_center"].to_numpy().astype(np.float64)
@@ -97,9 +86,7 @@ def sample_depths(
         idxs = np.flatnonzero(vk_ids == vk_id)
         if idxs.size == 0:
             continue
-        depth_path = _resolve_depth_path(
-            depth_dir, vk_id, stem_by_id.get(vk_id), depth_by_id.get(vk_id)
-        )
+        depth_path = _resolve_depth_path(depth_dir, depth_by_id.get(vk_id))
         if depth_path is None:
             missing.append(vk_id)
             continue
@@ -174,7 +161,7 @@ def postprocess_metadata(
         logger.error(
             "No candidate got a depth value. Every object_position will be NULL and "
             "localize will return nothing. Check that %s contains uint16 .tif depth "
-            "maps named after the keyframe id or the image stem.",
+            "maps named exactly as the manifest's depth_url basenames.",
             Path(map_path) / DEFAULT_DEPTH_DIRNAME,
         )
     return metadata

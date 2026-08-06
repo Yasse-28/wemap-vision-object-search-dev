@@ -3,6 +3,7 @@ import type { BboxPostProcessParams } from "./bboxPostProcess";
 
 type Props = {
   params: BboxPostProcessParams;
+  /** Upper bound of the area sliders, in square degrees. */
   areaSliderMax: number;
   rawCount: number;
   filteredCount: number;
@@ -10,11 +11,12 @@ type Props = {
   onReset: () => void;
 };
 
+/** Square degrees — v2 proposals have an angular extent, not a pixel bbox. */
 function formatArea(value: number): string {
   if (value <= 0) {
     return "no limit";
   }
-  return String(Math.round(value));
+  return `${value < 10 ? value.toFixed(2) : Math.round(value)} deg²`;
 }
 
 function BboxPostProcessControls(props: Props) {
@@ -90,13 +92,13 @@ function BboxPostProcessControls(props: Props) {
 
           <label className="bbox-postprocess-slider">
             <span className="bbox-postprocess-slider-label">
-              Min bbox area <strong>{formatArea(props.params.minBboxArea)}</strong>
+              Min angular area <strong>{formatArea(props.params.minBboxArea)}</strong>
             </span>
             <input
               type="range"
               min={0}
               max={props.areaSliderMax}
-              step={Math.max(1, Math.round(props.areaSliderMax / 200))}
+              step={props.areaSliderMax / 200}
               value={Math.min(props.params.minBboxArea, props.areaSliderMax)}
               onChange={(event) =>
                 props.onChange({
@@ -109,13 +111,13 @@ function BboxPostProcessControls(props: Props) {
 
           <label className="bbox-postprocess-slider">
             <span className="bbox-postprocess-slider-label">
-              Max bbox area <strong>{formatArea(props.params.maxBboxArea)}</strong>
+              Max angular area <strong>{formatArea(props.params.maxBboxArea)}</strong>
             </span>
             <input
               type="range"
               min={0}
               max={props.areaSliderMax}
-              step={Math.max(1, Math.round(props.areaSliderMax / 200))}
+              step={props.areaSliderMax / 200}
               value={
                 props.params.maxBboxArea <= 0
                   ? props.areaSliderMax
@@ -132,8 +134,9 @@ function BboxPostProcessControls(props: Props) {
           </label>
 
           <p className="map-caption">
-            Greedy NMS uses textness (or bbox area) as score. Max area at the slider end means no
-            upper limit.
+            Greedy NMS uses the detector score (or angular area when it is NULL), across the
+            whole keyframe — v2 has no cutouts to group by. Areas are in square degrees; max
+            area at the slider end means no upper limit.
           </p>
 
           <button type="button" className="link-button" onClick={props.onReset}>

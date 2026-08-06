@@ -14,6 +14,7 @@ toolbox and the benchmark the `localize` endpoint they need.
 ## Endpoints
 
     GET  /health
+    GET  /{map_id}/object-search/index-coverage   per-keyframe pgvector counts
     POST /{map_id}/object-search/localize   JSON {text, num_results, ...}
                                             or multipart {image, ...}
     POST /{map_id}/object-search/text       flat v2 candidate list
@@ -26,12 +27,13 @@ already expects, so the benchmark needs no changes.
 ## Configuration
 
 Reads the same config file as the toolbox's TS backend
-(`toolbox/backend/src/config.ts`), plus one new per-map field:
+(`toolbox/backend/src/config.ts`):
 
-    { "maps": [ { "id": "my-map", "path": "maps/my-map", "geo_ref_id": 1 } ] }
+    { "maps": [ { "id": "my-map", "path": "maps/my-map" } ] }
 
-`geo_ref_id` is optional for v2 maps — it is read from the manifest, which is also
-where `ingest_cli` gets it, so the two cannot disagree. v1 maps must set it.
+The georef id is **not** a config field: it comes from the map's manifest, which is
+also where `ingest_cli` takes it, so the two cannot disagree. A stale `geo_ref_id`
+key is ignored with a warning.
 """
 
 from __future__ import annotations
@@ -150,24 +152,23 @@ def load_map_entries(config_path: Path) -> dict[str, MapEntry]:
             if isinstance(raw_path, str) and raw_path
             else (config_dir / "maps" / map_id).resolve()
         )
-        geo_ref_id = item.get("geo_ref_id")
-        if geo_ref_id is None:
-            # Prefer the manifest's own id over a config guess; the two disagreeing
-            # returns zero hits with no error.
-            try:
-                geo_ref_id = load_pose_source(map_path).geo_ref_id
-            except (FileNotFoundError, ValueError):
-                geo_ref_id = None
-            if geo_ref_id is None:
-                raise ValueError(
-                    f"maps[{index}] ('{map_id}') needs a geo_ref_id: none in the "
-                    "config, and no v2 manifest to take it from."
-                )
-            logger.info(
-                "Map '%s': geo_ref_id %s from its manifest.", map_id, geo_ref_id
+        # The manifest is the only source: it is also where `ingest_cli` takes the
+        # id from, so the two cannot disagree. A config `geo_ref_id` could, and a
+        # disagreement returns zero hits with no error — so it is ignored, loudly.
+        if item.get("geo_ref_id") is not None:
+            logger.warning(
+                "Map '%s': ignoring geo_ref_id %s from the config — it now comes "
+                "from the manifest, which is also what ingest indexed under. "
+                "Remove the key.",
+                map_id,
+                item["geo_ref_id"],
             )
-        if not isinstance(geo_ref_id, int):
-            raise ValueError(f"maps[{index}].geo_ref_id must be an integer.")
+        geo_ref_id = load_pose_source(map_path).geo_ref_id
+        if geo_ref_id is None:
+            raise ValueError(
+                f"maps[{index}] ('{map_id}'): its manifest records no geo_ref_id."
+            )
+        logger.info("Map '%s': geo_ref_id %s from its manifest.", map_id, geo_ref_id)
         entries[map_id] = MapEntry(id=map_id, path=map_path, geo_ref_id=int(geo_ref_id))
     return entries
 
@@ -332,8 +333,8 @@ def create_app() -> FastAPI:
     def health() -> dict:
         """Per-map readiness, in the `{id: state}` shape the toolbox already polls.
 
-        A map is `ready` once its pose source loads — a v2 manifest, or a legacy
-        `georef.db`. That is the one input this service cannot work without. Whether
+        A map is `ready` once its v2 manifest loads. That is the one input this
+        service cannot work without. Whether
         the map has *rows* in pgvector is not checked here: that would need a DB
         round-trip per health poll, and an unindexed map surfaces plainly as an empty
         `localizations` list.
@@ -349,6 +350,61 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "maps": {entry.id: map_state(entry) for entry in state.maps.values()},
+        }
+
+    @app.get("/{map_id}/object-search/index-coverage")
+    def index_coverage(map_id: str) -> dict:
+        """Per-keyframe counts of what actually reached pgvector.
+
+        The toolbox explorer walks `metadata.parquet`, which lists every proposal
+        `prepare` produced. `ingest_cli` then prunes keyframes closer than 1.5 m to a
+        kept one, so the parquet is a **superset** of the live index — and the parquet
+        carries no `id` that maps back to a candidate row. Counts per keyframe are the
+        cheapest thing that closes the gap, and strictly more informative than a set of
+        ids for the same query cost.
+
+        `no_position` counts rows whose `object_position` is NULL — the per-row
+        invisibility class (usually `depth = NaN`), which `localize` filters out and
+        which is otherwise easy to mistake for "the model found nothing".
+
+        This endpoint exists so the TS backend does not need a Postgres client and a
+        second copy of the DSN logic; it is `bricks/db.py`'s reason to exist. It is
+        allowed to fail: the explorer treats an error as "coverage unknown" and keeps
+        working, so a stopped database degrades the panel instead of breaking it.
+        """
+        entry = _entry(map_id)
+        try:
+            with db.connect() as conn, conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT gk.video_keyframe_id,
+                           COUNT(*) AS ingested,
+                           COUNT(*) FILTER (
+                               WHERE c.object_position IS NULL
+                           ) AS no_position
+                    FROM object_search_candidate AS c
+                    JOIN geokeyframe AS gk ON gk.id = c.geokeyframe_id
+                    WHERE c.geo_ref_id = %s
+                    GROUP BY 1
+                    ORDER BY 1
+                    """,
+                    [entry.geo_ref_id],
+                )
+                rows = cursor.fetchall()
+        except Exception as exc:  # noqa: BLE001 - any DB failure is "unknown", not 500
+            raise HTTPException(
+                status_code=503, detail=f"pgvector coverage unavailable: {exc}"
+            ) from exc
+        return {
+            "geo_ref_id": entry.geo_ref_id,
+            "keyframes": [
+                {
+                    "video_keyframe_id": int(vk_id),
+                    "ingested": int(ingested),
+                    "no_position": int(no_position),
+                }
+                for vk_id, ingested, no_position in rows
+            ],
         }
 
     @app.post("/{map_id}/object-search/localize")

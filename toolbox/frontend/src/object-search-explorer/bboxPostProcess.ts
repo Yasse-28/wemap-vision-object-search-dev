@@ -1,13 +1,29 @@
-import type { IndexObjectRecord } from "../index-explorer/types";
+/**
+ * Client-side box post-processing for the explorer.
+ *
+ * Two things changed with the v2 metadata. Areas are **square degrees**
+ * (`angular_area_deg2`), because a proposal has an angular extent and no fixed
+ * cutout raster to measure pixels in. And NMS runs across the whole keyframe rather
+ * than per cutout — there are no cutouts to group by, and collapsing the two
+ * detectors' overlapping proposals is the point. The backend applies the identical
+ * rules for the drawn ERP preview (`workbench-index.ts::filterRows`); the query
+ * parameter names are unchanged so the two stay in step.
+ */
+
+import type { MetadataRowRecord } from "../index-explorer/types";
 
 export type BboxPostProcessParams = {
   enabled: boolean;
   nmsIou: number;
+  /** Square degrees, not ERP pixels. */
   minBboxArea: number;
   maxBboxArea: number;
   showYolo: boolean;
   showGdino: boolean;
 };
+
+/** A full sphere is 360x180 deg; nothing legitimate approaches it. */
+export const MAX_AREA_DEG2 = 360 * 180;
 
 export const DEFAULT_BBOX_POST_PROCESS: BboxPostProcessParams = {
   enabled: true,
@@ -18,7 +34,9 @@ export const DEFAULT_BBOX_POST_PROCESS: BboxPostProcessParams = {
   showGdino: true,
 };
 
-const STORAGE_KEY = "object-search-gui.explorerBboxPostProcess";
+// v2: the area thresholds changed unit (ERP pixels -> square degrees), so a stored
+// v1 value like 5000 would silently filter every row out. New key, fresh defaults.
+const STORAGE_KEY = "object-search-gui.explorerBboxPostProcess.v2";
 
 export function readStoredBboxPostProcess(): BboxPostProcessParams {
   try {
@@ -36,13 +54,13 @@ export function readStoredBboxPostProcess(): BboxPostProcessParams {
       minBboxArea: clampNumber(
         parsed.minBboxArea,
         0,
-        1_000_000,
+        MAX_AREA_DEG2,
         DEFAULT_BBOX_POST_PROCESS.minBboxArea,
       ),
       maxBboxArea: clampNumber(
         parsed.maxBboxArea,
         0,
-        1_000_000,
+        MAX_AREA_DEG2,
         DEFAULT_BBOX_POST_PROCESS.maxBboxArea,
       ),
       showYolo:
@@ -80,38 +98,35 @@ function clampNumber(
   return Math.min(max, Math.max(min, num));
 }
 
-export function bboxArea(bbox: [number, number, number, number]): number {
-  const [x0, y0, x1, y1] = bbox;
-  return Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+/** Angular footprint of a row, in square degrees. */
+export function bboxArea(row: MetadataRowRecord): number {
+  return Number.isFinite(row.angular_area_deg2) ? Math.max(0, row.angular_area_deg2) : 0;
 }
 
-function bboxIou(
-  a: [number, number, number, number],
-  b: [number, number, number, number],
-): number {
-  const ix1 = Math.max(a[0], b[0]);
-  const iy1 = Math.max(a[1], b[1]);
-  const ix2 = Math.min(a[2], b[2]);
-  const iy2 = Math.min(a[3], b[3]);
-  const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+/** IoU of two reconstructed ERP boxes, in ratio units. */
+function bboxIou(a: MetadataRowRecord, b: MetadataRowRecord): number {
+  const [ax0, ay0, ax1, ay1] = a.erp_bbox_ratios;
+  const [bx0, by0, bx1, by1] = b.erp_bbox_ratios;
+  const interW = Math.max(0, Math.min(ax1, bx1) - Math.max(ax0, bx0));
+  const interH = Math.max(0, Math.min(ay1, by1) - Math.max(ay0, by0));
+  const inter = interW * interH;
   if (inter <= 0) {
     return 0;
   }
-  const areaA = bboxArea(a);
-  const areaB = bboxArea(b);
+  const areaA = Math.max(0, ax1 - ax0) * Math.max(0, ay1 - ay0);
+  const areaB = Math.max(0, bx1 - bx0) * Math.max(0, by1 - by0);
   const union = areaA + areaB - inter;
   return union > 0 ? inter / union : 0;
 }
 
-function detectionScore(item: IndexObjectRecord): number {
-  if (item.textness !== null && item.textness !== undefined) {
-    return item.textness;
-  }
-  return bboxArea(item.bbox);
+function detectionScore(item: MetadataRowRecord): number {
+  // Detector confidence, where the cubemap code used an OCR textness score that
+  // v2 never had. Falls back to angular area when the column is NULL.
+  return item.detection_score ?? bboxArea(item);
 }
 
-function detectionSourceFamily(item: IndexObjectRecord): "yolo" | "gdino" | "other" {
-  const source = item.detection_source.toLowerCase();
+function detectionSourceFamily(item: MetadataRowRecord): "yolo" | "gdino" | "other" {
+  const source = item.detector_source.toLowerCase();
   if (source.includes("yolo")) {
     return "yolo";
   }
@@ -122,9 +137,9 @@ function detectionSourceFamily(item: IndexObjectRecord): "yolo" | "gdino" | "oth
 }
 
 export function postProcessDetections(
-  detections: IndexObjectRecord[],
+  detections: MetadataRowRecord[],
   params: BboxPostProcessParams,
-): IndexObjectRecord[] {
+): MetadataRowRecord[] {
   if (!params.enabled) {
     return detections;
   }
@@ -141,16 +156,16 @@ export function postProcessDetections(
     if (family === "other" && (!params.showYolo || !params.showGdino)) {
       return false;
     }
-    const area = bboxArea(item.bbox);
+    const area = bboxArea(item);
     return area >= minLimit && area <= maxLimit;
   });
   if (params.nmsIou >= 1 || filteredBySourceAndArea.length <= 1) {
     return filteredBySourceAndArea;
   }
   const ordered = [...filteredBySourceAndArea].sort((a, b) => detectionScore(b) - detectionScore(a));
-  const kept: IndexObjectRecord[] = [];
+  const kept: MetadataRowRecord[] = [];
   for (const item of ordered) {
-    if (kept.every((other) => bboxIou(item.bbox, other.bbox) < params.nmsIou)) {
+    if (kept.every((other) => bboxIou(item, other) < params.nmsIou)) {
       kept.push(item);
     }
   }

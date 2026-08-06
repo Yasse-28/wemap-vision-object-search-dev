@@ -37,6 +37,8 @@ export type ObjectObservation = {
   objectIdx: number;
   cutoutId: string;
   keyframeId: string;
+  /** `thumbnail_key` of the candidate — the only preview an observation has. */
+  thumbnail: string | null;
   coordinates: [number, number, number] | null;
   bbox: [number, number, number, number];
   similarityScore: number;
@@ -62,14 +64,6 @@ export type KeyframeDebugMetadata = {
   lon: number;
   alt: number | null;
   level: string | null;
-};
-
-export type DetectionRecord = {
-  id: string;
-  label: string | null;
-  confidence: number | null;
-  source: string | null;
-  bbox: [number, number, number, number];
 };
 
 export type OnlineLocalizeOverrides = {
@@ -113,7 +107,6 @@ export type ObjectSearchRunResult = TextSearchState | LocalizeSearchState;
 export type RunObjectSearchParams = {
   mapId: string;
   mapPath: string;
-  indexPath: string | null;
   searchMode: ObjectSearchMode;
   queryInputMode: QueryInputMode;
   text: string;

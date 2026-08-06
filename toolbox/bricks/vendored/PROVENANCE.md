@@ -11,12 +11,31 @@ Synced from `wemap/wemap-vision-backend` @ `365e6bc` on 2026-08-04.
 | Here | Backend path | Changed? |
 |---|---|---|
 | `maths/{__init__,vector3,matrix3,matrix4,quaternion}.py` | `backend/utils/maths/` | Verbatim, except docstring import examples retargeted. Zero Django. |
-| `geo_transform.py` | `backend/utils/geo_transform.py` | `from_geo_ref` → `from_georef_db`; GEOS `Point`/`.intersects()` → GeoJSON dict + pure-Python ray-cast. All frame/ellipsoid math verbatim. |
+| `geo_transform.py` | `backend/utils/geo_transform.py` | **`from_geo_ref` dropped with no replacement** — see below; GEOS `Point`/`.intersects()` → GeoJSON dict + pure-Python ray-cast, now inline in this file. All frame/ellipsoid math verbatim. |
 | `erp.py` | `backend/utils/erp.py` | Import path only. |
 | `depth_decode.py` | `backend/depth/service/decode.py` | Dropped the `VideoKeyframe`/S3 readers; kept path-based read + decode math verbatim. |
 | `viewer360_headings.py` | `backend/api/viewer360/v1_legacy.py` | `headings_from_orientations` only. |
 | `candidate_orientation.py` | `backend/object_search/v1_legacy.py` | `candidate_orientation` only; the v1 kiosk +180° flip left behind on purpose. |
 | `proposal_cutouts.py` | *(the mirror — see below)* | `create_proposal_cutouts` only: added `del img_batch`, made `BATCH` a `batch` parameter (default 10, unchanged). Memory-only; output bitwise identical. |
+
+## `geo_transform.py` has no counterpart to production's `from_geo_ref`
+
+Read this before re-syncing, or the diff will look like a regression.
+
+Production builds a `GeoTransform` from a Django `GeoRef` row. This repo has no
+ORM, so until the v2-only migration it carried `from_georef_db(path)` — the same
+factory reading a legacy `georef.db` instead. That file format is gone, and the
+replacement is not a factory at all: `map_manifest.MapManifest.geo_transform()`
+constructs `GeoTransform(origin=…, levels=…)` from the manifest and calls the
+plain constructor. So the vendored class deliberately exposes **no factory
+matching upstream's `from_geo_ref`**, and `from_position_orientation` /
+`from_local_origin` are the only ones left.
+
+The ray-cast is the second delta. It used to live in `toolbox/georef/georef.py`
+and be imported lazily; that package was v1-only and was deleted, so
+`_polygon_coordinates` / `_point_in_polygon` / `_point_in_ring` now sit directly
+in `geo_transform.py` under `_geometry_contains`. Same code, same semantics —
+only the location changed.
 
 ## The one override on mirrored code
 
