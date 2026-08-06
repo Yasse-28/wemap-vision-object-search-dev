@@ -207,7 +207,10 @@ def _read_capture_outputs(
         return None
 
     metadata = pq.read_table(metadata_path).to_pandas()
-    embeddings = np.load(embeddings_path).astype(np.float16, copy=False)
+    # Despite the .npy name, `prepare.writer.StreamingWriter` streams the rows with
+    # `tofile` — a headerless raw float16 dump, so `np.load` rejects it. Production
+    # reads it the same way, with `np.frombuffer` on the S3 body.
+    embeddings = np.fromfile(embeddings_path, dtype=np.float16)
     embeddings = embeddings.reshape(-1, EMBEDDING_DIM)
     if embeddings.shape[0] != len(metadata):
         raise ValueError(
