@@ -59,6 +59,7 @@ from toolbox.bricks.candidates import (
     load_enriched_candidates,
     resolve_candidates_v2_response,
 )
+from toolbox.bricks.feedback import load_review_feedback
 from toolbox.bricks.georef_source import load_pose_source
 from toolbox.bricks.localize import LocalizationParams, build_localize_response
 from toolbox.bricks.vendored.geo_transform import GeoTransform
@@ -276,6 +277,12 @@ class LocalizeRequest(BaseModel):
     # Accepted and ignored: the benchmark always sends it, the router that would
     # have consumed it was a stub and went to legacy/.
     search_type: str | None = None
+    # Review-feedback gains. Both default to 0.0, so a client that has never heard
+    # of them gets exactly today's behaviour. Bounded because they are added to a
+    # similarity in [-1, 1]: a gain above 1 lets the feedback term dominate the
+    # retrieval score entirely, which is not a tuning regime, it is a bug.
+    feedback_alpha: float = Field(default=0.0, ge=0.0, le=1.0)
+    feedback_beta: float = Field(default=0.0, ge=0.0, le=1.0)
 
     def to_params(self) -> LocalizationParams:
         return LocalizationParams(
@@ -285,6 +292,8 @@ class LocalizeRequest(BaseModel):
             max_observations_per_cluster=self.max_observations_per_cluster,
             clustering_eps_m=self.clustering_eps_m,
             min_keyframes_per_cluster=self.min_keyframes_per_cluster,
+            feedback_alpha=self.feedback_alpha,
+            feedback_beta=self.feedback_beta,
         )
 
 
@@ -413,6 +422,9 @@ def create_app() -> FastAPI:
         entry = _entry(map_id)
         content_type = request.headers.get("content-type", "")
 
+        # Review feedback is looked up on the text branch only; see below.
+        feedback = None
+
         t0 = time.perf_counter()
         if content_type.startswith("multipart/form-data"):
             form = await request.form()
@@ -423,6 +435,11 @@ def create_app() -> FastAPI:
                 num_results=int(form.get("num_results", 100)),
                 candidate_count=int(form.get("candidate_count", K_INTERNAL)),
             )
+            # No feedback for image queries, deliberately. `detection_review.query`
+            # is the *filename* for an image search, which is both meaningless as a
+            # semantic key and prone to collide across unrelated uploads
+            # ("image.jpg"). Matching on it would apply one upload's annotations to
+            # another's results. This is a known limitation, not an oversight.
             try:
                 hits = query_by_image(
                     state.ann_base_url,
@@ -437,6 +454,16 @@ def create_app() -> FastAPI:
         else:
             body = LocalizeRequest.model_validate(await request.json())
             params = body.to_params()
+            if params.feedback_enabled:
+                # `map_id` is the annotation service's slug.
+                feedback = load_review_feedback(map_id, body.text)
+                if feedback is None:
+                    logger.info(
+                        "Feedback boost requested for map '%s' but no annotations "
+                        "match query '%s' — falling back to raw similarity.",
+                        map_id,
+                        body.text,
+                    )
             try:
                 hits = query_by_text(
                     state.ann_base_url,
@@ -453,7 +480,13 @@ def create_app() -> FastAPI:
         geo_transform = state.geo_transform(entry)
         with db.connect() as conn:
             candidates = load_enriched_candidates(
-                conn, entry.geo_ref_id, hits, geo_transform
+                conn,
+                entry.geo_ref_id,
+                hits,
+                geo_transform,
+                feedback=feedback,
+                alpha=params.feedback_alpha,
+                beta=params.feedback_beta,
             )
         response = build_localize_response(
             candidates,

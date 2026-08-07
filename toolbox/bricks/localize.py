@@ -33,6 +33,15 @@ class LocalizationParams:
     max_observations_per_cluster: int = 10
     clustering_eps_m: float = 2.0
     min_keyframes_per_cluster: int = 2
+    # Review-feedback gains. Both zero (the default) means the boosted similarity
+    # is not merely equal to the raw one — it is never consulted at all. See
+    # `_ranking_similarities`.
+    feedback_alpha: float = 0.0
+    feedback_beta: float = 0.0
+
+    @property
+    def feedback_enabled(self) -> bool:
+        return bool(self.feedback_alpha) or bool(self.feedback_beta)
 
 
 @dataclass(frozen=True)
@@ -322,6 +331,44 @@ def rank_localization_clusters(
     return rankings
 
 
+def _ranking_similarities(
+    selected: list[EnrichedCandidate], params: LocalizationParams
+) -> np.ndarray:
+    """The similarity used to *score* clusters — boosted only when asked.
+
+    Disablement is structural at two levels, deliberately. With both gains at
+    zero this returns the raw array and `similarity_boosted` is never read, so a
+    bad value written upstream cannot leak into the default path; and even with
+    gains set, a candidate loaded without feedback falls back to its raw
+    similarity through `effective_similarity`.
+    """
+    if not params.feedback_enabled:
+        return np.array([c.similarity for c in selected], dtype=np.float64)
+    return np.array([c.effective_similarity for c in selected], dtype=np.float64)
+
+
+def _observation_feedback_fields(
+    candidate: EnrichedCandidate, params: LocalizationParams
+) -> dict:
+    """Per-observation feedback terms, or `{}` when the feature is off.
+
+    Emitted only when enabled so the default response shape is byte-identical to
+    what it was before this feature — `toolbox/benchmark/` and the toolbox UI both
+    parse this dict, and an always-present set of nulls would be a silent contract
+    change for a feature nobody turned on.
+    """
+    if not params.feedback_enabled:
+        return {}
+    return {
+        "pos_sim": round(float(candidate.pos_sim), 6),
+        "neg_sim": round(float(candidate.neg_sim), 6),
+        "similarity_boosted": round(float(candidate.effective_similarity), 6),
+        "feedback_delta": round(
+            float(candidate.effective_similarity) - float(candidate.similarity), 6
+        ),
+    }
+
+
 def localize_from_enriched_candidates(
     candidates: list[EnrichedCandidate],
     geo_transform: GeoTransform,
@@ -334,7 +381,20 @@ def localize_from_enriched_candidates(
         return []
 
     positions_eus = np.array([c.eus_xyz for c in selected], dtype=np.float64)
+    # RAW similarity, everywhere below except `cluster_best_sim`.
+    #
+    # `similarities` drives three things that are *geometry*, not ranking, and
+    # boosting any of them would change what the map says rather than how it is
+    # ordered:
+    #   - the leader-canopy seed order, i.e. which detections group together;
+    #   - the centroid weights in `compute_cluster_statistics`, i.e. where the
+    #     cluster is reported to be — and those are normalised by `weights.sum()`,
+    #     so a boosted value clipped to a negative number would produce a
+    #     nonsensical centroid rather than an error;
+    #   - the level seed (`argmax`), i.e. which floor the cluster claims.
+    # Only the cluster's *score* is boosted. That is the whole intervention.
     similarities = np.array([c.similarity for c in selected], dtype=np.float64)
+    ranking_similarities = _ranking_similarities(selected, params)
     keyframe_ids = np.array([c.video_keyframe_id for c in selected], dtype=np.int64)
     # Level is a keyframe-pose property (depth-independent), matching the
     # standalone: keyframe altitude poses and the depth model are both noisy, so
@@ -381,11 +441,19 @@ def localize_from_enriched_candidates(
         cid = int(cluster_ids[local_idx])
         if cid < 0:
             continue
-        sim = float(similarities[local_idx])
-        if cid not in cluster_best_sim or sim > cluster_best_sim[cid]:
-            cluster_best_sim[cid] = sim
+        # The one boosted consumer: the cluster's score, which feeds
+        # `rank_localization_clusters` and therefore `match_score`.
+        ranking_sim = float(ranking_similarities[local_idx])
+        if cid not in cluster_best_sim or ranking_sim > cluster_best_sim[cid]:
+            cluster_best_sim[cid] = ranking_sim
         cluster_keyframes.setdefault(cid, set()).add(str(candidate.video_keyframe_id))
-        cluster_observations.setdefault(cid, []).append((local_idx, sim))
+        # Observations are ordered and truncated on the RAW similarity: this
+        # selects *which* observations a cluster shows, and the plan routes every
+        # selection step to raw. Reordering them on the boost is a defensible
+        # follow-up, not part of this change.
+        cluster_observations.setdefault(cid, []).append(
+            (local_idx, float(similarities[local_idx]))
+        )
 
     cluster_confidence = {
         cid: float(stats.confidence_scores[cid])
@@ -433,7 +501,11 @@ def localize_from_enriched_candidates(
                     "thumbnail": cand.thumbnail,
                     "coordinates": [cand.lat, cand.lng, cand.alt],
                     "bbox": list(PLACEHOLDER_BBOX),
+                    # Raw retrieval similarity — unchanged, and what the HTTP
+                    # benchmark reads. The feedback terms sit beside it rather
+                    # than replacing it, so a tuning session can see both.
                     "similarity_score": float(obj_sim),
+                    **_observation_feedback_fields(cand, params),
                     "heading": observation_heading_deg(
                         keyframe_lat=cand.vkf_lat,
                         keyframe_lng=cand.vkf_lng,
