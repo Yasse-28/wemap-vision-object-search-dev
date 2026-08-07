@@ -2,6 +2,11 @@ import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { NavigationCandidate } from "../object-search-explorer/EquirectPhotoSphereViewer";
+import { ReviewButtons } from "../object-search-review/ReviewControls";
+import {
+  type ObjectSearchReviews,
+  useObjectSearchReviews,
+} from "../object-search-review/useObjectSearchReviews";
 
 import type { MapSummary } from "../api";
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
@@ -50,6 +55,7 @@ const COL_MAX = 75;
 const ROW_MIN = 20;
 const ROW_MAX = 80;
 const EARTH_RADIUS_M = 6378137;
+const EMPTY_LOCALIZATIONS: ObjectLocalization[] = [];
 
 function projectKeyframeToLocalFloor(
   source: { latitude: number; longitude: number; heading_deg: number },
@@ -74,6 +80,7 @@ type Props = {
   map: MapSummary | null;
   mapId: string;
   isMapKnown: boolean;
+  reviewMode?: boolean;
 };
 
 type BboxDraft = { left: number; top: number; width: number; height: number };
@@ -220,6 +227,7 @@ function ObjectSearchPanel(props: Props) {
     "https://vps-api.wemap-vision-computing-1.getwemap.com/{map_id}/object-search/localize",
   );
   const [result, setResult] = useState<ObjectSearchRunResult | null>(null);
+  const [resultQuery, setResultQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -313,7 +321,13 @@ function ObjectSearchPanel(props: Props) {
   }, [selectedGroup, selectedCutoutId]);
 
   const allLocalizations =
-    result && result.mode !== "text" ? result.localizations : ([] as ObjectLocalization[]);
+    result && result.mode !== "text" ? result.localizations : EMPTY_LOCALIZATIONS;
+  const reviews = useObjectSearchReviews({
+    enabled: props.reviewMode === true,
+    mapId: props.mapId,
+    query: result?.mode === "localize-online" ? resultQuery : "",
+    localizations: allLocalizations,
+  });
   const localizationDisplayThreshold = localizationMatchThreshold(localizeSensitivity);
   const localizations = useMemo(
     () =>
@@ -679,6 +693,7 @@ function ObjectSearchPanel(props: Props) {
             : null,
       });
       setResult(next);
+      setResultQuery(imageFile?.name ?? text.trim());
       setSelectedKeyframeId(null);
       setSelectedCutoutId(null);
       setSelectedLocIdx(0);
@@ -691,6 +706,7 @@ function ObjectSearchPanel(props: Props) {
       }
     } catch (requestError) {
       setResult(null);
+      setResultQuery("");
       setError(requestError instanceof Error ? requestError.message : String(requestError));
     } finally {
       setIsLoading(false);
@@ -1056,7 +1072,9 @@ function ObjectSearchPanel(props: Props) {
           }}
         >
           <div className="os-floating-controls-header" onPointerDown={startControlsDrag}>
-            <span className="os-floating-controls-title">Object Search</span>
+            <span className="os-floating-controls-title">
+              {props.reviewMode ? "Annotation" : "Object Search"}
+            </span>
             {result ? (
               <span className="os-pane-subtitle">
                 {result.mode === "text"
@@ -1416,6 +1434,40 @@ function ObjectSearchPanel(props: Props) {
             <span className="os-pane-title">Results</span>
           </div>
           <div className="os-results-scroll">
+            {props.reviewMode && result?.mode === "localize-online" ? (
+              <div className="object-search-review-toolbar">
+                <span>
+                  {reviews.isLoading
+                    ? "Loading reviews…"
+                    : `${reviews.reviewedCount} reviewed · ${reviews.truePositiveCount} correct · ${reviews.falsePositiveCount} incorrect`}
+                </span>
+                <span className="object-search-review-history-actions">
+                  <button
+                    type="button"
+                    className="object-search-secondary-button"
+                    disabled={!reviews.canUndo}
+                    onClick={reviews.undo}
+                    title="Undo review (Ctrl/Cmd+Z)"
+                  >
+                    Undo
+                  </button>
+                  <button
+                    type="button"
+                    className="object-search-secondary-button"
+                    disabled={!reviews.canRedo}
+                    onClick={reviews.redo}
+                    title="Redo review (Ctrl/Cmd+Shift+Z)"
+                  >
+                    Redo
+                  </button>
+                </span>
+              </div>
+            ) : null}
+            {props.reviewMode && reviews.error ? (
+              <div className="object-search-error-banner" role="alert">
+                <span>Annotations: {reviews.error}</span>
+              </div>
+            ) : null}
             {!result ? (
               <p className="os-results-empty">Run a search to see results here.</p>
             ) : result.mode === "text" ? (
@@ -1446,6 +1498,7 @@ function ObjectSearchPanel(props: Props) {
                     onSelectIdx={focusLocalization}
                     selectedObsIdx={selectedObsIdx}
                     onSelectObservation={selectLocalizationObservation}
+                    reviews={props.reviewMode ? reviews : null}
                   />
                 </section>
                 <section className="object-search-localize-detail">
@@ -1702,6 +1755,7 @@ function LocalizeInspector(props: {
   onSelectIdx: (idx: number) => void;
   selectedObsIdx: number;
   onSelectObservation: (locIdx: number, obsIdx: number) => void;
+  reviews: ObjectSearchReviews | null;
 }) {
   const [collapsedClusters, setCollapsedClusters] = useState<Set<number>>(() => new Set());
 
@@ -1744,9 +1798,12 @@ function LocalizeInspector(props: {
         {props.localizations.map((loc, locIndex) => {
           const isSelectedCluster = locIndex === props.selectedIdx;
           const isCollapsed = collapsedClusters.has(locIndex);
+          const clusterReviewStatus = props.reviews?.clusterStatus(loc) ?? null;
           return (
             <article
-              className={`object-search-cluster-group${isSelectedCluster ? " is-selected" : ""}`}
+              className={`object-search-cluster-group${
+                isSelectedCluster ? " is-selected" : ""
+              }${clusterReviewStatus ? ` is-review-${clusterReviewStatus}` : ""}`}
               key={`cluster-${locIndex}`}
             >
               <div className="object-search-cluster-header">
@@ -1786,6 +1843,13 @@ function LocalizeInspector(props: {
                     {loc.observations.length || loc.observationCount} detections
                   </span>
                 </button>
+                {props.reviews ? (
+                  <ReviewButtons
+                    label={`Cluster ${locIndex + 1}`}
+                    status={clusterReviewStatus}
+                    onChange={(status) => props.reviews?.setClusterStatus(loc, status)}
+                  />
+                ) : null}
               </div>
               <div className="object-search-cluster-meta">
                 <span>sim {formatNumber(loc.similarityScore)}</span>
@@ -1800,33 +1864,47 @@ function LocalizeInspector(props: {
                   {loc.observations.map((obs, obsIndex) => {
                     const isSelectedDetection =
                       isSelectedCluster && obsIndex === props.selectedObsIdx;
+                    const reviewStatus = props.reviews?.observationStatus(obs) ?? null;
                     return (
-                      <button
+                      <div
                         key={`${locIndex}-${obs.objectIdx}-${obsIndex}`}
-                        type="button"
                         className={`object-search-detection-card${
                           isSelectedDetection ? " is-selected" : ""
-                        }`}
-                        onClick={() => props.onSelectObservation(locIndex, obsIndex)}
+                        }${reviewStatus ? ` is-review-${reviewStatus}` : ""}`}
                       >
-                        <span className="object-search-detection-image-wrap">
-                          <img
-                            src={cutoutPreviewUrl(props.mapId, obs.thumbnail)}
-                            alt={`Detection ${obsIndex + 1} in cluster ${locIndex + 1}`}
-                            loading="lazy"
+                        <button
+                          type="button"
+                          className="object-search-detection-select-button"
+                          onClick={() => props.onSelectObservation(locIndex, obsIndex)}
+                        >
+                          <span className="object-search-detection-image-wrap">
+                            <img
+                              src={cutoutPreviewUrl(props.mapId, obs.thumbnail)}
+                              alt={`Detection ${obsIndex + 1} in cluster ${locIndex + 1}`}
+                              loading="lazy"
+                            />
+                            <span className="object-search-detection-index">
+                              {obsIndex + 1}
+                            </span>
+                            <span className="object-search-detection-score">
+                              {formatNumber(obs.similarityScore)}
+                            </span>
+                          </span>
+                          <span className="object-search-detection-meta">
+                            <strong>Keyframe {obs.keyframeId}</strong>
+                            <small>cutout {obs.cutoutId}</small>
+                          </span>
+                        </button>
+                        {props.reviews ? (
+                          <ReviewButtons
+                            label={`Detection ${obsIndex + 1} in cluster ${locIndex + 1}`}
+                            status={reviewStatus}
+                            onChange={(status) =>
+                              props.reviews?.setObservationStatus(obs, status)
+                            }
                           />
-                          <span className="object-search-detection-index">
-                            {obsIndex + 1}
-                          </span>
-                          <span className="object-search-detection-score">
-                            {formatNumber(obs.similarityScore)}
-                          </span>
-                        </span>
-                        <span className="object-search-detection-meta">
-                          <strong>Keyframe {obs.keyframeId}</strong>
-                          <small>cutout {obs.cutoutId}</small>
-                        </span>
-                      </button>
+                        ) : null}
+                      </div>
                     );
                   })}
                 </div>

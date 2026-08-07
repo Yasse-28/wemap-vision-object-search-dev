@@ -90,7 +90,7 @@ const server = createServer(async (request, response) => {
         maps: maps.map((map) => map.id),
         python_api: options.pythonApiBaseUrl,
         ann_api: options.annApiBaseUrl,
-        annotation_api: options.annotationBaseUrl,
+        annotations: "integrated-sqlite",
       });
       return;
     }
@@ -131,7 +131,7 @@ server.listen(options.port, options.host, () => {
       `config=${options.configPath}`,
       `bricks_api=${options.pythonApiBaseUrl}`,
       `ann_api=${options.annApiBaseUrl}`,
-      `annotation_api=${options.annotationBaseUrl}`,
+      "annotations=integrated-sqlite",
       `ui_dist=${options.uiDistDir}`,
     ].join("\n"),
   );

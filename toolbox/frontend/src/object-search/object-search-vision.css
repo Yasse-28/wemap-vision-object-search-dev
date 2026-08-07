@@ -854,6 +854,10 @@ body.object-search-dock-resizing * {
   flex: 0 0 auto;
   width: 100%;
   min-height: 72px;
+  display: block;
+}
+
+.object-search-cluster-sidebar .object-search-detection-select-button {
   display: grid;
   grid-template-columns: 72px minmax(0, 1fr);
 }
@@ -1004,6 +1008,76 @@ body.object-search-dock-resizing * {
 .object-search-detection-card.is-selected {
   border-color: #16a34a;
   box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.16);
+}
+
+.object-search-detection-card.is-review-true_positive,
+.object-search-cluster-group.is-review-true_positive {
+  border-color: rgba(22, 163, 74, 0.78);
+  background: rgba(240, 253, 244, 0.92);
+}
+
+.object-search-detection-card.is-review-false_positive,
+.object-search-cluster-group.is-review-false_positive {
+  border-color: rgba(220, 38, 38, 0.72);
+  background: rgba(254, 242, 242, 0.92);
+}
+
+.object-search-detection-select-button {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.object-search-review-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.object-search-detection-card > .object-search-review-actions {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 2;
+}
+
+.object-search-review-button {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.object-search-review-button:hover,
+.object-search-review-button:focus-visible {
+  transform: scale(1.06);
+}
+
+.object-search-review-button.is-false.is-active {
+  background: #dc2626;
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.24);
+}
+
+.object-search-review-button.is-true.is-active {
+  background: #16a34a;
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.24);
 }
 
 .object-search-detection-image-wrap {
@@ -1771,6 +1845,29 @@ body.os-dragging * {
   flex-direction: column;
   scrollbar-width: thin;
   scrollbar-color: rgba(93, 112, 136, 0.42) transparent;
+}
+
+.object-search-review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(201, 213, 228, 0.8);
+  background: #f8fafc;
+  color: #465c74;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.object-search-review-history-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.object-search-review-history-actions .object-search-secondary-button {
+  min-height: 28px;
+  padding: 4px 8px;
 }
 
 .os-results-empty {

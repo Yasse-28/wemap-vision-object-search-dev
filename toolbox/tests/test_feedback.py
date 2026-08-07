@@ -34,7 +34,8 @@ def _write_annotation_db(
     path = data_dir / slug / "object-search-annotations.db"
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE detection_review (
             detection_review_id INTEGER PRIMARY KEY,
             target_type TEXT NOT NULL,
@@ -42,7 +43,8 @@ def _write_annotation_db(
             query       TEXT NOT NULL,
             status      TEXT NOT NULL
         )
-        """)
+        """
+    )
     conn.executemany(
         "INSERT INTO detection_review (target_type, target_id, query, status) "
         "VALUES ('object', ?, ?, ?)",
@@ -56,19 +58,25 @@ def _write_annotation_db(
 # ------------------------------------------------------------------------- loader
 
 
-def test_missing_db_returns_none(tmp_path: Path, monkeypatch) -> None:
+def test_missing_db_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A map with no annotations must not be a special case for the caller."""
     monkeypatch.setenv("ANNOTATION_DATA_DIR", str(tmp_path))
     assert load_review_feedback(SLUG, "fire exit") is None
 
 
-def test_unknown_query_returns_none(tmp_path: Path, monkeypatch) -> None:
+def test_unknown_query_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("ANNOTATION_DATA_DIR", str(tmp_path))
     _write_annotation_db(tmp_path, [(1, "fire exit", "true_positive")])
     assert load_review_feedback(SLUG, "vending machine") is None
 
 
-def test_mixed_reviews_split_by_status(tmp_path: Path, monkeypatch) -> None:
+def test_mixed_reviews_split_by_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("ANNOTATION_DATA_DIR", str(tmp_path))
     _write_annotation_db(
         tmp_path,
@@ -87,9 +95,25 @@ def test_mixed_reviews_split_by_status(tmp_path: Path, monkeypatch) -> None:
     assert feedback.negative_ids == [11]
 
 
+def test_configured_map_path_overrides_legacy_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The integrated Toolbox store lives directly inside the configured map."""
+    monkeypatch.setenv("ANNOTATION_DATA_DIR", str(tmp_path / "wrong-root"))
+    database_path = _write_annotation_db(tmp_path, [(10, "fire exit", "true_positive")])
+
+    feedback = load_review_feedback(SLUG, "fire exit", database_path.parent)
+
+    assert feedback is not None
+    assert feedback.positive_ids == [10]
+
+
 @pytest.mark.parametrize("stored, asked", [("FIDS", "fids"), ("fids", " FIDS ")])
 def test_query_match_is_case_and_whitespace_insensitive(
-    tmp_path: Path, monkeypatch, stored: str, asked: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored: str,
+    asked: str,
 ) -> None:
     """The stored query is raw user input; `FIDS` and `fids` are one search."""
     monkeypatch.setenv("ANNOTATION_DATA_DIR", str(tmp_path))
@@ -101,20 +125,26 @@ def test_query_match_is_case_and_whitespace_insensitive(
     assert feedback.negative_ids == [7]
 
 
-def test_inner_whitespace_is_not_collapsed(tmp_path: Path, monkeypatch) -> None:
+def test_inner_whitespace_is_not_collapsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """ "fire exit" and "fire  exit" are genuinely different searches."""
     monkeypatch.setenv("ANNOTATION_DATA_DIR", str(tmp_path))
     _write_annotation_db(tmp_path, [(7, "fire  exit", "true_positive")])
     assert load_review_feedback(SLUG, "fire exit") is None
 
 
-def test_another_maps_annotations_are_not_visible(tmp_path: Path, monkeypatch) -> None:
+def test_another_maps_annotations_are_not_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("ANNOTATION_DATA_DIR", str(tmp_path))
     _write_annotation_db(tmp_path, [(1, "fire exit", "true_positive")], slug="other")
     assert load_review_feedback(SLUG, "fire exit") is None
 
 
-def test_duplicate_ids_are_collapsed_and_sorted(tmp_path: Path, monkeypatch) -> None:
+def test_duplicate_ids_are_collapsed_and_sorted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Order must not depend on SQLite's row order — fixtures would be flaky."""
     monkeypatch.setenv("ANNOTATION_DATA_DIR", str(tmp_path))
     _write_annotation_db(
@@ -130,7 +160,9 @@ def test_duplicate_ids_are_collapsed_and_sorted(tmp_path: Path, monkeypatch) -> 
     assert feedback.positive_ids == [3, 5]
 
 
-def test_corrupt_db_is_swallowed(tmp_path: Path, monkeypatch) -> None:
+def test_corrupt_db_is_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A broken annotation file must never take down a search."""
     monkeypatch.setenv("ANNOTATION_DATA_DIR", str(tmp_path))
     path = tmp_path / SLUG / "object-search-annotations.db"

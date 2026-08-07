@@ -456,7 +456,7 @@ def create_app() -> FastAPI:
             params = body.to_params()
             if params.feedback_enabled:
                 # `map_id` is the annotation service's slug.
-                feedback = load_review_feedback(map_id, body.text)
+                feedback = load_review_feedback(map_id, body.text, entry.path)
                 if feedback is None:
                     logger.info(
                         "Feedback boost requested for map '%s' but no annotations "

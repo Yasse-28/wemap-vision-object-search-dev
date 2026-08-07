@@ -25,6 +25,9 @@ Owned by this backend:
   manifest, read by `src/map-manifest.ts`.
 - `POST /ui/api/maps/:mapId/annotations`, which writes the supplied
   FeatureCollection to `{map.path}/annotations/annotations.geojson`
+- `GET /ui/api/maps/:mapId/review-annotations` and
+  `POST|DELETE …/detection-review`, which own the integrated
+  `{map.path}/object-search-annotations.db` store
 - `GET /ui/*` static frontend files from `object-search-toolbox/frontend/dist`
 
 Proxied unchanged to the bricks service:

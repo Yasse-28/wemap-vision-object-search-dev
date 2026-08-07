@@ -25,12 +25,6 @@ export type WorkbenchOptions = {
   uiDistDir: string;
   /** Repo root: both python services are spawned from here, with PYTHONPATH set. */
   repoRoot: string;
-  /**
-   * annotation_service (third_party/object_search/annotation_service), which owns the
-   * annotation ground truth. Its GeoJSON export is fetched before a benchmark run.
-   * This used to be wemap-vision-tools; that submodule is gone as of ADR 0002.
-   */
-  annotationBaseUrl: string;
 };
 
 const contentTypes: Record<string, string> = {
@@ -85,9 +79,6 @@ export function parseArgs(argv: string[], repoRoot: string): WorkbenchOptions {
     // toolbox/backend → repo root is two levels up.
     repoRoot:
       process.env.OBJECT_SEARCH_REPO_ROOT ?? path.resolve(repoRoot, ".."),
-    annotationBaseUrl: normalizeBaseUrl(
-      process.env.OBJECT_SEARCH_ANNOTATION_URL ?? "http://127.0.0.1:8001",
-    ),
   };
 
   for (let idx = 0; idx < argv.length; idx += 1) {
@@ -113,9 +104,6 @@ export function parseArgs(argv: string[], repoRoot: string): WorkbenchOptions {
       idx += 1;
     } else if (arg === "--repo-root" && next) {
       options.repoRoot = next;
-      idx += 1;
-    } else if (arg === "--annotation-url" && next) {
-      options.annotationBaseUrl = normalizeBaseUrl(next);
       idx += 1;
     }
   }

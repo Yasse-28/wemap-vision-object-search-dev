@@ -11,15 +11,15 @@
  *   embedding on the GPU. We only health-check it and tell the user how to start it.
  *   Loading MetaCLIP behind a button press is not a decision to make implicitly.
  *
- * Ground truth comes from annotation_service (it owns the annotations database);
- * before ADR 0002 it came from the wemap-vision-tools submodule.
+ * Ground truth comes from the SQLite annotation store owned by this backend.
  *
  * Results live in {map_path}/benchmark/{runId}/ (metrics.json, raw_results.json).
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { buildGroundTruth } from "./annotation-store.js";
 import type { MapEntry } from "./config.js";
 import type { WorkbenchOptions } from "./http-utils.js";
 import { WorkbenchRouteError } from "./workbench-index.js";
@@ -558,59 +558,28 @@ function handleProgressLine(job: BenchmarkJob, line: string): void {
 }
 
 /**
- * Refresh {map}/benchmark/annotations.geojson from annotation_service, which owns the
- * annotations database.
- *
- * The semantics inverted with ADR 0002. wemap-vision-tools exposed a POST that
- * regenerated the file on disk as a side effect; annotation_service instead exposes
- * `GET /{slug}/object-search/ground-truth`, which *returns* the FeatureCollection
- * built from its database. So we have to write it ourselves — atomically, since the
- * benchmark reads this same path moments later and a torn file would fail the run
- * with a confusing JSON error.
- *
- * Best-effort throughout: on any failure the existing file on disk is used, because a
- * stale ground truth still yields a meaningful comparison, whereas refusing to run
- * does not.
+ * Refresh `{map}/benchmark/annotations.geojson` from the backend's SQLite store.
+ * The write is atomic because the benchmark reads this path moments later.
+ * On failure, keep the existing file so a stale but useful benchmark can still run.
  */
-async function regenerateGroundTruth(options: WorkbenchOptions, map: MapEntry): Promise<void> {
-  const slug = encodeURIComponent(map.id);
-  const url = `${options.annotationBaseUrl}/${slug}/object-search/ground-truth`;
+async function regenerateGroundTruth(map: MapEntry): Promise<void> {
   const target = path.join(map.path, "benchmark", "annotations.geojson");
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
-    if (!response.ok) {
-      console.warn(
-        `[benchmark] annotation_service returned ${response.status} for '${map.id}'; `
-        + "using the existing annotations.geojson.",
-      );
-      return;
-    }
-    const body = await response.text();
-    // Validate before overwriting: a 200 with an error page would otherwise
-    // clobber a good ground truth.
-    const parsed = JSON.parse(body) as { type?: string; features?: unknown };
-    if (parsed.type !== "FeatureCollection" || !Array.isArray(parsed.features)) {
-      console.warn(
-        `[benchmark] annotation_service response for '${map.id}' is not a `
-        + "FeatureCollection; keeping the existing annotations.geojson.",
-      );
-      return;
-    }
+    const groundTruth = buildGroundTruth(map);
+    const body = `${JSON.stringify(groundTruth, null, 2)}\n`;
     await mkdir(path.dirname(target), { recursive: true });
     const tmp = `${target}.tmp-${process.pid}`;
     await writeFile(tmp, body, "utf8");
-    const { rename } = await import("node:fs/promises");
     await rename(tmp, target);
     console.log(
       `[benchmark] refreshed ground truth for '${map.id}' `
-      + `(${parsed.features.length} annotation(s)).`,
+      + `(${groundTruth.features.length} annotation(s)).`,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(
-      `[benchmark] could not reach annotation_service at ${options.annotationBaseUrl} to `
-      + `refresh ground truth for '${map.id}': ${message}; using the existing `
-      + "annotations.geojson.",
+      `[benchmark] could not refresh ground truth for '${map.id}' from the local `
+      + `annotation store: ${message}; using the existing annotations.geojson.`,
     );
   }
 }
@@ -629,8 +598,7 @@ async function runBenchmarkJob(
     await ensurePythonService(options, map, job);
   }
 
-  // Refresh the ground-truth GeoJSON from annotation_service (single source).
-  await regenerateGroundTruth(options, map);
+  await regenerateGroundTruth(map);
 
   job.state = "running";
   const runDir = path.join(map.path, "benchmark", job.runId);

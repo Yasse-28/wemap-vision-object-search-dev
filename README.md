@@ -25,7 +25,9 @@ production, and what it retired),
 [ADR 0003](docs/adr/0003-split-pipeline-into-a-submodule.md) (this split),
 [ADR 0004](docs/adr/0004-v2-map-data-only.md) (v2 map data only),
 [ADR 0005](docs/adr/0005-explorer-reads-the-parquet.md) (the explorer reads
-`metadata.parquet`).
+`metadata.parquet`), and
+[ADR 0006](docs/adr/0006-integrate-annotations-into-toolbox.md) (the Toolbox owns
+its local annotation SQLite store).
 
 ## What's here
 

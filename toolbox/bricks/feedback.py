@@ -1,9 +1,9 @@
 """Review annotations, read back as similarity-boost prototypes.
 
-The annotation service (`third_party/object_search/annotation_service/`) records
-one row per `(target_type, target_id, query)` in a per-map SQLite file:
+The Toolbox backend records one row per `(target_type, target_id, query)` in the
+map's SQLite file:
 
-    $ANNOTATION_DATA_DIR/<slug>/object-search-annotations.db
+    <map_path>/object-search-annotations.db
 
 `detection_review.target_id` is an `object_search_candidate.id`, and `status` is
 `true_positive` or `false_positive`. This module turns those into two id sets, so
@@ -36,7 +36,7 @@ from pathlib import Path
 from toolbox.logging import logger
 
 DB_FILENAME = "object-search-annotations.db"
-DEFAULT_DATA_DIR = "/data"  # matches annotation_service.db.data_dir()
+DEFAULT_DATA_DIR = "/data"  # Legacy fallback when no configured map path is supplied.
 
 _SELECT_REVIEWS = """
 SELECT target_id, status, query
@@ -66,17 +66,27 @@ def normalize_query(query: str) -> str:
     return str(query).strip().casefold()
 
 
-def annotation_db_path(slug: str) -> Path:
-    """Where the annotation service keeps this map's DB.
+def annotation_db_path(slug: str, map_path: Path | None = None) -> Path:
+    """Return the annotation database path for a map.
 
-    Reads `ANNOTATION_DATA_DIR` at call time, not at import, so a test can set it
-    per-case. The `slug` is the map id — confirmed equal to `MapEntry.id`.
+    Args:
+        slug: Toolbox map identifier.
+        map_path: Configured map directory. When omitted, retain the legacy
+            ``ANNOTATION_DATA_DIR/<slug>`` lookup for callers and tests that do
+            not have a map entry.
+
+    Returns:
+        Path to ``object-search-annotations.db``.
     """
+    if map_path is not None:
+        return Path(map_path) / DB_FILENAME
     data_dir = Path(os.environ.get("ANNOTATION_DATA_DIR", DEFAULT_DATA_DIR))
     return data_dir / slug / DB_FILENAME
 
 
-def load_review_feedback(slug: str, query: str) -> ReviewFeedback | None:
+def load_review_feedback(
+    slug: str, query: str, map_path: Path | None = None
+) -> ReviewFeedback | None:
     """Reviewed candidate ids for `slug` matching `query`, or None.
 
     Returns `None` — not an empty `ReviewFeedback` — when there is no DB, no
@@ -84,7 +94,7 @@ def load_review_feedback(slug: str, query: str) -> ReviewFeedback | None:
     write instead of three. Any SQLite error is logged and swallowed: a missing or
     corrupt annotation file must never take down a search.
     """
-    path = annotation_db_path(slug)
+    path = annotation_db_path(slug, map_path)
     if not path.is_file():
         logger.debug("No annotation DB for map '%s' at %s.", slug, path)
         return None

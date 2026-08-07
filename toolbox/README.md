@@ -34,6 +34,10 @@ After selecting a configured map, the UI provides:
   viewing arc on the map. Bounding boxes can be enabled with `Show boxes`.
   Its annotation mode creates reviewable point annotations by inverse-projecting
   photosphere or cutout clicks through the keyframe depth map.
+- **Annotation**: run localized searches and review whole clusters or individual
+  detections as correct/incorrect. Reviews are restored per raw query, saved to
+  the map's `object-search-annotations.db` by the Toolbox backend, and support
+  toolbar or keyboard undo/redo. No separate annotation service is required.
 - **OS Data Explorer** *(legacy maps only)*: inspect indexed cutouts and latent
   data. It reads the standalone `object-search.db`, which is no longer produced —
   the index lives in pgvector now. Routes return `501` with an explanation for
@@ -134,13 +138,11 @@ npm run start -- --config /path/to/config.json5 --python-api http://127.0.0.1:45
 
 ## Architecture Boundary
 
-The TypeScript backend owns `/ui/api/...` workbench routes and serves the
-frontend. It proxies object-search model routes to the Python service without
-implementing ranking, embedding, or localization itself.
-
-Annotation ground truth is owned by `annotation_service`
-(`../third_party/object_search/annotation_service`), which the benchmark queries
-before each run. It replaced the `wemap-vision-tools` submodule in ADR 0002.
+The TypeScript backend owns `/ui/api/...` workbench routes, serves the frontend,
+and owns each map's `object-search-annotations.db`. It proxies object-search model
+routes to the Python service without implementing ranking, embedding, or
+localization itself. Before a benchmark, it exports ground truth from its SQLite
+store to `benchmark/annotations.geojson` atomically.
 
 This toolbox is dev-only and has no production counterpart. The contracts it
 must match are the mirrored trees in `../third_party/object_search/` and

@@ -3,6 +3,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 
 import {
+  deleteDetectionReview,
+  listAnnotations,
+  parseReviewMutation,
+  upsertDetectionReview,
+} from "./annotation-store.js";
+import {
   benchmarkRunPayload,
   benchmarkStatusPayload,
   startBenchmarkRun,
@@ -177,6 +183,27 @@ export async function handleWorkbenchUiMapRoute(
     }
     if (method === "POST" && suffix === "/annotations") {
       sendJson(response, 200, await saveAnnotations(map, await requestJson(request)));
+      return true;
+    }
+    if (method === "GET" && suffix === "/review-annotations") {
+      const query = queryString(url, "query")?.trim() || null;
+      sendJson(response, 200, listAnnotations(map, query));
+      return true;
+    }
+    if (method === "POST" && suffix === "/review-annotations/detection-review") {
+      const review = parseReviewMutation(await requestJson(request), true);
+      sendJson(response, 201, {
+        detection_review_id: upsertDetectionReview(map, review),
+      });
+      return true;
+    }
+    if (method === "DELETE" && suffix === "/review-annotations/detection-review") {
+      deleteDetectionReview(
+        map,
+        parseReviewMutation(await requestJson(request), false),
+      );
+      response.writeHead(204);
+      response.end();
       return true;
     }
     if (method === "GET" && /^\/keyframes\/[^/]+$/.test(suffix)) {

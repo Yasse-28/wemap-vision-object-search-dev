@@ -9,6 +9,7 @@ import ObjectSearchPanel from "./object-search/ObjectSearchPanel";
 type Feature =
   | "object-search"
   | "object-search-explorer"
+  | "annotation"
   | "benchmark";
 
 function getPathMapId(): string | null {
@@ -30,9 +31,7 @@ function parseMapRoute(): { mapId: string | null; feature: Feature } {
   }
   let feature: Feature = "object-search";
   if (segments[1] === "annotation") {
-    const nextPath = `/ui/maps/${encodeURIComponent(mapId)}/object-search-explorer`;
-    window.history.replaceState(null, "", nextPath);
-    feature = "object-search-explorer";
+    feature = "annotation";
   } else if (segments[1] === "object-search-explorer") {
     feature = "object-search-explorer";
   } else if (segments[1] === "benchmark") {
@@ -45,6 +44,9 @@ function mapExplorerPath(mapId: string, feature: Feature): string {
   const base = `/ui/maps/${encodeURIComponent(mapId)}`;
   if (feature === "object-search-explorer") {
     return `${base}/object-search-explorer`;
+  }
+  if (feature === "annotation") {
+    return `${base}/annotation`;
   }
   if (feature === "benchmark") {
     return `${base}/benchmark`;
@@ -241,6 +243,15 @@ function MapExplorer(props: {
           </button>
           <button
             className={`feature-button${
+              activeFeature === "annotation" ? " is-active" : ""
+            }`}
+            type="button"
+            onClick={() => selectFeature("annotation")}
+          >
+            Annotation
+          </button>
+          <button
+            className={`feature-button${
               activeFeature === "benchmark" ? " is-active" : ""
             }`}
             type="button"
@@ -262,6 +273,13 @@ function MapExplorer(props: {
           map={props.map}
           mapId={props.mapId}
           isMapKnown={Boolean(props.map)}
+        />
+      ) : activeFeature === "annotation" ? (
+        <ObjectSearchPanel
+          map={props.map}
+          mapId={props.mapId}
+          isMapKnown={Boolean(props.map)}
+          reviewMode
         />
       ) : activeFeature === "benchmark" ? (
         <BenchmarkPanel

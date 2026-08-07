@@ -10,20 +10,24 @@ documented separately in [`bricks.md`](bricks.md).
 **Read this when:** changing the workbench UI/API, the object-search explorer,
 annotation, or the benchmark runner.
 
+The annotation ownership boundary is recorded in
+[ADR 0006](../docs/adr/0006-integrate-annotations-into-toolbox.md).
+
 ## Backend (`toolbox/backend/src/`, plain Node http, run with `tsx`)
 
 | Path | Responsibility | Key symbols |
 |---|---|---|
 | `main.ts` | Entry: HTTP server; routes `/ui/api/...`, serves UI, proxies `/{map_id}/object-search/…` to the bricks service | `server.listen(options.port…)`, `isObjectSearchRoute`, `mapSummaries`, `proxyRequest` |
-| `http-utils.ts` | Options/args, static serving, proxy | `parseArgs`, `WorkbenchOptions`; `pythonApiBaseUrl` = **bricks** service (`OBJECT_SEARCH_PYTHON_API`, :45678), `annApiBaseUrl` = **mirrored online** service (`OBJECT_SEARCH_ANN_URL`, :8000), `annotationBaseUrl` (`OBJECT_SEARCH_ANNOTATION_URL`, :8001), `repoRoot`, `OBJECT_SEARCH_WORKBENCH_PORT=45700` |
+| `http-utils.ts` | Options/args, static serving, proxy | `parseArgs`, `WorkbenchOptions`; `pythonApiBaseUrl` = **bricks** service (`OBJECT_SEARCH_PYTHON_API`, :45678), `annApiBaseUrl` = **mirrored online** service (`OBJECT_SEARCH_ANN_URL`, :8000), `repoRoot`, `OBJECT_SEARCH_WORKBENCH_PORT=45700` |
 | `config.ts` | Load map config | `loadMapEntries`, `loadGlobalObjectSearch`, `MapEntry` (`id, path, emmid, geo_ref_id, object_search`) |
+| `annotation-store.ts` | Integrated per-map SQLite annotation CRUD, legacy migration, one-shot benchmark GeoJSON import, and ground-truth assembly | `annotationDatabasePath`, `listAnnotations`, `upsertDetectionReview`, `deleteDetectionReview`, `buildGroundTruth` |
 | `object-search-metadata.ts` | **Reads `{map}/object-search/metadata.parquet` natively** (`hyparquet`, pure JS). Replaces the retired `object-search.db` reader: no cutout→objects hierarchy, one row *is* one proposal and one detection. Caches by mtime and **drops the entry when the read fails**. | `resolveMetadataPath`, `loadMetadata`, `requireMetadata`, `rowsForKeyframe`, `rowByIndex`, `MetadataRow`, `LoadedMetadata`, `MetadataError` |
 | `erp-geometry.ts` | The only place the four stored angle columns become something drawable. Replaces the cubemap algebra. | `erpBboxRatios`, `erpRectsWrapped`, `cutoutRatioToErpUv`, `assertEquirect2to1`, `gnomonicFfmpegFilter`, `paddingMask`, `isRenderableGnomonic`, `angularAreaDeg2` |
 | `workbench-index.ts` | Manifest-backed routes (keyframe markers, depth pin, view cone, world-point projection, ERP + depth previews, `previewFromPathPng`) **plus** the parquet-backed row routes. The manifest half needs no metadata and must never be gated on it. | `objectSearchMetadataStatusPayload`, `metadataRowsPayload`, `metadataRowPayload`, `metadataRowRenderPng`, `indexKeyframeEquirectPreviewPng`, `indexDepthPinPayload`, `indexViewConePayload`, `indexProjectWorldPointPayload`, `keyframeMetadataPayload`, `previewFromPathPng`, `rowFilterParamsFromQuery`, `keyframeHeadingDegreesFromPose`; shells to a Python interp for uint16-TIFF depth decode (`OBJECT_SEARCH_WORKBENCH_PYTHON`) and to `ffmpeg`/`convert` for renders |
 | `workbench-api.ts` | `/ui/api/...` route handling | `isWorkbenchUiMapRoute`, `handleWorkbenchUiMapRoute` |
 | `keyframe-graph.ts` | 360-viewer graph payload, read straight from `360-viewer/graph.geojson` — no pose source involved | `parseKeyframeGraph`, `keyframeGraphPayload` |
 | `map-manifest.ts` | **The v2 manifest reader**, mirroring `toolbox/bricks/map_manifest.py`, plus the EUS→WDS pose adapter every route below depends on | `loadMapManifest`, `findManifest`, `parseManifest`, `MANIFEST_PATTERN`, `assetBasename`, `formatLevel`, `quaternionToMatrix3`, `manifestKeyframeToWorldToCameraWds` |
-| `benchmark-runner.ts` | Run the HTTP benchmark | **Spawns the bricks service** (`python -m toolbox.bricks.service --config <the toolbox config>`) when unreachable, and keeps it alive across runs. **Only health-checks the mirrored online service** — never spawns it (it loads MetaCLIP on the GPU); `assertAnnServiceReachable` fails early with instructions. Before each run **GETs `{annotationBaseUrl}/{mapId}/object-search/ground-truth`** and writes it to `{map}/benchmark/annotations.geojson` atomically, validating it is a FeatureCollection first (best-effort: falls back to the file on disk). Spawns `toolbox/benchmark/object_search_http_benchmark.py` with `cwd=repoRoot` and `PYTHONPATH` set by `pythonEnv()`. Results in `{map_path}/benchmark/{runId}/`. `startBenchmarkRun`, `benchmark{Run,Status}Payload` |
+| `benchmark-runner.ts` | Run the HTTP benchmark | **Spawns the bricks service** (`python -m toolbox.bricks.service --config <the toolbox config>`) when unreachable, and keeps it alive across runs. **Only health-checks the mirrored online service** — never spawns it (it loads MetaCLIP on the GPU); `assertAnnServiceReachable` fails early with instructions. Before each run exports the integrated annotation SQLite store to `{map}/benchmark/annotations.geojson` atomically (best-effort: falls back to the file on disk). Spawns `toolbox/benchmark/object_search_http_benchmark.py` with `cwd=repoRoot` and `PYTHONPATH` set by `pythonEnv()`. Results in `{map_path}/benchmark/{runId}/`. `startBenchmarkRun`, `benchmark{Run,Status}Payload` |
 
 ## Frontend (`toolbox/frontend/src/`, React 19 + Vite + three.js)
 
@@ -39,6 +43,7 @@ annotation, or the benchmark runner.
 | `GET /object-search-metadata/keyframes/{id}/depth-preview.png`, `POST …/depth-pin`, `…/view-cone`, `…/project-world-point` | Manifest-only, except `depth-pin` with `projection: "cutout"`, which needs `row_index`. |
 | `GET /object-search-metadata/keyframe-graph` | From `360-viewer/graph.geojson`. |
 | `GET /preview.png?preview_path=` | Serves a file from the map directory. **The default preview** for a proposal (`thumbnail_key`) and for a search result. |
+| `GET /review-annotations`, `POST\|DELETE /review-annotations/detection-review` | Integrated review annotations in `{map}/object-search-annotations.db`; no external service. |
 
 The prefix was `/object-search-index`, which promised a database that no longer
 exists; and `/cutouts/{id}/{preview.png,detections}`, `…/objects/{id}/crop.png`,
@@ -62,6 +67,10 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
 - `annotations/` — point/polygon annotations → `annotations/annotations.geojson`
   (`ExplorerAnnotationWorkspace.tsx`, `geojson.ts`, `LivemapAnnotation.tsx`,
   `livemapHost.ts`).
+- `object-search-review/` — detection-review API client, review controls, and
+  per-query TP/FP state with undo/redo. Mounted through `ObjectSearchPanel` in
+  the dedicated `/ui/maps/:mapId/annotation` tab; `annotation-store.ts` in the
+  backend owns the compatible per-map SQLite file directly.
 - `benchmark/` — run + view benchmark results (`BenchmarkPanel.tsx`).
 - `App.tsx`, `main.tsx`, top-level `api.ts` — shell + shared client.
 

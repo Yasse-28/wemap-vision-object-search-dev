@@ -26,7 +26,7 @@ Anything that is *not* in production lives in `toolbox/` (dev-only, maintained) 
 | **Mirror: prepare** | `third_party/object_search/prepare/` | Python | Offline job: ERP images → detector proposals → MetaCLIP2 embeddings. **Copy of production.** |
 | **Mirror: inference/indexing** | `third_party/object_search/{inference,indexing}/` | Python | Shared MetaCLIP2 embedder, ERP re-crop, Numba spatial pre-filter. **Copy of production.** |
 | **Mirror: online service** | `third_party/object_search/services/object_search_online/` | Python | GPU FastAPI: embed + HNSW → flat `[{id, similarity}]`. **Copy of production.** |
-| **Mirror: annotation service** | `third_party/object_search/annotation_service/` | Python | Annotation CRUD + ground-truth export. **Copy of production** (minus its Terraform). |
+| **Mirror: annotation service** | `third_party/object_search/annotation_service/` | Python | Production annotation CRUD + ground-truth export mirror. The dev Toolbox uses its own compatible integrated SQLite store. |
 | **Bricks** | `toolbox/bricks/` | Python | Dev-only port of the four things Django owns in production: 3D lifting + pgvector ingest, candidate enrichment, clustering/ranking, and the depth bridge. |
 | **Pose reader** | `toolbox/bricks/map_manifest.py` | Python | Dev-only, replacing the Django ORM: reads the v2 map manifest. Mirrored in TS by `toolbox/backend/src/map-manifest.ts`. |
 | **Benchmark** | `toolbox/benchmark/` | Python | Dev-only: HTTP benchmark scoring localize against ground truth. |
@@ -92,7 +92,7 @@ something to trigger implicitly.
 | Mirrored online service | 8000 | Postgres | `/object-search/by-text`, `/by-image`, `/health` — **no `{map_id}` segment**; scoping is the `geo_ref_id` body field |
 | Bricks service | 45678 | online service + Postgres | `/{map_id}/object-search/{localize,text}`, `/health` |
 | Toolbox backend | 45700 | bricks service | `/ui/api/…` owned; `/{map_id}/object-search/…` proxied |
-| annotation_service | 8001 | its own SQLite | `/{slug}/object-search/…` |
+| annotation_service (production mirror only) | 8001 | its own SQLite | `/{slug}/object-search/…` |
 
 45678 is kept deliberately: the bricks service is a drop-in replacement for the
 standalone service it supersedes, so the toolbox, the benchmark and
