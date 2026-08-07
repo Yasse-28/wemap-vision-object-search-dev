@@ -4,6 +4,9 @@
 !.env.example
 *.env
 
+# Agent coordination lock (scripts/agent-lock.sh) — local runtime state
+.agents/
+
 # Python
 __pycache__/
 *.py[cod]

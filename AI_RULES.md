@@ -80,6 +80,31 @@ For CHANGELOG entries:
 
 ---
 
+## Multi-Agent Coordination (coder/reviewer handoff)
+
+When more than one agent works on this repo at the same time (e.g. a coder
+agent and a reviewer agent), use `scripts/agent-lock.sh` to avoid two agents
+editing the working tree concurrently. See the script's header for the full
+state machine and command reference.
+
+- **Coder agent**: before writing any file, run
+  `scripts/agent-lock.sh acquire <your-label> "<task>"`. If it fails, the repo
+  is locked — wait, don't edit. Call `heartbeat <your-label>` periodically
+  during long tasks. When the change is ready for review, run
+  `scripts/agent-lock.sh ready <your-label> <commit-or-"uncommitted"> "<comma,separated,files>"`
+  instead of editing further — the lock stays held (state `review_ready`)
+  until a reviewer picks it up.
+- **Reviewer agent**: check `scripts/agent-lock.sh status` — only start a
+  review when state is `review_ready`. Claim it with
+  `scripts/agent-lock.sh review-start <your-label>`, then finish with either
+  `approve <your-label>` (releases the lock) or
+  `reject <your-label> "<note>"` (hands it back to the coder, state `coding`).
+- Never edit files while the lock is held by another label. Never call
+  `release --force` unless the holder is confirmed gone (stale heartbeat
+  reported by `status`) — it is a recovery path, not a way to skip the queue.
+
+---
+
 ## Testing and Safety
 
 - Add or update tests if the project already uses tests.
