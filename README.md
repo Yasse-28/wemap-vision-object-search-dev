@@ -153,6 +153,27 @@ docker compose -f infra/postgres/compose.yml up -d
 DATABASE_HOST=localhost DATABASE_USER=postgres DATABASE_PASSWORD=… pytest
 ```
 
+## Versioning
+
+This repo is where ideas get validated before being ported to the real backend
+(`wemap-vision-backend`) or its mirror. There is no environment-branch model
+(`dev`/`staging`/`prod`) — this repo has no production counterpart to mirror,
+and promotion means re-implementing the validated logic in the backend, not
+merging a branch.
+
+Work happens on short-lived `feat/*`/`fix/*` branches merged into `main` once
+done, same as today. When a piece of work on `main` is validated and ready to
+be ported (or has been ported), mark it with an annotated tag:
+
+```bash
+git tag -a validated/<slug> -m "<one line: what was validated, link to ADR/plan if any>"
+```
+
+`<slug>` matches the feature, e.g. `validated/review-feedback-boost`. The tag
+is a marker, not a release — it does not imply the repo is installable or
+stable at that point, only that whatever it names was deliberately checked
+before moving on.
+
 ## Where to read next
 
 `AI_CONTEXT.md` is the navigation entry point: a routing table from "my task is
