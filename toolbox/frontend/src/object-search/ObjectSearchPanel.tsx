@@ -1606,6 +1606,38 @@ function CollapsibleOnlineOverrides(props: {
             />
           </label>
           <label className="object-search-online-input">
+            <span>feedback_alpha</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              value={props.overrides.feedback_alpha}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  feedback_alpha: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label className="object-search-online-input">
+            <span>feedback_beta</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              value={props.overrides.feedback_beta}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  feedback_beta: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label className="object-search-online-input">
             <span>candidate_count</span>
             <input
               type="number"

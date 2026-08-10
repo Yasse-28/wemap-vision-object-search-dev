@@ -71,6 +71,8 @@ export type OnlineLocalizeOverrides = {
   robust_centroid: boolean;
   merge_radius: number;
   embedding_similarity_threshold: number;
+  feedback_alpha: number;
+  feedback_beta: number;
   min_keyframes_per_cluster: number;
   candidate_count: number;
   include_debug: boolean;
@@ -81,6 +83,8 @@ export const DEFAULT_ONLINE_OVERRIDES: OnlineLocalizeOverrides = {
   robust_centroid: false,
   merge_radius: 2.0,
   embedding_similarity_threshold: 0.85,
+  feedback_alpha: 0.0,
+  feedback_beta: 0.0,
   min_keyframes_per_cluster: 3,
   candidate_count: 1000,
   // On by default so the keyframe overlay keeps rendering; turn off to drop the
