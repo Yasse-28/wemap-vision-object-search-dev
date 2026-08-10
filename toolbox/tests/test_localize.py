@@ -28,6 +28,7 @@ from toolbox.bricks.localize import (
     LocalizationParams,
     build_localize_response,
     cluster_detections_leader_canopy,
+    compute_cluster_statistics,
     filter_clusters_by_min_keyframes,
     localize_from_enriched_candidates,
     rank_localization_clusters,
@@ -331,3 +332,105 @@ def test_num_results_caps_the_localization_count() -> None:
         candidates, _geo_transform(), LocalizationParams(num_results=2)
     )
     assert len(localizations) == 2
+
+
+def _geo_transform_without_a_band_at_the_origin() -> GeoTransform:
+    """A georef whose only level band excludes the test clusters' altitude.
+
+    `compute_cluster_statistics` re-resolves a cluster left at `UNRESOLVED_LEVEL` from
+    its centroid's local-up coordinate. With the usual fixture that fallback rescues
+    every unresolved cluster to level 0, which hides what the level *strategy* picked.
+    Putting the band out of reach isolates the strategy, which is what these two tests
+    are about.
+    """
+    return GeoTransform(
+        origin=Coordinates(lng=2.3522, lat=48.8566, alt=35.0),
+        levels=(Level(value=0.0, min_altitude=10.0, max_altitude=20.0),),
+    )
+
+
+def test_median_level_strategy_outvotes_the_seed_detection() -> None:
+    # Same spot, four detections. The highest-similarity one carries no resolved level;
+    # the other three agree on 0. `"seed"` follows the outlier, `"median"` the majority.
+    # The outlier has to be UNRESOLVED for the cluster to form at all:
+    # `_levels_compatible` refuses to merge two *resolved* levels, so the median can
+    # only ever differ from the seed where UNRESOLVED is involved.
+    candidates = [
+        _candidate(1, (0.0, 0.5, 0.0), keyframe_id=10, similarity=0.95, level=None),
+        _candidate(2, (0.1, 0.5, 0.0), keyframe_id=11, similarity=0.90, level=0),
+        _candidate(3, (0.2, 0.5, 0.0), keyframe_id=12, similarity=0.85, level=0),
+        _candidate(4, (0.3, 0.5, 0.0), keyframe_id=13, similarity=0.80, level=0),
+    ]
+    geo_transform = _geo_transform_without_a_band_at_the_origin()
+    (seeded,) = localize_from_enriched_candidates(
+        candidates, geo_transform, LocalizationParams(min_keyframes_per_cluster=1)
+    )
+    (median,) = localize_from_enriched_candidates(
+        candidates,
+        geo_transform,
+        LocalizationParams(min_keyframes_per_cluster=1, level_strategy="median"),
+    )
+    # UNRESOLVED_LEVEL is serialized as None (see `build_localize_response`).
+    assert seeded["level"] is None, "production follows the seed detection"
+    assert median["level"] == 0, "the median follows the three agreeing detections"
+
+
+def test_median_level_takes_the_lower_middle_value_on_an_even_count() -> None:
+    # Levels are ordinal. Two detections on 2 and two unresolved must resolve to an
+    # observed value, not to their average. Asserted on the statistics rather than the
+    # response, which maps UNRESOLVED_LEVEL to None.
+    positions = np.array(
+        [[0.0, 0.5, 0.0], [0.1, 0.5, 0.0], [0.2, 0.5, 0.0], [0.3, 0.5, 0.0]],
+        dtype=np.float64,
+    )
+    stats = compute_cluster_statistics(
+        positions,
+        np.zeros(4, dtype=np.int32),
+        np.array([0.95, 0.90, 0.85, 0.80], dtype=np.float64),
+        np.array([2, 2, UNRESOLVED_LEVEL, UNRESOLVED_LEVEL], dtype=np.int32),
+        np.array([10, 11, 12, 13], dtype=np.int64),
+        _geo_transform_without_a_band_at_the_origin(),
+        level_strategy="median",
+    )
+    assert int(stats.cluster_levels[0]) == UNRESOLVED_LEVEL
+
+
+def test_median_level_gives_one_vote_per_keyframe_not_per_detection() -> None:
+    # One keyframe on an unresolved level contributes three detections; two keyframes
+    # on level 0 contribute one each. Per detection the vote is 3-2 and the answer is
+    # sentinel; per keyframe it is 1-2 and the answer is 0. A level is a property of the
+    # camera pose, so the keyframe count is what may decide it.
+    candidates = [
+        _candidate(1, (0.0, 0.5, 0.0), keyframe_id=10, similarity=0.95, level=None),
+        _candidate(2, (0.1, 0.5, 0.0), keyframe_id=10, similarity=0.94, level=None),
+        _candidate(3, (0.2, 0.5, 0.0), keyframe_id=10, similarity=0.93, level=None),
+        _candidate(4, (0.3, 0.5, 0.0), keyframe_id=11, similarity=0.90, level=0),
+        _candidate(5, (0.4, 0.5, 0.0), keyframe_id=12, similarity=0.85, level=0),
+    ]
+    (median,) = localize_from_enriched_candidates(
+        candidates,
+        _geo_transform_without_a_band_at_the_origin(),
+        LocalizationParams(min_keyframes_per_cluster=1, level_strategy="median"),
+    )
+    assert median["level"] == 0
+
+
+def test_median_level_never_falls_back_to_the_projected_position() -> None:
+    # No keyframe resolves a level, and the cluster sits squarely inside level 0's
+    # altitude band. `"seed"` resolves it from that band — i.e. from the depth-projected
+    # centroid; `"median"` must leave it unresolved, the floor being a keyframe property
+    # under that strategy.
+    candidates = [
+        _candidate(1, (0.0, 0.5, 0.0), keyframe_id=10, similarity=0.95, level=None),
+        _candidate(2, (0.1, 0.5, 0.0), keyframe_id=11, similarity=0.90, level=None),
+    ]
+    (seeded,) = localize_from_enriched_candidates(
+        candidates, _geo_transform(), LocalizationParams(min_keyframes_per_cluster=1)
+    )
+    (median,) = localize_from_enriched_candidates(
+        candidates,
+        _geo_transform(),
+        LocalizationParams(min_keyframes_per_cluster=1, level_strategy="median"),
+    )
+    assert seeded["level"] == 0, "production resolves it from the centroid altitude"
+    assert median["level"] is None, "the median reads keyframe poses only"

@@ -47,6 +47,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -283,6 +284,9 @@ class LocalizeRequest(BaseModel):
     # retrieval score entirely, which is not a tuning regime, it is a bug.
     feedback_alpha: float = Field(default=0.0, ge=0.0, le=1.0)
     feedback_beta: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Dev-only knob: `"seed"` is what production does and stays the default. See
+    # `localize._cluster_level_from_detections`.
+    level_strategy: Literal["seed", "median"] = "seed"
 
     def to_params(self) -> LocalizationParams:
         return LocalizationParams(
@@ -294,6 +298,7 @@ class LocalizeRequest(BaseModel):
             min_keyframes_per_cluster=self.min_keyframes_per_cluster,
             feedback_alpha=self.feedback_alpha,
             feedback_beta=self.feedback_beta,
+            level_strategy=self.level_strategy,
         )
 
 

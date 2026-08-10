@@ -225,7 +225,7 @@ function parseDebugKeyframes(raw: unknown): Record<string, KeyframeDebugMetadata
 
 function onlineOverrideEntries(
   overrides: OnlineLocalizeOverrides,
-): Array<[string, boolean | number]> {
+): Array<[string, boolean | number | string]> {
   return Object.entries(overrides).map(([key, value]) => [
     key === "merge_radius" ? "clustering_eps_m" : key,
     value,

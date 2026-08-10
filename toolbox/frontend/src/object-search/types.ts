@@ -75,6 +75,12 @@ export type OnlineLocalizeOverrides = {
   feedback_beta: number;
   min_keyframes_per_cluster: number;
   candidate_count: number;
+  /**
+   * How a cluster picks the floor it claims. `"seed"` is production's behaviour and
+   * the default; `"median"` lets the majority of a cluster's detections outvote its
+   * highest-similarity one. Dev-only — see `toolbox/bricks/localize.py`.
+   */
+  level_strategy: "seed" | "median";
   include_debug: boolean;
 };
 
@@ -87,6 +93,7 @@ export const DEFAULT_ONLINE_OVERRIDES: OnlineLocalizeOverrides = {
   feedback_beta: 0.0,
   min_keyframes_per_cluster: 3,
   candidate_count: 1000,
+  level_strategy: "seed",
   // On by default so the keyframe overlay keeps rendering; turn off to drop the
   // per-keyframe georef lookup (adds seconds on large maps).
   include_debug: true,

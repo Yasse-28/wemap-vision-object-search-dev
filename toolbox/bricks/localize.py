@@ -38,6 +38,12 @@ class LocalizationParams:
     # `_ranking_similarities`.
     feedback_alpha: float = 0.0
     feedback_beta: float = 0.0
+    # How a cluster picks the floor it claims: `"seed"` is production's behaviour and
+    # stays the default, so this file's default path remains the ported one. `"median"`
+    # is a dev-only experiment for objects whose observers straddle two floors; see
+    # `_cluster_level_from_detections`. Any change of default belongs in
+    # wemap-vision-backend first.
+    level_strategy: str = "seed"
 
     @property
     def feedback_enabled(self) -> bool:
@@ -188,6 +194,42 @@ def cluster_detections_leader_canopy(
     )
 
 
+def _cluster_level_from_detections(
+    levels: np.ndarray,
+    similarities: np.ndarray,
+    keyframe_ids: np.ndarray,
+    *,
+    strategy: str,
+) -> int:
+    """The level a cluster claims.
+
+    ``"seed"`` takes the level of the highest-similarity detection — production's
+    behaviour, and the default.
+
+    ``"median"`` takes the median level of the cluster's **distinct keyframes**, one
+    vote each. Per keyframe and not per detection because a level *is* a property of
+    the camera pose: a keyframe contributing 40 detections and one contributing 1
+    observed the cluster from one floor each, and weighting by detection count would
+    let a single well-covered viewpoint decide the floor on its own.
+
+    The median is the lower of the two middle values on an even count, never their
+    average: levels are ordinal, and floor 4.5 does not exist.
+
+    ``UNRESOLVED_LEVEL`` is **not** filtered out. An unresolved keyframe therefore gets
+    one vote like every other keyframe; see gotcha 5 in AI_CONTEXT/bricks.md for why
+    the sentinel is distinct from every real floor value.
+    """
+    if strategy == "median":
+        # One row per keyframe. `vkf_level` is per keyframe, so every detection of a
+        # keyframe carries the same level and the first occurrence is exact — which
+        # holds only because the median path never falls back to the depth-projected
+        # object level (see `localize_from_enriched_candidates`).
+        _, first_of_keyframe = np.unique(keyframe_ids, return_index=True)
+        ordered = np.sort(levels[first_of_keyframe])
+        return int(ordered[(ordered.size - 1) // 2])
+    return int(levels[int(np.argmax(similarities))])
+
+
 def compute_cluster_statistics(
     positions_eus: np.ndarray,
     cluster_ids: np.ndarray,
@@ -195,6 +237,7 @@ def compute_cluster_statistics(
     detection_levels: np.ndarray | None,
     detection_keyframe_ids: np.ndarray,
     geo_transform: GeoTransform,
+    level_strategy: str = "seed",
 ) -> ClusterStatistics:
     unique_labels = np.unique(cluster_ids)
     unique_labels = unique_labels[unique_labels >= 0]
@@ -229,8 +272,12 @@ def compute_cluster_statistics(
         confidence_scores[i] = count_factor * (0.5 + 0.5 * spread_factor)
 
         if detection_levels is not None:
-            seed_local = int(np.argmax(similarities[mask]))
-            cluster_levels[i] = int(detection_levels[mask][seed_local])
+            cluster_levels[i] = _cluster_level_from_detections(
+                detection_levels[mask],
+                similarities[mask],
+                detection_keyframe_ids[mask],
+                strategy=level_strategy,
+            )
 
         # Level came from the (stable) keyframe pose — clamp the centroid's
         # local-up to that level's altitude band so the reported altitude stays
@@ -252,7 +299,12 @@ def compute_cluster_statistics(
         centroids_lat[i] = float(wgs84[0, 1])
         centroids_alt[i] = float(wgs84[0, 2])
 
-        if cluster_levels[i] == UNRESOLVED_LEVEL:
+        # Last-resort resolution from the centroid's own altitude — i.e. from the
+        # depth-projected object position. Skipped under `"median"`, which is defined as
+        # taking the floor from the keyframe poses and nothing else: a cluster whose
+        # keyframes resolve no level must stay unresolved rather than inherit a floor
+        # from a depth estimate.
+        if cluster_levels[i] == UNRESOLVED_LEVEL and level_strategy != "median":
             level_val = geo_transform.levels_for_altitudes(
                 np.array([centroid[1]], dtype=np.float64),
                 lats=np.array([centroids_lat[i]], dtype=np.float64),
@@ -401,12 +453,23 @@ def localize_from_enriched_candidates(
     # the object-position altitude is unreliable for level assignment. Use the
     # keyframe (camera) level, falling back to the object-position level only
     # when the keyframe pose resolves no level (boundary / outside polygon).
+    #
+    # Under `"median"` that last fallback is dropped: `c.level` is the level of the
+    # depth-projected object position, and the median strategy is defined as reading the
+    # floor from the keyframe poses only. Keeping it would also break the per-keyframe
+    # vote in `_cluster_level_from_detections`, which assumes every detection of a
+    # keyframe carries that keyframe's level.
+    keyframe_levels_only = params.level_strategy == "median"
     detection_levels = np.array(
         [
             (
                 c.vkf_level
                 if c.vkf_level is not None
-                else (c.level if c.level is not None else UNRESOLVED_LEVEL)
+                else (
+                    UNRESOLVED_LEVEL
+                    if keyframe_levels_only or c.level is None
+                    else c.level
+                )
             )
             for c in selected
         ],
@@ -431,6 +494,7 @@ def localize_from_enriched_candidates(
         detection_levels,
         keyframe_ids,
         geo_transform,
+        level_strategy=params.level_strategy,
     )
 
     cluster_best_sim: dict[int, float] = {}

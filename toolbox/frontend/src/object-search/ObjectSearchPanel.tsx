@@ -1809,6 +1809,22 @@ function CollapsibleOnlineOverrides(props: {
             />
           </label>
           <label className="object-search-online-input">
+            <span>level_strategy</span>
+            <select
+              value={props.overrides.level_strategy}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  level_strategy:
+                    event.target.value === "median" ? "median" : "seed",
+                })
+              }
+            >
+              <option value="seed">seed (production)</option>
+              <option value="median">median</option>
+            </select>
+          </label>
+          <label className="object-search-online-input">
             <span>candidate_count</span>
             <input
               type="number"
