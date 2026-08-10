@@ -1961,10 +1961,37 @@ function LocalizeInspector(props: {
   reviews: ObjectSearchReviews | null;
 }) {
   const [collapsedClusters, setCollapsedClusters] = useState<Set<number>>(() => new Set());
+  const selectedClusterRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     setCollapsedClusters(new Set());
   }, [props.localizations]);
+
+  // Bring the selected cluster into view — the selection often comes from a click on
+  // the livemap marker, where the matching card can be anywhere in a 76-cluster list.
+  useEffect(() => {
+    const item = selectedClusterRef.current;
+    // The scroller is the sidebar <section> this component renders *into* (its
+    // `overflow: auto` lives on .object-search-cluster-sidebar), so there is no ref
+    // to it here.
+    const scroller = item?.closest(".object-search-cluster-sidebar");
+    if (!item || !(scroller instanceof HTMLElement)) {
+      return;
+    }
+    const itemBox = item.getBoundingClientRect();
+    const scrollerBox = scroller.getBoundingClientRect();
+    // Adjust the sidebar's own scrollTop rather than calling scrollIntoView, which
+    // would also scroll the results pane and the page. No-op when already visible.
+    //
+    // A card with many detections is taller than the sidebar; aligning its bottom
+    // would then push the header — label, match score, review buttons, i.e. the only
+    // part that identifies the cluster — off the top. Align the top in that case.
+    if (itemBox.top < scrollerBox.top || itemBox.height > scrollerBox.height) {
+      scroller.scrollTop -= scrollerBox.top - itemBox.top;
+    } else if (itemBox.bottom > scrollerBox.bottom) {
+      scroller.scrollTop += itemBox.bottom - scrollerBox.bottom;
+    }
+  }, [props.selectedIdx, props.localizations]);
 
   const allClustersCollapsed =
     props.localizations.length > 0 &&
@@ -2008,6 +2035,7 @@ function LocalizeInspector(props: {
                 isSelectedCluster ? " is-selected" : ""
               }${clusterReviewStatus ? ` is-review-${clusterReviewStatus}` : ""}`}
               key={`cluster-${locIndex}`}
+              ref={isSelectedCluster ? selectedClusterRef : null}
             >
               <div className="object-search-cluster-header">
                 <button
