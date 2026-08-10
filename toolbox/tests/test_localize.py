@@ -1,9 +1,8 @@
 """Tests for the ported clustering, ranking and response shape.
 
-`localize.py` differs from `backend/object_search/v1_5_logic.py` only in its import
-lines, so these tests are really pinning down *production* behaviour. They exist
-because the backend has no tests for that module — the port is the first chance to
-add them.
+These tests pin the production-compatible default path plus the deliberate dev-only
+divergences documented in `AI_CONTEXT/bricks.md`. They exist because the backend has
+no tests for that module — the port is the first chance to add them.
 
 Two things are asserted deliberately rather than incidentally:
 
@@ -131,6 +130,18 @@ def test_unresolved_level_stays_mergeable() -> None:
     assert labels[0] == labels[1]
 
 
+def test_basement_level_does_not_disable_the_clustering_veto() -> None:
+    """A real basement level must not be treated as the unresolved sentinel."""
+    labels = _cluster(
+        [[0, 0, 0], [0.1, 0, 0]],
+        keyframe_ids=[1, 2],
+        similarities=[0.9, 0.8],
+        levels=[-1, 0],
+        eps=2.0,
+    )
+    assert labels[0] != labels[1]
+
+
 def test_labels_are_compacted_from_zero() -> None:
     """Ranking indexes cluster statistics by label, so labels must be 0..n-1."""
     labels = _cluster(
@@ -223,6 +234,16 @@ def _geo_transform() -> GeoTransform:
     )
 
 
+def _geo_transform_with_basement() -> GeoTransform:
+    return GeoTransform(
+        origin=Coordinates(lng=2.3522, lat=48.8566, alt=35.0),
+        levels=(
+            Level(value=-1.0, min_altitude=-4.0, max_altitude=-2.0),
+            Level(value=0.0, min_altitude=-1.0, max_altitude=4.0),
+        ),
+    )
+
+
 def _candidate(
     candidate_id: int,
     eus_xyz: tuple[float, float, float],
@@ -295,6 +316,40 @@ def test_response_has_the_shape_the_benchmark_parses() -> None:
 def test_no_candidates_gives_no_localizations() -> None:
     response = build_localize_response([], _geo_transform())
     assert response["localizations"] == []
+
+
+def test_basement_and_ground_floor_detections_at_same_spot_do_not_merge() -> None:
+    candidates = [
+        _candidate(1, (0.0, -3.0, 0.0), keyframe_id=10, similarity=0.9, level=-1),
+        _candidate(2, (0.0, -3.0, 0.0), keyframe_id=11, similarity=0.8, level=0),
+    ]
+    localizations = localize_from_enriched_candidates(
+        candidates,
+        _geo_transform_with_basement(),
+        LocalizationParams(min_keyframes_per_cluster=1),
+    )
+    assert len(localizations) == 2
+    assert {localization["level"] for localization in localizations} == {-1, 0}
+
+
+def test_basement_cluster_reports_minus_one_level() -> None:
+    candidates = [
+        _candidate(1, (0.0, -3.0, 0.0), keyframe_id=10, similarity=0.9, level=-1),
+        _candidate(2, (0.1, -3.0, 0.0), keyframe_id=11, similarity=0.8, level=-1),
+    ]
+    response = build_localize_response(candidates, _geo_transform_with_basement())
+    (localization,) = response["localizations"]
+    assert localization["level"] == -1
+
+
+def test_genuinely_unresolved_cluster_reports_null_level() -> None:
+    candidates = [
+        _candidate(1, (0.0, 20.0, 0.0), keyframe_id=10, similarity=0.9, level=None),
+        _candidate(2, (0.1, 20.0, 0.0), keyframe_id=11, similarity=0.8, level=None),
+    ]
+    response = build_localize_response(candidates, _geo_transform_with_basement())
+    (localization,) = response["localizations"]
+    assert localization["level"] is None
 
 
 def test_observations_per_cluster_are_capped_and_sorted_by_similarity() -> None:

@@ -2,8 +2,8 @@
 
 Ported from `backend/object_search/v1_5_logic.py`, which itself ports
 leader_canopy clustering, cluster statistics and ranking from the standalone
-service. **Only the four import lines differ from production** — this file has no
-Django dependency at all, so treat any behavioural change here as a bug.
+service. This file has no Django dependency; its deliberate dev-only divergences are
+documented in ``AI_CONTEXT/bricks.md``.
 
 Operates on Postgres ``object_position`` values loaded via
 ``candidates.load_enriched_candidates``.
@@ -21,7 +21,9 @@ from toolbox.bricks.vendored.candidate_orientation import candidate_orientation
 from toolbox.bricks.vendored.geo_transform import GeoTransform, Pose
 from toolbox.bricks.vendored.maths import quaternion
 
-UNRESOLVED_LEVEL = -1
+# A level value no georef will ever declare. It was -1, which collides with the real
+# basement level on every map that has one — see gotcha 5 in AI_CONTEXT/bricks.md.
+UNRESOLVED_LEVEL = -9999
 PLACEHOLDER_BBOX = (0.0, 0.0, 1.0, 1.0)
 
 
