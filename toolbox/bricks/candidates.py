@@ -8,6 +8,10 @@ Ported from `backend/object_search/candidates.py`. Two changes:
   map manifest, and the S3 URL envelope is dropped — the toolbox serves files from
   the map directory.
 
+The join also includes ``geo_ref_id``, a deliberate dev-only divergence: production
+joins an ORM foreign key to a globally unique primary key, while this local table uses
+per-manifest indices that are unique only inside one georef.
+
 The enrichment *order* is load-bearing and preserved: object positions → WGS84 →
 levels, then the same for keyframe positions, then headings, then sort by
 similarity descending.
@@ -48,7 +52,9 @@ SELECT
     k.image,
     k.depth_map
 FROM object_search_candidate AS c
-JOIN geokeyframe AS k ON k.id = c.geokeyframe_id
+JOIN geokeyframe AS k
+  ON k.geo_ref_id = c.geo_ref_id
+ AND k.id = c.geokeyframe_id
 WHERE c.geo_ref_id = %s
   AND c.id = ANY(%s)
   AND c.object_position IS NOT NULL

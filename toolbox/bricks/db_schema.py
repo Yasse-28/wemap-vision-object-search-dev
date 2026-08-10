@@ -39,13 +39,14 @@ CREATE_EXTENSIONS = (
 
 CREATE_GEOKEYFRAME = """
 CREATE TABLE IF NOT EXISTS geokeyframe (
-    id                BIGINT PRIMARY KEY,
+    id                BIGINT NOT NULL,
     geo_ref_id        BIGINT NOT NULL,
     video_keyframe_id BIGINT NOT NULL,
     orientation       DOUBLE PRECISION[4] NOT NULL,
     position          geometry(PointZ, 0) NOT NULL,
     image             VARCHAR(512) NOT NULL DEFAULT '',
     depth_map         VARCHAR(512) NOT NULL DEFAULT '',
+    PRIMARY KEY (geo_ref_id, id),
     UNIQUE (geo_ref_id, video_keyframe_id)
 )
 """
@@ -54,7 +55,7 @@ CREATE_CANDIDATE = """
 CREATE TABLE IF NOT EXISTS object_search_candidate (
     id              BIGSERIAL PRIMARY KEY,
     geo_ref_id      BIGINT NOT NULL,
-    geokeyframe_id  BIGINT NOT NULL REFERENCES geokeyframe(id) ON DELETE CASCADE,
+    geokeyframe_id  BIGINT NOT NULL,
     theta_center    DOUBLE PRECISION NOT NULL,
     phi_center      DOUBLE PRECISION NOT NULL,
     angular_width   DOUBLE PRECISION NOT NULL,
@@ -65,7 +66,9 @@ CREATE TABLE IF NOT EXISTS object_search_candidate (
     object_position geometry(PointZ, 0),
     detector_source VARCHAR(16),
     label           VARCHAR(128),
-    detection_score DOUBLE PRECISION
+    detection_score DOUBLE PRECISION,
+    FOREIGN KEY (geo_ref_id, geokeyframe_id)
+        REFERENCES geokeyframe (geo_ref_id, id) ON DELETE CASCADE
 )
 """
 
@@ -78,6 +81,34 @@ CREATE_INDEXES = (
     "ON geokeyframe (geo_ref_id)",
 )
 
+LEGACY_SCHEMA_ERROR = """\
+geokeyframe still uses the legacy single-column primary key, which lets one map
+overwrite another's poses. Drop both tables and re-ingest each map:
+  psql <your database DSN> -c 'DROP TABLE object_search_candidate, geokeyframe'
+  python -m toolbox.bricks.ingest_cli <each map dir>"""
+
+
+def _has_legacy_geokeyframe_primary_key(conn: Connection) -> bool:
+    """Return whether the visible geokeyframe table is keyed only by ``id``."""
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT array_agg(attribute.attname ORDER BY pk_column.ordinality)
+            FROM pg_constraint AS con
+            JOIN LATERAL unnest(con.conkey) WITH ORDINALITY
+                AS pk_column(attnum, ordinality) ON TRUE
+            JOIN pg_attribute AS attribute
+              ON attribute.attrelid = con.conrelid
+             AND attribute.attnum = pk_column.attnum
+            WHERE con.conrelid = to_regclass('geokeyframe')
+              AND con.contype = 'p'
+              AND con.conname = 'geokeyframe_pkey'
+            GROUP BY con.oid
+            """
+        )
+        row = cursor.fetchone()
+    return row is not None and list(row[0]) == ["id"]
+
 
 def ensure_schema(conn: Connection) -> None:
     """Create the extensions, tables and plain indexes if they are absent.
@@ -86,6 +117,9 @@ def ensure_schema(conn: Connection) -> None:
     ingest by `ingest.create_partial_hnsw_index`, because building it before the
     rows land would be wasted work.
     """
+    if _has_legacy_geokeyframe_primary_key(conn):
+        raise RuntimeError(LEGACY_SCHEMA_ERROR)
+
     with conn.cursor() as cursor:
         for statement in CREATE_EXTENSIONS:
             cursor.execute(statement)

@@ -27,7 +27,9 @@ import pytest
 
 from toolbox.bricks import db_schema
 from toolbox.bricks.candidates import load_enriched_candidates
+from toolbox.bricks.georef_source import KeyframePose
 from toolbox.bricks.ingest import bulk_copy, create_partial_hnsw_index
+from toolbox.bricks.ingest_cli import _upsert_geokeyframes
 from toolbox.bricks.localize import LocalizationParams, build_localize_response
 from toolbox.bricks.vendored.geo_transform import Coordinates, GeoTransform, Level
 
@@ -120,6 +122,61 @@ def _unit_embeddings(n: int, seed: int = 0) -> np.ndarray:
     return vectors.astype(np.float16)
 
 
+def _replace_test_geokeyframes(
+    connection: Any,
+    geo_ref_id: int,
+    positions: list[tuple[int, float, float, float]],
+) -> None:
+    """Replace one temporary georef's poses without touching other maps."""
+    with connection.cursor() as cur:
+        cur.execute("DELETE FROM geokeyframe WHERE geo_ref_id = %s", [geo_ref_id])
+        cur.executemany(
+            "INSERT INTO geokeyframe (id, geo_ref_id, video_keyframe_id, "
+            "orientation, position, image, depth_map) VALUES "
+            "(%s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s,%s,%s), 0), %s, %s)",
+            [
+                (
+                    keyframe_id,
+                    geo_ref_id,
+                    keyframe_id,
+                    [1.0, 0.0, 0.0, 0.0],
+                    x,
+                    y,
+                    z,
+                    f"{geo_ref_id}-{keyframe_id}.jpg",
+                    f"{geo_ref_id}-{keyframe_id}.tif",
+                )
+                for keyframe_id, x, y, z in positions
+            ],
+        )
+
+
+def _copy_test_candidates(
+    connection: Any, geo_ref_id: int, geokeyframe_ids: list[int]
+) -> list[int]:
+    """Write positioned candidates and return their generated ids."""
+    count = len(geokeyframe_ids)
+    bulk_copy(
+        connection,
+        geo_ref_id=geo_ref_id,
+        geokeyframe_ids=np.asarray(geokeyframe_ids, dtype=np.int64),
+        theta_center=np.zeros(count),
+        phi_center=np.zeros(count),
+        angular_width=np.ones(count),
+        angular_height=np.ones(count),
+        embeddings=_unit_embeddings(count, seed=geo_ref_id),
+        object_positions=np.asarray(
+            [[float(i), 1.5, -2.0] for i in range(count)], dtype=np.float64
+        ),
+    )
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM object_search_candidate WHERE geo_ref_id = %s ORDER BY id",
+            [geo_ref_id],
+        )
+        return [int(row[0]) for row in cur.fetchall()]
+
+
 def _copy_fixture_rows(connection: Any) -> np.ndarray:
     """Seven candidates: two spatial groups 7 m apart, plus one with no depth."""
     embeddings = _unit_embeddings(7)
@@ -197,6 +254,128 @@ def test_both_extensions_are_installed(conn: Any) -> None:
         cur.execute("SELECT extname FROM pg_extension")
         installed = {row[0] for row in cur.fetchall()}
     assert {"vector", "postgis"} <= installed
+
+
+def test_overlapping_keyframe_ids_are_enriched_with_their_own_map_poses(
+    conn: Any,
+) -> None:
+    """Manifest indices 0..2 may coexist and resolve independently per georef."""
+    geo_ref_a, geo_ref_b = 10_421, 10_422
+    poses_a = [(0, 0.0, 1.0, 0.0), (1, 10.0, 1.0, 0.0), (2, 20.0, 1.0, 0.0)]
+    poses_b = [
+        (0, 100.0, 6.0, 0.0),
+        (1, 110.0, 6.0, 0.0),
+        (2, 120.0, 6.0, 0.0),
+    ]
+    _replace_test_geokeyframes(conn, geo_ref_a, poses_a)
+    _replace_test_geokeyframes(conn, geo_ref_b, poses_b)
+    ids_a = _copy_test_candidates(conn, geo_ref_a, [0, 1, 2])
+    ids_b = _copy_test_candidates(conn, geo_ref_b, [0, 1, 2])
+    conn.commit()
+
+    hits_a = [
+        {"id": candidate_id, "similarity": 0.9 - i / 10}
+        for i, candidate_id in enumerate(ids_a)
+    ]
+    hits_b = [
+        {"id": candidate_id, "similarity": 0.9 - i / 10}
+        for i, candidate_id in enumerate(ids_b)
+    ]
+    enriched_a = load_enriched_candidates(conn, geo_ref_a, hits_a, _geo_transform())
+    enriched_b = load_enriched_candidates(conn, geo_ref_b, hits_b, _geo_transform())
+
+    assert [candidate.geokeyframe_pose.position[0] for candidate in enriched_a] == [
+        0.0,
+        10.0,
+        20.0,
+    ]
+    assert [candidate.geokeyframe_pose.position[0] for candidate in enriched_b] == [
+        100.0,
+        110.0,
+        120.0,
+    ]
+
+
+def test_upserting_a_second_map_does_not_disturb_the_first(conn: Any) -> None:
+    geo_ref_a, geo_ref_b = 10_431, 10_432
+
+    def poses(x_offset: float) -> dict[int, KeyframePose]:
+        return {
+            keyframe_id: KeyframePose(
+                keyframe_id=keyframe_id,
+                position_eus=np.asarray(
+                    [x_offset + keyframe_id, 1.6, 0.0], dtype=np.float64
+                ),
+                orientation_wxyz=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+            )
+            for keyframe_id in (0, 1, 2)
+        }
+
+    _upsert_geokeyframes(conn, geo_ref_a, poses(10.0))
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, ST_X(position), ST_Y(position), ST_Z(position) "
+            "FROM geokeyframe WHERE geo_ref_id = %s ORDER BY id",
+            [geo_ref_a],
+        )
+        before = cur.fetchall()
+
+    _upsert_geokeyframes(conn, geo_ref_b, poses(100.0))
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, ST_X(position), ST_Y(position), ST_Z(position) "
+            "FROM geokeyframe WHERE geo_ref_id = %s ORDER BY id",
+            [geo_ref_a],
+        )
+        after = cur.fetchall()
+    conn.commit()
+
+    assert after == before
+    assert len(after) == 3
+
+
+def test_geokeyframe_cascade_is_scoped_to_one_georef(conn: Any) -> None:
+    geo_ref_a, geo_ref_b = 10_441, 10_442
+    overlapping_poses = [(0, 0.0, 1.6, 0.0)]
+    _replace_test_geokeyframes(conn, geo_ref_a, overlapping_poses)
+    _replace_test_geokeyframes(conn, geo_ref_b, overlapping_poses)
+    _copy_test_candidates(conn, geo_ref_a, [0])
+    _copy_test_candidates(conn, geo_ref_b, [0])
+
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM geokeyframe WHERE geo_ref_id = %s", [geo_ref_a])
+        cur.execute(
+            "SELECT geo_ref_id, COUNT(*) FROM object_search_candidate "
+            "WHERE geo_ref_id IN (%s, %s) GROUP BY geo_ref_id ORDER BY geo_ref_id",
+            [geo_ref_a, geo_ref_b],
+        )
+        counts = cur.fetchall()
+    conn.commit()
+
+    assert counts == [(geo_ref_b, 1)]
+
+
+def test_legacy_single_column_geokeyframe_primary_key_is_refused(conn: Any) -> None:
+    """Refuse the destructive rebuild instead of silently retaining the old shape."""
+    admin_kwargs = _admin_dsn()
+    assert admin_kwargs is not None
+    legacy = psycopg2.connect(**{**admin_kwargs, "dbname": TEST_DB})
+    try:
+        with legacy.cursor() as cur:
+            cur.execute("CREATE SCHEMA legacy_geokeyframe_guard")
+            cur.execute("SET search_path TO legacy_geokeyframe_guard, public")
+            cur.execute("CREATE TABLE geokeyframe (id BIGINT PRIMARY KEY)")
+        legacy.commit()
+
+        with pytest.raises(RuntimeError) as error:
+            db_schema.ensure_schema(legacy)
+
+        message = str(error.value)
+        assert "legacy single-column primary key" in message
+        assert "DROP TABLE object_search_candidate, geokeyframe" in message
+        assert "python -m toolbox.bricks.ingest_cli <each map dir>" in message
+    finally:
+        legacy.close()
 
 
 def test_bulk_copy_is_accepted_and_nulls_land_as_null(conn: Any) -> None:

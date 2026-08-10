@@ -397,7 +397,9 @@ def create_app() -> FastAPI:
                                WHERE c.object_position IS NULL
                            ) AS no_position
                     FROM object_search_candidate AS c
-                    JOIN geokeyframe AS gk ON gk.id = c.geokeyframe_id
+                    JOIN geokeyframe AS gk
+                      ON gk.geo_ref_id = c.geo_ref_id
+                     AND gk.id = c.geokeyframe_id
                     WHERE c.geo_ref_id = %s
                     GROUP BY 1
                     ORDER BY 1

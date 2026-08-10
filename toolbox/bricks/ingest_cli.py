@@ -247,8 +247,7 @@ def _upsert_geokeyframes(
             INSERT INTO geokeyframe
                 (id, geo_ref_id, video_keyframe_id, orientation, position)
             VALUES (%s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s, %s), 0))
-            ON CONFLICT (id) DO UPDATE SET
-                geo_ref_id = EXCLUDED.geo_ref_id,
+            ON CONFLICT (geo_ref_id, id) DO UPDATE SET
                 video_keyframe_id = EXCLUDED.video_keyframe_id,
                 orientation = EXCLUDED.orientation,
                 position = EXCLUDED.position
