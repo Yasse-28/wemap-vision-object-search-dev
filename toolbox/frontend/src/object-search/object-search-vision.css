@@ -1870,6 +1870,75 @@ body.os-dragging * {
   padding: 4px 8px;
 }
 
+.object-search-review-annotation-list {
+  border-bottom: 1px solid rgba(201, 213, 228, 0.8);
+  background: #f8fafc;
+  color: #465c74;
+}
+
+.object-search-review-annotation-summary {
+  display: flex;
+  width: 100%;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.object-search-review-annotation-rows {
+  padding: 0 12px 6px;
+}
+
+.object-search-review-annotation-row {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid rgba(201, 213, 228, 0.8);
+  font-size: 12px;
+}
+
+.object-search-review-annotation-target {
+  min-width: 64px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.object-search-review-annotation-badge {
+  width: auto;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 10px;
+  cursor: default;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.object-search-review-annotation-hidden {
+  color: #8492a6;
+  font-size: 11px;
+}
+
+.object-search-review-annotation-clear {
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #465c74;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .os-results-empty {
   padding: 20px 16px;
   color: #64748b;

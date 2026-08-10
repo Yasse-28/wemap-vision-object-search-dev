@@ -2,7 +2,10 @@ import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { NavigationCandidate } from "../object-search-explorer/EquirectPhotoSphereViewer";
-import { ReviewButtons } from "../object-search-review/ReviewControls";
+import {
+  ReviewAnnotationList,
+  ReviewButtons,
+} from "../object-search-review/ReviewControls";
 import {
   type ObjectSearchReviews,
   useObjectSearchReviews,
@@ -322,12 +325,6 @@ function ObjectSearchPanel(props: Props) {
 
   const allLocalizations =
     result && result.mode !== "text" ? result.localizations : EMPTY_LOCALIZATIONS;
-  const reviews = useObjectSearchReviews({
-    enabled: props.reviewMode === true,
-    mapId: props.mapId,
-    query: result?.mode === "localize-online" ? resultQuery : "",
-    localizations: allLocalizations,
-  });
   const localizationDisplayThreshold = localizationMatchThreshold(localizeSensitivity);
   const localizations = useMemo(
     () =>
@@ -336,6 +333,15 @@ function ObjectSearchPanel(props: Props) {
       ),
     [allLocalizations, localizationDisplayThreshold],
   );
+  // The *displayed* localizations, not `allLocalizations`: this feeds the hook's
+  // `inResults` flag, whose whole job is to say whether an annotation is still
+  // reachable on screen. A cluster the sensitivity slider filters out is not.
+  const reviews = useObjectSearchReviews({
+    enabled: props.reviewMode === true,
+    mapId: props.mapId,
+    query: result?.mode === "localize-online" ? resultQuery : "",
+    localizations,
+  });
   const keyframeCoords = result && result.mode !== "text" ? result.keyframes : {};
   const keyframeMapPositions = useMemo(() => {
     const positions = { ...keyframeCoords };
@@ -1434,7 +1440,8 @@ function ObjectSearchPanel(props: Props) {
             <span className="os-pane-title">Results</span>
           </div>
           <div className="os-results-scroll">
-            {props.reviewMode && result?.mode === "localize-online" ? (
+            {props.reviewMode &&
+            (result?.mode === "localize-online" || reviews.annotations.length > 0) ? (
               <div className="object-search-review-toolbar">
                 <span>
                   {reviews.isLoading
@@ -1447,7 +1454,11 @@ function ObjectSearchPanel(props: Props) {
                     className="object-search-secondary-button"
                     disabled={!reviews.canUndo}
                     onClick={reviews.undo}
-                    title="Undo review (Ctrl/Cmd+Z)"
+                    title={
+                      reviews.annotations[0]
+                        ? `Undo review of #${reviews.annotations[0].targetId} (Ctrl/Cmd+Z)`
+                        : "Undo review (Ctrl/Cmd+Z)"
+                    }
                   >
                     Undo
                   </button>
@@ -1462,6 +1473,13 @@ function ObjectSearchPanel(props: Props) {
                   </button>
                 </span>
               </div>
+            ) : null}
+            {props.reviewMode &&
+            (result?.mode === "localize-online" || reviews.annotations.length > 0) ? (
+              <ReviewAnnotationList
+                annotations={reviews.annotations}
+                onClear={reviews.clearAnnotation}
+              />
             ) : null}
             {props.reviewMode && reviews.error ? (
               <div className="object-search-error-banner" role="alert">

@@ -68,9 +68,11 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   (`ExplorerAnnotationWorkspace.tsx`, `geojson.ts`, `LivemapAnnotation.tsx`,
   `livemapHost.ts`).
 - `object-search-review/` — detection-review API client, review controls, and
-  per-query TP/FP state with undo/redo. Mounted through `ObjectSearchPanel` in
-  the dedicated `/ui/maps/:mapId/annotation` tab; `annotation-store.ts` in the
-  backend owns the compatible per-map SQLite file directly.
+  per-query TP/FP state with undo/redo whose history survives a re-search. Its
+  per-query annotation list is independent of displayed results, and counters
+  cover the whole query. Mounted through `ObjectSearchPanel` in the dedicated
+  `/ui/maps/:mapId/annotation` tab; `annotation-store.ts` in the backend owns the
+  compatible per-map SQLite file directly.
 - `benchmark/` — run + view benchmark results (`BenchmarkPanel.tsx`).
 - `App.tsx`, `main.tsx`, top-level `api.ts` — shell + shared client.
 

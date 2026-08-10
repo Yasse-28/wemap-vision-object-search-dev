@@ -1,6 +1,7 @@
-import type { JSX } from "react";
+import { type JSX, useState } from "react";
 
 import type { ReviewStatus } from "./api";
+import type { ReviewAnnotation } from "./useObjectSearchReviews";
 
 export function ReviewButtons(props: {
   label: string;
@@ -40,5 +41,65 @@ export function ReviewButtons(props: {
         ✓
       </button>
     </span>
+  );
+}
+
+export function ReviewAnnotationList(props: {
+  annotations: ReviewAnnotation[];
+  onClear: (targetId: number) => void;
+}): JSX.Element | null {
+  const [isOpen, setIsOpen] = useState(false);
+
+  if (!props.annotations.length) {
+    return null;
+  }
+
+  return (
+    <section className="object-search-review-annotation-list">
+      <button
+        type="button"
+        className="object-search-review-annotation-summary"
+        aria-expanded={isOpen}
+        onClick={() => setIsOpen((current) => !current)}
+      >
+        <span>Annotations ({props.annotations.length})</span>
+        <span aria-hidden="true">{isOpen ? "−" : "+"}</span>
+      </button>
+      {isOpen ? (
+        <div className="object-search-review-annotation-rows">
+          {props.annotations.map((annotation) => {
+            const isCorrect = annotation.status === "true_positive";
+            return (
+              <div
+                className="object-search-review-annotation-row"
+                key={annotation.targetId}
+              >
+                <span className="object-search-review-annotation-target">
+                  #{annotation.targetId}
+                </span>
+                <span
+                  className={`object-search-review-button object-search-review-annotation-badge ${
+                    isCorrect ? "is-true" : "is-false"
+                  } is-active`}
+                >
+                  {isCorrect ? "correct" : "incorrect"}
+                </span>
+                {!annotation.inResults ? (
+                  <span className="object-search-review-annotation-hidden">hidden</span>
+                ) : null}
+                <button
+                  type="button"
+                  className="object-search-review-annotation-clear"
+                  aria-label={`Remove annotation for candidate ${annotation.targetId}`}
+                  onClick={() => props.onClear(annotation.targetId)}
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
   );
 }
