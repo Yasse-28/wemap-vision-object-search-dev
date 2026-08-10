@@ -1851,6 +1851,7 @@ body.os-dragging * {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid rgba(201, 213, 228, 0.8);
@@ -1858,6 +1859,27 @@ body.os-dragging * {
   color: #465c74;
   font-size: 12px;
   font-weight: 650;
+}
+
+.object-search-review-score {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-weight: 500;
+}
+
+.object-search-review-score .object-search-secondary-button {
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
+.object-search-review-score-muted {
+  color: #718096;
+}
+
+.object-search-review-score-error {
+  color: #b42318;
 }
 
 .object-search-review-history-actions {

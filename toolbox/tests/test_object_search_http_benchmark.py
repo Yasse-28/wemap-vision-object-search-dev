@@ -492,6 +492,130 @@ def _write_annotations(path: Path) -> None:
     )
 
 
+def _write_multiple_prompt_annotations(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": "ann-extincteur",
+                        "geometry": {"type": "Point", "coordinates": [2.0, 48.0]},
+                        "properties": {
+                            "class": "extincteur",
+                            "prompt": "extincteur",
+                            "accuracy": 5.0,
+                        },
+                    },
+                    {
+                        "type": "Feature",
+                        "id": "ann-defibrillateur",
+                        "geometry": {"type": "Point", "coordinates": [2.1, 48.1]},
+                        "properties": {
+                            "class": "défibrillateur",
+                            "prompt": "défibrillateur",
+                            "accuracy": 5.0,
+                        },
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_only_prompt_keeps_case_insensitive_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from toolbox.benchmark import object_search_http_benchmark as benchmark
+
+    map_path = tmp_path / "test-map"
+    _write_multiple_prompt_annotations(map_path / "benchmark" / "annotations.geojson")
+    monkeypatch.setattr(benchmark, "post_json", lambda *_args: {"localizations": []})
+    args = parse_args(
+        [
+            "--map-path",
+            str(map_path),
+            "--online",
+            "--only-prompt",
+            "  Extincteur  ",
+            "--no-prompt-geojson",
+        ]
+    )
+
+    result = benchmark.run_benchmark(args)
+
+    assert [row["prompt"] for row in result["by_prompt"]] == ["extincteur"]
+    assert result["summary"]["prompt_count"] == 1
+
+
+def test_unmatched_only_prompt_exits_two_without_metrics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from toolbox.benchmark.object_search_http_benchmark import main
+
+    map_path = tmp_path / "test-map"
+    annotations_path = map_path / "benchmark" / "annotations.geojson"
+    _write_annotations(annotations_path)
+    output_dir = map_path / "benchmark" / "prompt-scores" / "missing"
+
+    exit_code = main(
+        [
+            "--map-path",
+            str(map_path),
+            "--output-dir",
+            str(output_dir),
+            "--only-prompt",
+            "missing",
+        ]
+    )
+
+    assert exit_code == 2
+    assert not (output_dir / "metrics.json").exists()
+    stderr = capsys.readouterr().err
+    assert "missing" in stderr
+    assert str(annotations_path) in stderr
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_beta"),
+    [([], None), (["--feedback-beta", "0.4"], 0.4)],
+)
+def test_feedback_gains_are_only_posted_when_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_args: list[str],
+    expected_beta: float | None,
+) -> None:
+    from toolbox.benchmark import object_search_http_benchmark as benchmark
+
+    map_path = tmp_path / "test-map"
+    _write_annotations(map_path / "benchmark" / "annotations.geojson")
+    posted_payloads: list[dict[str, object]] = []
+
+    def fake_post_json(
+        _url: str, payload: dict[str, object], _timeout: float
+    ) -> dict[str, object]:
+        posted_payloads.append(payload)
+        return {"localizations": []}
+
+    monkeypatch.setattr(benchmark, "post_json", fake_post_json)
+    args = parse_args(
+        ["--map-path", str(map_path), "--online", "--no-prompt-geojson", *extra_args]
+    )
+
+    benchmark.run_benchmark(args)
+
+    assert "feedback_alpha" not in posted_payloads[0]
+    if expected_beta is None:
+        assert "feedback_beta" not in posted_payloads[0]
+    else:
+        assert posted_payloads[0]["feedback_beta"] == expected_beta
+
+
 def test_run_benchmark_collects_raw_records_and_progress_events(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

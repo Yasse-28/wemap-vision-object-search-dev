@@ -29,7 +29,7 @@ Anything that is *not* in production lives in `toolbox/` (dev-only, maintained) 
 | **Mirror: annotation service** | `third_party/object_search/annotation_service/` | Python | Production annotation CRUD + ground-truth export mirror. The dev Toolbox uses its own compatible integrated SQLite store. |
 | **Bricks** | `toolbox/bricks/` | Python | Dev-only port of the four things Django owns in production: 3D lifting + pgvector ingest, candidate enrichment, clustering/ranking, and the depth bridge. |
 | **Pose reader** | `toolbox/bricks/map_manifest.py` | Python | Dev-only, replacing the Django ORM: reads the v2 map manifest. Mirrored in TS by `toolbox/backend/src/map-manifest.ts`. |
-| **Benchmark** | `toolbox/benchmark/` | Python | Dev-only: HTTP benchmark scoring localize against ground truth. |
+| **Benchmark** | `toolbox/benchmark/` | Python | Dev-only: HTTP benchmark scoring localize against ground truth, for full runs or an explicitly filtered single prompt. |
 | **Toolbox UI** | `toolbox/{backend,frontend}/` | TypeScript | Dev tool: inspect, search, annotate, benchmark. Proxies the Python services; does no ML. |
 | **Legacy** | `legacy/` | Python | The retired standalone lineage. Reference only — not maintained, not linted, not tested. |
 
@@ -167,6 +167,11 @@ All three are covered by tests; read ADR 0002 §Traps before touching them.
 already enriched instead of re-enriching through an index. The object-search explorer
 browses `{map}/object-search/metadata.parquet` directly (read in TypeScript, see ADR
 0005); OCR and cluster ids have no source in v2 and that surface is gone.
+
+The Annotation tab can explicitly score its current prompt through the same Python
+benchmark evaluator used by full runs. Single-prompt artifacts live under
+`benchmark/prompt-scores/<slug>/`, below the run-list scan depth, and therefore never
+appear in `/benchmark/status`.
 
 **Three keyframe sets, deliberately not merged.** The manifest's keyframes (have a
 pose), the parquet's (prepare ran on them) and pgvector's (survived ingest's 1.5 m

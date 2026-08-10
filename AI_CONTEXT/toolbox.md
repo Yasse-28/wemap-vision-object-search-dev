@@ -27,7 +27,7 @@ The annotation ownership boundary is recorded in
 | `workbench-api.ts` | `/ui/api/...` route handling | `isWorkbenchUiMapRoute`, `handleWorkbenchUiMapRoute` |
 | `keyframe-graph.ts` | 360-viewer graph payload, read straight from `360-viewer/graph.geojson` — no pose source involved | `parseKeyframeGraph`, `keyframeGraphPayload` |
 | `map-manifest.ts` | **The v2 manifest reader**, mirroring `toolbox/bricks/map_manifest.py`, plus the EUS→WDS pose adapter every route below depends on | `loadMapManifest`, `findManifest`, `parseManifest`, `MANIFEST_PATTERN`, `assetBasename`, `formatLevel`, `quaternionToMatrix3`, `manifestKeyframeToWorldToCameraWds` |
-| `benchmark-runner.ts` | Run the HTTP benchmark | **Spawns the bricks service** (`python -m toolbox.bricks.service --config <the toolbox config>`) when unreachable, and keeps it alive across runs. **Only health-checks the mirrored online service** — never spawns it (it loads MetaCLIP on the GPU); `assertAnnServiceReachable` fails early with instructions. Before each run exports the integrated annotation SQLite store to `{map}/benchmark/annotations.geojson` atomically (best-effort: falls back to the file on disk). Spawns `toolbox/benchmark/object_search_http_benchmark.py` with `cwd=repoRoot` and `PYTHONPATH` set by `pythonEnv()`. Results in `{map_path}/benchmark/{runId}/`. `startBenchmarkRun`, `benchmark{Run,Status}Payload` |
+| `benchmark-runner.ts` | Run the HTTP benchmark and synchronously score one prompt | **Spawns the bricks service** (`python -m toolbox.bricks.service --config <the toolbox config>`) when unreachable, and keeps it alive across runs. **Only health-checks the mirrored online service** — never spawns it (it loads MetaCLIP on the GPU); `assertAnnServiceReachable` fails early with instructions. Before each run or prompt score exports the integrated annotation SQLite store to `{map}/benchmark/annotations.geojson` atomically (best-effort: falls back to the file on disk). Spawns `toolbox/benchmark/object_search_http_benchmark.py` with `cwd=repoRoot` and `PYTHONPATH` set by `pythonEnv()`. Full results live in `{map_path}/benchmark/{runId}/`; prompt scores live one level deeper under `benchmark/prompt-scores/<slug>/` so `listRuns` cannot expose them. | `startBenchmarkRun`, `scorePromptPayload`, `benchmark{Run,Status}Payload` |
 
 ## Frontend (`toolbox/frontend/src/`, React 19 + Vite + three.js)
 
@@ -44,6 +44,7 @@ The annotation ownership boundary is recorded in
 | `GET /object-search-metadata/keyframe-graph` | From `360-viewer/graph.geojson`. |
 | `GET /preview.png?preview_path=` | Serves a file from the map directory. **The default preview** for a proposal (`thumbnail_key`) and for a search result. |
 | `GET /review-annotations`, `POST\|DELETE /review-annotations/detection-review` | Integrated review annotations in `{map}/object-search-annotations.db`; no external service. |
+| `POST /benchmark/score-prompt` | Runs the existing Python evaluator for one ground-truth prompt with the Annotation panel's current localization parameters; returns 404 when that prompt has no benchmark ground truth. |
 
 The prefix was `/object-search-index`, which promised a database that no longer
 exists; and `/cutouts/{id}/{preview.png,detections}`, `…/objects/{id}/crop.png`,
@@ -74,6 +75,10 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   `/ui/maps/:mapId/annotation` tab; `annotation-store.ts` in the backend owns the
   compatible per-map SQLite file directly.
 - `benchmark/` — run + view benchmark results (`BenchmarkPanel.tsx`).
+- The Annotation tab's review toolbar explicitly scores its current prompt through
+  `benchmark/score-prompt` and compares it with the same prompt in the newest full
+  run. Its ✓/× detection reviews affect feedback only; they do not create the
+  positional manual annotations used as benchmark ground truth.
 - `App.tsx`, `main.tsx`, top-level `api.ts` — shell + shared client.
 
 ## Run

@@ -3,7 +3,18 @@ import type {
   BenchmarkRawResults,
   BenchmarkRunParams,
   BenchmarkStatus,
+  PromptScore,
 } from "./types";
+
+export class BenchmarkApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BenchmarkApiError";
+  }
+}
 
 async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -16,7 +27,7 @@ async function readJson<T>(response: Response): Promise<T> {
     } catch {
       // ignore
     }
-    throw new Error(detail);
+    throw new BenchmarkApiError(response.status, detail);
   }
   return (await response.json()) as T;
 }
@@ -40,6 +51,19 @@ export async function startBenchmarkRun(
     body: JSON.stringify(params),
   });
   return readJson<{ run_id: string }>(response);
+}
+
+export async function scorePrompt(
+  mapId: string,
+  prompt: string,
+  params: Partial<BenchmarkRunParams>,
+): Promise<PromptScore> {
+  const response = await fetch(`${mapBase(mapId)}/benchmark/score-prompt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, params }),
+  });
+  return readJson<PromptScore>(response);
 }
 
 export async function fetchBenchmarkRun(

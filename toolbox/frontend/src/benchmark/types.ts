@@ -117,6 +117,17 @@ export type BenchmarkRunParams = {
   clustering_eps_m: number;
   candidate_count: number;
   group_annotation_radius_m: number;
+  feedback_alpha?: number;
+  feedback_beta?: number;
+  min_keyframes_per_cluster?: number;
+  max_observations_per_cluster?: number;
+};
+
+export type PromptScore = {
+  prompt: string;
+  row: ByPromptRow;
+  config: Record<string, unknown>;
+  scored_at: string;
 };
 
 export type BenchmarkRawAnnotation = {

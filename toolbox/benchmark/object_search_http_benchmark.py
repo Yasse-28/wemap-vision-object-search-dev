@@ -679,6 +679,16 @@ def _emit_progress(args: argparse.Namespace, event: dict[str, Any]) -> None:
         print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
+def _normalize_prompt(prompt: str) -> str:
+    # Keep aligned with toolbox.bricks.feedback.normalize_query; this script stays
+    # standalone.
+    return prompt.casefold().strip()
+
+
+class PromptNotFoundError(ValueError):
+    """Raised when an only-prompt filter has no benchmark ground truth."""
+
+
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     annotations = load_annotations(args.annotations, args.default_accuracy)
     grouping_enabled = args.group_annotation_radius_m > 0
@@ -687,6 +697,19 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     prompt_to_annotations: dict[str, list[Annotation]] = {}
     for ann in annotations:
         prompt_to_annotations.setdefault(ann.prompt, []).append(ann)
+
+    if args.only_prompt:
+        requested_prompts = {_normalize_prompt(prompt) for prompt in args.only_prompt}
+        prompt_to_annotations = {
+            prompt: prompt_annotations
+            for prompt, prompt_annotations in prompt_to_annotations.items()
+            if _normalize_prompt(prompt) in requested_prompts
+        }
+        if not prompt_to_annotations:
+            requested = ", ".join(repr(prompt) for prompt in args.only_prompt)
+            raise PromptNotFoundError(
+                f"No ground truth for prompt(s) {requested} in {args.annotations}"
+            )
 
     url = resolve_localize_url(args)
     prompt_metrics: list[PromptMetrics] = []
@@ -732,6 +755,14 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     "clustering_eps_m": args.clustering_eps_m,
                 }
             )
+        if args.feedback_alpha != 0.0:
+            payload["feedback_alpha"] = args.feedback_alpha
+        if args.feedback_beta != 0.0:
+            payload["feedback_beta"] = args.feedback_beta
+        if args.min_keyframes_per_cluster is not None:
+            payload["min_keyframes_per_cluster"] = args.min_keyframes_per_cluster
+        if args.max_observations_per_cluster is not None:
+            payload["max_observations_per_cluster"] = args.max_observations_per_cluster
 
         started = time.perf_counter()
         try:
@@ -897,6 +928,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "min_similarity": args.min_similarity,
         "candidate_count": args.candidate_count,
         "clustering_eps_m": args.clustering_eps_m,
+        "feedback_alpha": args.feedback_alpha,
+        "feedback_beta": args.feedback_beta,
+        "min_keyframes_per_cluster": args.min_keyframes_per_cluster,
+        "max_observations_per_cluster": args.max_observations_per_cluster,
         "score_field": args.score_field,
         "group_annotation_radius_m": args.group_annotation_radius_m,
         "prompt_geojson_dir": str(args.prompt_geojson_dir),
@@ -1068,6 +1103,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--candidate-count", type=int, default=1000)
     parser.add_argument("--clustering-eps-m", type=float, default=1.5)
     parser.add_argument(
+        "--only-prompt",
+        action="append",
+        default=[],
+        help=(
+            "Evaluate only this prompt (repeatable, matched case-insensitively after "
+            "trimming). Exit status 2 means none matched the annotations file."
+        ),
+    )
+    parser.add_argument("--feedback-alpha", type=float, default=0.0)
+    parser.add_argument("--feedback-beta", type=float, default=0.0)
+    parser.add_argument("--min-keyframes-per-cluster", type=int, default=None)
+    parser.add_argument("--max-observations-per-cluster", type=int, default=None)
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -1138,7 +1186,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    result = run_benchmark(args)
+    try:
+        result = run_benchmark(args)
+    except PromptNotFoundError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     raw_by_prompt = result.pop("raw_by_prompt")
 
     args.output_json.parent.mkdir(parents=True, exist_ok=True)

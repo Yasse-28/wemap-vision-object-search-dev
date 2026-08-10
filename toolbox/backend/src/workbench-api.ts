@@ -11,6 +11,7 @@ import {
 import {
   benchmarkRunPayload,
   benchmarkStatusPayload,
+  scorePromptPayload,
   startBenchmarkRun,
   type BenchmarkRunParams,
 } from "./benchmark-runner.js";
@@ -166,6 +167,19 @@ export async function handleWorkbenchUiMapRoute(
     if (method === "POST" && suffix === "/benchmark/run") {
       const params = (await requestJson(request)) as BenchmarkRunParams;
       sendJson(response, 202, startBenchmarkRun(options, map, params));
+      return true;
+    }
+    if (method === "POST" && suffix === "/benchmark/score-prompt") {
+      const body = await requestJson(request);
+      const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+      if (!prompt) {
+        throw new WorkbenchRouteError(400, "A non-empty prompt is required.");
+      }
+      const params =
+        body.params && typeof body.params === "object" && !Array.isArray(body.params)
+          ? (body.params as BenchmarkRunParams)
+          : {};
+      sendJson(response, 200, await scorePromptPayload(options, map, prompt, params));
       return true;
     }
     const benchmarkRunMatch = /^\/benchmark\/runs\/([^/]+)(\/raw)?$/.exec(suffix);

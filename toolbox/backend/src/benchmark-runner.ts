@@ -13,10 +13,19 @@
  *
  * Ground truth comes from the SQLite annotation store owned by this backend.
  *
- * Results live in {map_path}/benchmark/{runId}/ (metrics.json, raw_results.json).
+ * Full-run results live in {map_path}/benchmark/{runId}/. Single-prompt scores
+ * live under benchmark/prompt-scores/<slug>/ so the run-list scan never sees them.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 
 import { buildGroundTruth } from "./annotation-store.js";
@@ -60,6 +69,10 @@ export type BenchmarkRunParams = {
   candidate_count?: number;
   group_annotation_radius_m?: number;
   score_field?: string;
+  feedback_alpha?: number;
+  feedback_beta?: number;
+  min_keyframes_per_cluster?: number;
+  max_observations_per_cluster?: number;
 };
 
 type BenchmarkJob = {
@@ -83,6 +96,7 @@ type ManagedService = {
 };
 
 let activeJob: BenchmarkJob | null = null;
+let promptScoreInFlight = false;
 let managedService: ManagedService | null = null;
 let cleanupRegistered = false;
 
@@ -273,7 +287,7 @@ async function assertAnnServiceReachable(options: WorkbenchOptions): Promise<voi
 async function ensurePythonService(
   options: WorkbenchOptions,
   map: MapEntry,
-  job: BenchmarkJob,
+  job: Pick<BenchmarkJob, "serviceState">,
 ): Promise<void> {
   const deadline = Date.now() + SERVICE_READY_TIMEOUT_MS;
   let spawnedThisCall = false;
@@ -537,6 +551,18 @@ function benchmarkScriptArgs(
   if (typeof params.score_field === "string" && params.score_field) {
     args.push("--score-field", params.score_field);
   }
+  const optionalNumericFlags: Array<[keyof BenchmarkRunParams, string]> = [
+    ["feedback_alpha", "--feedback-alpha"],
+    ["feedback_beta", "--feedback-beta"],
+    ["min_keyframes_per_cluster", "--min-keyframes-per-cluster"],
+    ["max_observations_per_cluster", "--max-observations-per-cluster"],
+  ];
+  for (const [key, flag] of optionalNumericFlags) {
+    const value = params[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      args.push(flag, String(value));
+    }
+  }
   return args;
 }
 
@@ -667,6 +693,142 @@ async function runBenchmarkJob(
   job.state = "done";
 }
 
+export type PromptScorePayload = {
+  prompt: string;
+  row: Record<string, unknown>;
+  config: Record<string, unknown>;
+  scored_at: string;
+};
+
+function promptScoreSlug(prompt: string): string {
+  const slug = prompt
+    .trim()
+    .toLocaleLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^0-9a-z._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return slug || "prompt";
+}
+
+/** Score one prompt synchronously without creating a benchmark job or run entry. */
+export async function scorePromptPayload(
+  options: WorkbenchOptions,
+  map: MapEntry,
+  prompt: string,
+  params: BenchmarkRunParams,
+): Promise<PromptScorePayload> {
+  if (
+    activeJob
+    && (activeJob.state === "ensuring-service" || activeJob.state === "running")
+  ) {
+    throw new WorkbenchRouteError(
+      409,
+      `A benchmark run is already in progress for map '${activeJob.mapId}' (run ${activeJob.runId}).`,
+    );
+  }
+  if (promptScoreInFlight) {
+    throw new WorkbenchRouteError(
+      409,
+      "A single-prompt benchmark score is already in progress.",
+    );
+  }
+
+  promptScoreInFlight = true;
+  try {
+    if (benchmarkTarget(params) === "local") {
+      // Keep the full-run ordering: bricks cannot localize without the GPU embedder.
+      await assertAnnServiceReachable(options);
+      await ensurePythonService(options, map, { serviceState: null });
+    }
+    await regenerateGroundTruth(map);
+
+    const outputDir = path.join(
+      map.path,
+      "benchmark",
+      "prompt-scores",
+      promptScoreSlug(prompt),
+    );
+    const scriptArgs = [
+      ...benchmarkScriptArgs(options, map, outputDir, params),
+      "--only-prompt",
+      prompt,
+      "--no-prompt-geojson",
+    ];
+    const metricsPath = path.join(outputDir, "metrics.json");
+    await unlink(metricsPath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    });
+    const stderrTail: string[] = [];
+    let child: ChildProcess | null = null;
+    let spawnError = "";
+    for (const pythonBin of pythonBinaryCandidates()) {
+      const candidate = spawn(pythonBin, scriptArgs, {
+        cwd: options.repoRoot,
+        env: pythonEnv(options),
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      const spawned = await new Promise<boolean>((resolve) => {
+        candidate.once("spawn", () => resolve(true));
+        candidate.once("error", (error) => {
+          spawnError = String(error);
+          resolve(false);
+        });
+      });
+      if (spawned) {
+        child = candidate;
+        break;
+      }
+    }
+    if (!child) {
+      throw new WorkbenchRouteError(
+        500,
+        `Could not spawn the benchmark script: ${spawnError || "no python binary found"}`,
+      );
+    }
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => appendTail(stderrTail, chunk));
+    const exitCode = await new Promise<number | null>((resolve) => {
+      child?.on("close", resolve);
+    });
+    if (exitCode === 2) {
+      throw new WorkbenchRouteError(
+        404,
+        `Prompt '${prompt}' has no ground truth in annotations.geojson.`,
+      );
+    }
+
+    let metrics: Record<string, unknown>;
+    try {
+      metrics = JSON.parse(await readFile(metricsPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      throw new WorkbenchRouteError(
+        500,
+        `Benchmark exited with code ${exitCode} without writing metrics.json`
+        + (stderrTail.length ? `:\n${stderrTail.join("\n")}` : ""),
+      );
+    }
+    const rows = metrics.by_prompt;
+    if (!Array.isArray(rows) || !rows[0] || typeof rows[0] !== "object") {
+      throw new WorkbenchRouteError(
+        500,
+        "Single-prompt metrics.json has no by_prompt row.",
+      );
+    }
+    return {
+      prompt,
+      row: rows[0] as Record<string, unknown>,
+      config: (metrics.config as Record<string, unknown>) ?? {},
+      scored_at: new Date().toISOString(),
+    };
+  } finally {
+    promptScoreInFlight = false;
+  }
+}
+
 export function startBenchmarkRun(
   options: WorkbenchOptions,
   map: MapEntry,
@@ -676,6 +838,12 @@ export function startBenchmarkRun(
     throw new WorkbenchRouteError(
       409,
       `A benchmark run is already in progress for map '${activeJob.mapId}' (run ${activeJob.runId}).`,
+    );
+  }
+  if (promptScoreInFlight) {
+    throw new WorkbenchRouteError(
+      409,
+      "A single-prompt benchmark score is already in progress.",
     );
   }
 

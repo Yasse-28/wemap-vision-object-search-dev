@@ -15,6 +15,13 @@ import type { MapSummary } from "../api";
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
 import type { FocusTarget, LivemapMarker, LivemapSegment } from "../annotations/types";
 import {
+  BenchmarkApiError,
+  fetchBenchmarkRun,
+  fetchBenchmarkStatus,
+  scorePrompt,
+} from "../benchmark/api";
+import type { ByPromptRow, PromptScore } from "../benchmark/types";
+import {
   fetchKeyframeGraph,
   fetchMetadataStatus,
   indexKeyframeEquirectPreviewUrl,
@@ -59,6 +66,23 @@ const ROW_MIN = 20;
 const ROW_MAX = 80;
 const EARTH_RADIUS_M = 6378137;
 const EMPTY_LOCALIZATIONS: ObjectLocalization[] = [];
+
+function normalizeBenchmarkPrompt(prompt: string): string {
+  return prompt.trim().toLocaleLowerCase();
+}
+
+function promptMetricSummary(row: ByPromptRow): string {
+  // A failed prompt still gets a row, with `error` set and every count at zero. Left
+  // formatted as metrics it reads as a legitimate "found nothing" — the one reading
+  // the exit-2 path exists to prevent. Same handling as BenchmarkPanel's tables.
+  if (row.error) {
+    return `not measured: ${row.error}`;
+  }
+  return (
+    `P ${row.precision.toFixed(2)} · R ${row.recall.toFixed(2)} · F1 ${row.f1.toFixed(2)}`
+    + ` · ${row.true_positives}/${row.false_positives}/${row.false_negatives} (TP/FP/FN)`
+  );
+}
 
 function projectKeyframeToLocalFloor(
   source: { latitude: number; longitude: number; heading_deg: number },
@@ -233,6 +257,14 @@ function ObjectSearchPanel(props: Props) {
   const [resultQuery, setResultQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [promptScore, setPromptScore] = useState<PromptScore | null>(null);
+  const [isPromptScoring, setIsPromptScoring] = useState(false);
+  const [promptScoreMissing, setPromptScoreMissing] = useState(false);
+  const [promptScoreError, setPromptScoreError] = useState<string | null>(null);
+  const [promptBaseline, setPromptBaseline] = useState<{
+    runId: string;
+    row: ByPromptRow;
+  } | null>(null);
 
   const [selectedKeyframeId, setSelectedKeyframeId] = useState<string | null>(null);
   const [selectedCutoutId, setSelectedCutoutId] = useState<string | null>(null);
@@ -342,6 +374,82 @@ function ObjectSearchPanel(props: Props) {
     query: result?.mode === "localize-online" ? resultQuery : "",
     localizations,
   });
+
+  // Also keyed on the feedback gains: a score describes the parameters it was measured
+  // with, and tuning alpha/beta between two scores is the whole workflow. Left keyed on
+  // the query alone, the stale numbers would sit there looking current.
+  useEffect(() => {
+    setPromptScore(null);
+    setPromptScoreMissing(false);
+    setPromptScoreError(null);
+  }, [
+    props.mapId,
+    resultQuery,
+    onlineOverrides.feedback_alpha,
+    onlineOverrides.feedback_beta,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPromptBaseline(null);
+    if (!props.reviewMode || result?.mode !== "localize-online" || !resultQuery) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const normalizedQuery = normalizeBenchmarkPrompt(resultQuery);
+    void fetchBenchmarkStatus(props.mapId)
+      .then(async (status) => {
+        const newestRun = status.runs[0];
+        if (!newestRun) return null;
+        const metrics = await fetchBenchmarkRun(props.mapId, newestRun.run_id);
+        const row = metrics.by_prompt.find(
+          (candidate) =>
+            !candidate.error
+            && normalizeBenchmarkPrompt(candidate.prompt) === normalizedQuery,
+        );
+        return row ? { runId: newestRun.run_id, row } : null;
+      })
+      .then((baseline) => {
+        if (!cancelled) setPromptBaseline(baseline);
+      })
+      .catch(() => {
+        // A baseline is supplementary; scoring the current prompt remains available.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.mapId, props.reviewMode, result?.mode, resultQuery]);
+
+  async function handleScorePrompt(): Promise<void> {
+    if (!resultQuery || isPromptScoring) return;
+    setIsPromptScoring(true);
+    setPromptScore(null);
+    setPromptScoreMissing(false);
+    setPromptScoreError(null);
+    try {
+      const score = await scorePrompt(props.mapId, resultQuery, {
+        num_results: numResults,
+        clustering_eps_m: onlineOverrides.merge_radius,
+        candidate_count: onlineOverrides.candidate_count,
+        feedback_alpha: onlineOverrides.feedback_alpha,
+        feedback_beta: onlineOverrides.feedback_beta,
+        min_keyframes_per_cluster: onlineOverrides.min_keyframes_per_cluster,
+        max_observations_per_cluster: maxObservationsPerCluster,
+      });
+      setPromptScore(score);
+    } catch (scoreError) {
+      if (scoreError instanceof BenchmarkApiError && scoreError.status === 404) {
+        setPromptScoreMissing(true);
+      } else {
+        setPromptScoreError(
+          scoreError instanceof Error ? scoreError.message : String(scoreError),
+        );
+      }
+    } finally {
+      setIsPromptScoring(false);
+    }
+  }
   const keyframeCoords = result && result.mode !== "text" ? result.keyframes : {};
   const keyframeMapPositions = useMemo(() => {
     const positions = { ...keyframeCoords };
@@ -1447,6 +1555,51 @@ function ObjectSearchPanel(props: Props) {
                   {reviews.isLoading
                     ? "Loading reviews…"
                     : `${reviews.reviewedCount} reviewed · ${reviews.truePositiveCount} correct · ${reviews.falsePositiveCount} incorrect`}
+                </span>
+                <span className="object-search-review-score">
+                  <button
+                    type="button"
+                    className="object-search-secondary-button"
+                    disabled={reviews.isLoading || isPromptScoring || !resultQuery}
+                    onClick={() => void handleScorePrompt()}
+                  >
+                    {isPromptScoring ? "Scoring…" : "Score this prompt"}
+                  </button>
+                  {promptScore ? (
+                    <span
+                      className={
+                        promptScore.row.error
+                          ? "object-search-review-score-error"
+                          : undefined
+                      }
+                      title={
+                        `Benchmark min_similarity=${String(
+                          promptScore.config.min_similarity ?? 0.15,
+                        )}; acceptance_threshold=${String(
+                          promptScore.config.acceptance_threshold ?? 0.9,
+                        )}. These are independent of the Sensitivity slider.`
+                      }
+                    >
+                      {promptMetricSummary(promptScore.row)}
+                    </span>
+                  ) : null}
+                  {promptScoreMissing ? (
+                    <span className="object-search-review-score-muted">
+                      no benchmark ground truth for &quot;{resultQuery}&quot; — ✓/× reviews
+                      only tune feedback; they do not create benchmark ground truth
+                    </span>
+                  ) : null}
+                  {promptScoreError ? (
+                    <span className="object-search-review-score-error" role="alert">
+                      Score: {promptScoreError}
+                    </span>
+                  ) : null}
+                  {promptBaseline ? (
+                    <span className="object-search-review-score-muted">
+                      baseline (run {promptBaseline.runId}): F1{" "}
+                      {promptBaseline.row.f1.toFixed(2)}
+                    </span>
+                  ) : null}
                 </span>
                 <span className="object-search-review-history-actions">
                   <button
