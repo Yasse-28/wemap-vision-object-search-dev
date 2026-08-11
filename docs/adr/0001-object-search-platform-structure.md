@@ -129,7 +129,7 @@ Survey of how each component reaches the object-search service, as of this ADR:
 | `consumers/wemap-vision-tools` backend | `:8000` (default) | `http://127.0.0.1:45678` (`LOCALIZE_SERVICE_BASE_URL`, **hardcoded**) | `/{map_id}/object-search/{localize,localize-offline}` |
 | `consumers/livemap` (frontend) | — | configured `providers.vps.endpoint` (**remote**, not localhost) | `…/geopose/object-search/text` |
 
-**Compatible today:** `pipeline` ⇄ `toolbox` ⇄ `wemap-vision-tools` all agree on port **45678** and the `/{map_id}/object-search/…` path; their own listen ports don't collide (45678 / 45700 / 8000).
+**Compatible today:** `pipeline` ⇄ `toolbox` ⇄ `wemap-vision-tools` all agree on port **45678** and the `/{map_id}/object-search/…` path; their own listen ports don't collide (45678 / 45700 / 45677).
 
 **Two gaps to fix later:**
 1. **livemap path prefix mismatch** — livemap calls `…/geopose/object-search/text`, but the standalone `pipeline` serves `…/object-search/text` (no `geopose/` segment). livemap is written against the full geopose VPS service (`wemap-vision-python`); pointed at this pipeline it would 404. Fix options: a `geopose/`-stripping gateway, livemap's `vps.endpoint` pointing at a gateway that mounts the pipeline under `geopose/`, or the pipeline also registering the `geopose/`-prefixed routes. (The deferred API-contract item would surface this automatically.)

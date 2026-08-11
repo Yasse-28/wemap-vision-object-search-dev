@@ -10,7 +10,12 @@ import type {
   BenchmarkMetrics,
   BenchmarkRunParams,
   BenchmarkStatus,
+  BenchmarkSummary,
+  ByPromptRow,
+  FeedbackNormalization,
 } from "./types";
+import { DEFAULT_MATCH_ACCURACY_M, FEEDBACK_NORMALIZATIONS } from "./types";
+import { configSummary } from "./config-summary";
 
 type Props = {
   map: MapSummary | null;
@@ -25,16 +30,45 @@ const DEFAULT_PARAMS: BenchmarkRunParams = {
   acceptance_threshold: 0.9,
   num_results: 100,
   min_similarity: 0.15,
-  clustering_eps_m: 1.5,
+  // 2.0 like the service and the object-search panel. It used to be 1.5 here alone.
+  clustering_eps_m: 2.0,
   candidate_count: 1000,
-  group_annotation_radius_m: 0,
+  // Grouping ON by default, at the clustering radius — see `groupingInvariant` below.
+  // Off, the ground truth is finer-grained than a cluster can be (a bank of screens a
+  // metre apart is one cluster and N annotations), which caps recall by arithmetic
+  // rather than by pipeline quality.
+  group_annotation_radius_m: 2.0,
+  default_accuracy: DEFAULT_MATCH_ACCURACY_M,
+  // Both zero: a run is a baseline unless it is explicitly told otherwise. Present in
+  // the defaults rather than left undefined so the form always has a value to show and
+  // metrics.json always records which regime the numbers came from.
+  feedback_alpha: 0,
+  feedback_beta: 0,
+  feedback_normalization: "none",
+  // The service default, i.e. what every past run of this map was measured with, and
+  // now also the object-search panel's — the three paths build the same clusters.
+  min_keyframes_per_cluster: 2,
 };
+
 
 const ACTIVE_POLL_MS = 1000;
 const IDLE_POLL_MS = 10000;
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
+}
+
+/** Blank rather than "0.0%" for runs stored before the sweep existed. */
+function optionalPercent(value: number | undefined): string {
+  return value == null ? "—" : formatPercent(value);
+}
+
+/** Best F1 and the threshold that reaches it: the number alone is not actionable. */
+function bestF1Cell(row: ByPromptRow): string {
+  if (row.best_f1 == null) {
+    return "—";
+  }
+  return `${formatPercent(row.best_f1)} @ ${row.best_f1_threshold?.toFixed(3) ?? "?"}`;
 }
 
 function formatMs(value: number): string {
@@ -217,6 +251,21 @@ function BenchmarkPanel(props: Props) {
   const job = status?.job ?? null;
   const groupedMetricsEnabled = params.group_annotation_radius_m > 0;
   const remoteTargetSelected = params.target_server === "remote";
+  // Matches `LocalizationParams.feedback_enabled`: with both gains at zero the boost
+  // is never consulted, so the normalization choice is inert and shown as such.
+  const feedbackEnabled =
+    Boolean(params.feedback_alpha) || Boolean(params.feedback_beta);
+  // Two radii, one question — "what counts as one object". Warned about rather than
+  // forced: a deliberate mismatch is a legitimate experiment, an accidental one is how
+  // a recall ceiling gets read as a pipeline regression.
+  const groupingInvariantWarning = !groupedMetricsEnabled
+    ? "Grouping off: annotations closer than clustering_eps_m are separate targets the "
+      + "pipeline cannot separate, so recall is capped by the annotation granularity."
+    : Math.abs(params.group_annotation_radius_m - params.clustering_eps_m) > 1e-9
+      ? `Group radius (${params.group_annotation_radius_m} m) differs from `
+        + `clustering_eps_m (${params.clustering_eps_m} m): the ground truth and the `
+        + "pipeline disagree on what one object is."
+      : null;
   const canRun =
     Boolean(annotations?.exists)
     && Boolean(annotations && annotations.prompt_count > 0)
@@ -288,7 +337,41 @@ function BenchmarkPanel(props: Props) {
         {paramInput("Min similarity", "min_similarity", 0.05, -1)}
         {paramInput("Clustering eps (m)", "clustering_eps_m", 0.5, 0.1)}
         {paramInput("Candidate count", "candidate_count", 100, 1)}
-        <label className="benchmark-param benchmark-checkbox">
+        {paramInput("Min keyframes / cluster", "min_keyframes_per_cluster", 1, 1)}
+        {paramInput("Feedback α (promote)", "feedback_alpha", 0.05, 0)}
+        {paramInput("Feedback β (demote)", "feedback_beta", 0.05, 0)}
+        <label className="benchmark-param">
+          <span>Feedback normalization</span>
+          <select
+            value={params.feedback_normalization ?? "none"}
+            disabled={!feedbackEnabled}
+            title={
+              "Rescales the prototype similarities across the retrieved candidates "
+              + "before α/β apply. They are image↔image similarities, so raw they are "
+              + "mostly a constant offset — and a constant offset flattens the cluster "
+              + "ranking instead of sharpening it. Only used when α or β is non-zero."
+            }
+            onChange={(event) => {
+              const value = event.target.value as FeedbackNormalization;
+              setParams((current) => ({ ...current, feedback_normalization: value }));
+            }}
+          >
+            {FEEDBACK_NORMALIZATIONS.map((mode) => (
+              <option key={mode} value={mode}>
+                {mode}
+              </option>
+            ))}
+          </select>
+        </label>
+        {paramInput("Default match radius (m)", "default_accuracy", 0.5, 0.1)}
+        <label
+          className="benchmark-param benchmark-checkbox"
+          title={
+            "Counts annotations closer than the group radius as one target. Keep it "
+            + "on: the pipeline cannot emit two clusters closer than clustering_eps_m, "
+            + "so a finer-grained ground truth caps recall arithmetically."
+          }
+        >
           <span>Group close annotations</span>
           <input
             type="checkbox"
@@ -296,8 +379,10 @@ function BenchmarkPanel(props: Props) {
             onChange={(event) => {
               setParams((current) => ({
                 ...current,
+                // Seeded from the clustering radius, not from an arbitrary 0.25 m:
+                // both answer "what counts as one object".
                 group_annotation_radius_m: event.target.checked
-                  ? (current.group_annotation_radius_m > 0 ? current.group_annotation_radius_m : 0.25)
+                  ? current.clustering_eps_m
                   : 0,
               }));
             }}
@@ -310,6 +395,9 @@ function BenchmarkPanel(props: Props) {
           0,
           !groupedMetricsEnabled,
         )}
+        {groupingInvariantWarning ? (
+          <p className="benchmark-param-warning muted">{groupingInvariantWarning}</p>
+        ) : null}
         <button
           className="benchmark-run-button"
           type="button"
@@ -403,6 +491,9 @@ function BenchmarkPanel(props: Props) {
 
         {metrics ? (
           <>
+            <p className="muted benchmark-run-config">
+              Run parameters: {configSummary(metrics.config)}
+            </p>
             <h3>Strict metrics</h3>
             <div className="benchmark-summary-cards">
               <SummaryCard label="Precision" value={formatPercent(metrics.summary.precision)} />
@@ -414,6 +505,7 @@ function BenchmarkPanel(props: Props) {
               <SummaryCard label="Prompts" value={String(metrics.summary.prompt_count)} />
               <SummaryCard label="Errors" value={String(metrics.summary.error_count)} />
             </div>
+            <ThresholdFreeCards summary={metrics.summary} />
 
             <h3>By class</h3>
             <table className="benchmark-table">
@@ -459,6 +551,12 @@ function BenchmarkPanel(props: Props) {
                   <th>TP</th>
                   <th>FP</th>
                   <th>FN</th>
+                  <th title="Average precision — threshold-free, compare runs on this">
+                    AP
+                  </th>
+                  <th title="Best F1 reachable over all thresholds, and where">
+                    Best F1
+                  </th>
                   <th>Accepted</th>
                   <th>Rejected</th>
                   <th>GT</th>
@@ -479,6 +577,8 @@ function BenchmarkPanel(props: Props) {
                     <td>{row.true_positives}</td>
                     <td>{row.false_positives}</td>
                     <td>{row.false_negatives}</td>
+                    <td>{optionalPercent(row.average_precision)}</td>
+                    <td>{bestF1Cell(row)}</td>
                     <td>{row.accepted_predictions}</td>
                     <td>{row.rejected_predictions}</td>
                     <td>{row.ground_truth}</td>
@@ -527,6 +627,7 @@ function BenchmarkPanel(props: Props) {
                     value={String(metrics.grouped.summary.error_count)}
                   />
                 </div>
+                <ThresholdFreeCards summary={metrics.grouped.summary} />
 
                 <h3>Grouped by class</h3>
                 <table className="benchmark-table">
@@ -572,6 +673,10 @@ function BenchmarkPanel(props: Props) {
                       <th>TP</th>
                       <th>FP</th>
                       <th>FN</th>
+                      <th title="Average precision — threshold-free">AP</th>
+                      <th title="Best F1 reachable over all thresholds, and where">
+                        Best F1
+                      </th>
                       <th>Accepted</th>
                       <th>Rejected</th>
                       <th>GT groups</th>
@@ -592,6 +697,8 @@ function BenchmarkPanel(props: Props) {
                         <td>{row.true_positives}</td>
                         <td>{row.false_positives}</td>
                         <td>{row.false_negatives}</td>
+                        <td>{optionalPercent(row.average_precision)}</td>
+                        <td>{bestF1Cell(row)}</td>
                         <td>{row.accepted_predictions}</td>
                         <td>{row.rejected_predictions}</td>
                         <td>{row.ground_truth}</td>
@@ -606,6 +713,33 @@ function BenchmarkPanel(props: Props) {
         ) : null}
       </div>
     </section>
+  );
+}
+
+/**
+ * The threshold-free half of a summary. Kept visually apart from the P/R/F1 cards
+ * because it answers a different question: those describe one operating point, these
+ * describe the ranking whatever the operating point.
+ */
+function ThresholdFreeCards(props: { summary: BenchmarkSummary }) {
+  if (props.summary.mean_average_precision == null) {
+    return null;
+  }
+  return (
+    <div className="benchmark-summary-cards">
+      <SummaryCard
+        label="mAP"
+        value={formatPercent(props.summary.mean_average_precision)}
+      />
+      <SummaryCard
+        label="Mean best F1"
+        value={formatPercent(props.summary.mean_best_f1 ?? 0)}
+      />
+      <SummaryCard
+        label="Scored prompts"
+        value={String(props.summary.scored_prompt_count ?? 0)}
+      />
+    </div>
   );
 }
 

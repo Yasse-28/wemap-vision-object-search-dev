@@ -1,4 +1,7 @@
 import type { SearchType } from "../api";
+import type { FeedbackNormalization } from "../benchmark/types";
+
+export type { FeedbackNormalization };
 
 /**
  * `"localize-offline"` is gone (ADR 0002): "offline" meant exact cosine over an
@@ -66,13 +69,27 @@ export type KeyframeDebugMetadata = {
   level: string | null;
 };
 
+/**
+ * Every field here is a parameter the bricks service actually reads. Four more used
+ * to sit alongside them — `use_stored_positions`, `robust_centroid`,
+ * `embedding_similarity_threshold` and `include_debug` — inherited from the retired
+ * standalone service (`legacy/pipeline/online/`). Neither bricks nor the mirrored
+ * production service accepts them: pydantic dropped them silently, so the controls
+ * did nothing. Do not reintroduce one without a field to receive it.
+ */
 export type OnlineLocalizeOverrides = {
-  use_stored_positions: boolean;
-  robust_centroid: boolean;
   merge_radius: number;
-  embedding_similarity_threshold: number;
   feedback_alpha: number;
   feedback_beta: number;
+  feedback_normalization: FeedbackNormalization;
+  /**
+   * Sent explicitly rather than left to the service default, so the same number
+   * reaches both `/localize` and the benchmark behind "Score this prompt". It gates
+   * cluster eligibility *and* the denominator of `normalized_similarity`, so two
+   * values mean two different `match_score`s — i.e. a score that does not describe
+   * the list on screen.
+   */
+  min_similarity: number;
   min_keyframes_per_cluster: number;
   candidate_count: number;
   /**
@@ -81,22 +98,20 @@ export type OnlineLocalizeOverrides = {
    * highest-similarity one. Dev-only — see `toolbox/bricks/localize.py`.
    */
   level_strategy: "seed" | "median";
-  include_debug: boolean;
 };
 
 export const DEFAULT_ONLINE_OVERRIDES: OnlineLocalizeOverrides = {
-  use_stored_positions: true,
-  robust_centroid: false,
   merge_radius: 2.0,
-  embedding_similarity_threshold: 0.85,
   feedback_alpha: 0.0,
   feedback_beta: 0.0,
-  min_keyframes_per_cluster: 3,
+  feedback_normalization: "none",
+  min_similarity: 0.2,
+  // The service's own default, and the benchmark's. It used to be 3 here alone,
+  // which meant the panel and every benchmark number described differently-built
+  // clusters for the same prompt.
+  min_keyframes_per_cluster: 2,
   candidate_count: 1000,
   level_strategy: "seed",
-  // On by default so the keyframe overlay keeps rendering; turn off to drop the
-  // per-keyframe georef lookup (adds seconds on large maps).
-  include_debug: true,
 };
 
 export type TextSearchState = {

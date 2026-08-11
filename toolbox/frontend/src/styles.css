@@ -2468,6 +2468,20 @@ body.explorer-equirect-dragging {
   align-self: flex-start;
 }
 
+/* Full-width so it breaks the flex row: it qualifies the whole form, not one field. */
+.benchmark-param-warning {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: #92400e;
+}
+
+.benchmark-run-config {
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+}
+
 .benchmark-run-button {
   padding: 8px 22px;
   border: none;

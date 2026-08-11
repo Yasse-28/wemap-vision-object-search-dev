@@ -24,7 +24,8 @@ diverge, production wins. A "small improvement" here is a bug.
 |---|---|---|
 | `ingest.py` | `db/ingest.py` | `encode_copy_stream`, `bulk_copy`, `create_partial_hnsw_index`, `_EWKB_POINTZ_PREFIX`, `_HNSW_INDEX_LOCK_KEY`, `INDEX_NAME_TEMPLATE` |
 | `ingest_cli.py` | `object_search_ingest.py` | `run_ingest`, `_compute_object_positions`, `_ingest_capture`, `_upsert_geokeyframes`, `discover_capture_dirs`, `EMBEDDING_DIM=1024`, `DEFAULT_MIN_DISTANCE=1.5` |
-| `candidates.py` | `candidates.py` | `EnrichedCandidate`, `load_enriched_candidates`, `_prefilter_hnsw_results`, `K_INTERNAL=1000`, `LOOSE_ALPHA=0.3` |
+| `candidates.py` | `candidates.py` | `EnrichedCandidate`, `load_enriched_candidates`, `_prefilter_hnsw_results`, `apply_feedback_boost`, `normalize_prototype_similarities`, `FEEDBACK_NORMALIZATIONS`, `K_INTERNAL=1000`, `LOOSE_ALPHA=0.3` |
+| `feedback.py` | *(dev-only — no production counterpart)* | `ReviewFeedback`, `load_review_feedback`, `normalize_query`, `DB_FILENAME` — reads the toolbox's `object-search-annotations.db` |
 | `localize.py` | `v1_5_logic.py` | `cluster_detections_leader_canopy`, `compute_cluster_statistics`, `rank_localization_clusters`, `localize_from_enriched_candidates`, `build_localize_response`, `LocalizationParams`, `UNRESOLVED_LEVEL=-9999`, `PLACEHOLDER_BBOX` |
 | `prepare_runner.py` | `object_search_prepare.py` (its `image_entries` construction) | `collect_image_entries`, `run` |
 | `prepare_postprocess.py` | `object_search_prepare.py::_sample_depths` | `postprocess_metadata`, `sample_depths` |
@@ -33,8 +34,27 @@ diverge, production wins. A "small improvement" here is a bug.
 | `georef_source.py` | *(no counterpart — replaces the ORM)* | `load_pose_source`, `PoseSource`, `KeyframePose` — a thin façade over `map_manifest` |
 | `db_schema.py` | `api/models.py` + migrations | `ensure_schema`, `CREATE_CANDIDATE`, `CREATE_GEOKEYFRAME` |
 | `db.py` | — | `build_dsn`, `connect` (reads the mirror's `DATABASE_*`) |
-| `service.py` | `v1_5_views.py` | `create_app`, `query_by_text`, `query_by_image`, `LocalizeRequest`, `load_map_entries`, `index_coverage` (**dev-only, no production counterpart**: per-keyframe `ingested`/`no_position` counts, so the toolbox can tell prepared-but-pruned keyframes from indexed ones without a `pg` client of its own) |
+| `service.py` | `v1_5_views.py` | `create_app`, `query_by_text`, `query_by_image`, `LocalizeParams` (query-less half, also validates the multipart form so both branches share one set of defaults), `LocalizeRequest`, `load_map_entries`, `index_coverage` (**dev-only, no production counterpart**: per-keyframe `ingested`/`no_position` counts, so the toolbox can tell prepared-but-pruned keyframes from indexed ones without a `pg` client of its own) |
 | `vendored/` | `utils/`, `depth/service/decode.py`, `viewer360/`, `v1_legacy.py` | Copies — see its `PROVENANCE.md` |
+
+### Review-feedback boost (dev-only)
+
+`feedback.py` → `candidates.py` → `localize.py`. `LocalizeRequest.feedback_alpha`/
+`feedback_beta` (both `0.0` = off, and off is exact: `_ranking_similarities` never reads
+the boosted field) promote/demote a candidate by its similarity to the cutouts a user
+marked `true_positive`/`false_positive` for the *same normalised query*.
+`feedback_normalization` (`"none"` default, `"center"`, `"standardize"`) rescales those
+prototype columns across the retrieved set first — they are image↔image similarities
+(~0.7–0.9) against a text↔image base (~0.15–0.30), so raw they are mostly a constant
+offset, and a constant offset *flattens* `rank_localization_clusters`' relative
+normalisation instead of sharpening it.
+
+Only `cluster_best_sim` is boosted. The prefilter, the sort, the `select_top_candidates`
+truncation, the clustering seed order, the centroid weights and the observation order
+all stay on raw similarity — the boost changes cluster *ranking*, never cluster
+*geometry*. `detection_review.target_id` is a BIGSERIAL that does not survive a
+reingest; `_log_prototype_resolution` warns when the prototypes resolve to nothing,
+which is the only way to tell an inert boost from an unhelpful one.
 
 `localize.py` differs from production in four import lines, one dev-only opt-in, and one
 bug fix. `LocalizationParams.level_strategy` (`"seed"`, the default and production's

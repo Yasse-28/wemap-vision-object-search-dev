@@ -69,7 +69,7 @@ export function parseArgs(argv: string[], repoRoot: string): WorkbenchOptions {
       process.env.OBJECT_SEARCH_PYTHON_API ?? "http://127.0.0.1:45678",
     ),
     annApiBaseUrl: normalizeBaseUrl(
-      process.env.OBJECT_SEARCH_ANN_URL ?? "http://127.0.0.1:8000",
+      process.env.OBJECT_SEARCH_ANN_URL ?? "http://127.0.0.1:45677",
     ),
     host: process.env.OBJECT_SEARCH_WORKBENCH_HOST ?? "0.0.0.0",
     port: Number(process.env.OBJECT_SEARCH_WORKBENCH_PORT ?? 45700),

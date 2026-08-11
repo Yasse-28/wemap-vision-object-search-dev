@@ -11,12 +11,14 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from toolbox.bricks.candidates import (
     _ENRICH_SQL,
     _build_enrich_query,
     apply_feedback_boost,
+    normalize_prototype_similarities,
 )
 from toolbox.bricks.feedback import (
     ReviewFeedback,
@@ -188,7 +190,12 @@ def test_boost_clips_to_unit_range() -> None:
     assert apply_feedback_boost(-0.9, 0.0, 1.0, 0.0, 0.5) == -1.0
 
 
-@pytest.mark.parametrize("pos, neg", [(0.0, 0.0), (0.9, 0.1), (1.0, 1.0)])
+@pytest.mark.parametrize(
+    "pos, neg",
+    # The last two are what `"center"`/`"standardize"` produce: centring makes half
+    # the column negative, and standardizing takes it well outside [-1, 1].
+    [(0.0, 0.0), (0.9, 0.1), (1.0, 1.0), (-0.4, -0.2), (7.3, -5.1)],
+)
 def test_zero_alpha_beta_is_exact_disablement(pos: float, neg: float) -> None:
     """Not "close to" the raw similarity — bit-for-bit equal to it.
 
@@ -245,3 +252,45 @@ def test_prototypes_are_restricted_to_the_same_georef() -> None:
     feedback = ReviewFeedback(positive_ids=[10], negative_ids=[])
     sql, _, _, _ = _build_enrich_query(3, [1, 2], feedback)
     assert "p.geo_ref_id = %s" in sql
+
+
+# ------------------------------------------------------- prototype normalisation
+
+
+def test_normalization_none_is_the_identity() -> None:
+    """The default must not touch the column: it is what the baseline measured."""
+    values = [0.81, 0.83, 0.90, 0.79]
+    assert normalize_prototype_similarities(values, "none") == values
+
+
+def test_center_removes_the_offset_and_keeps_the_spread() -> None:
+    """The whole point: an image↔image column is offset + a thin useful margin."""
+    centered = normalize_prototype_similarities([0.80, 0.82, 0.84, 0.98], "center")
+
+    assert centered[2] - centered[1] == pytest.approx(0.02)
+    assert float(np.median(centered)) == pytest.approx(0.0)
+    assert centered[0] < 0.0 < centered[3]
+
+
+def test_standardize_puts_the_column_in_units_of_its_own_spread() -> None:
+    """A column ten times tighter must yield the same z, not a tenth of the boost."""
+    wide = normalize_prototype_similarities([0.5, 0.6, 0.7, 0.8], "standardize")
+    tight = normalize_prototype_similarities([0.50, 0.51, 0.52, 0.53], "standardize")
+
+    assert wide == pytest.approx(tight)
+
+
+def test_a_flat_column_standardizes_to_no_evidence() -> None:
+    """MAD = 0 must not divide by ~zero and turn float noise into a ranking."""
+    assert normalize_prototype_similarities([0.7] * 5, "standardize") == [0.0] * 5
+
+
+def test_an_absent_prototype_set_stays_inert_under_every_mode() -> None:
+    """No annotations ⇒ an all-zero column ⇒ zero contribution, normalised or not."""
+    for mode in ("none", "center", "standardize"):
+        assert normalize_prototype_similarities([0.0] * 4, mode) == [0.0] * 4
+
+
+def test_empty_input_is_not_a_division_by_zero() -> None:
+    """`load_enriched_candidates` returns early on no rows, but not provably so."""
+    assert normalize_prototype_similarities([], "standardize") == []

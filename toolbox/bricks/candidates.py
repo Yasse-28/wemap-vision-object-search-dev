@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -144,6 +145,57 @@ def _log_prototype_resolution(
         )
 
 
+FeedbackNormalization = Literal["none", "center", "standardize"]
+FEEDBACK_NORMALIZATIONS: tuple[str, ...] = ("none", "center", "standardize")
+
+# Below this, the prototype similarities carry no usable spread and standardizing
+# them would amplify float noise into a ranking signal. Fall back to zero, i.e. "no
+# evidence", which is the honest reading of "every candidate scored the same".
+_MIN_SPREAD = 1e-9
+_MAD_TO_SIGMA = 1.4826  # MAD → σ for a normal distribution, the usual convention.
+
+
+def normalize_prototype_similarities(
+    values: list[float], mode: FeedbackNormalization
+) -> list[float]:
+    """Rescale one prototype-similarity column across the retrieved candidates.
+
+    The term this feeds is on the wrong scale by construction: `similarity` is a
+    text↔image similarity (~0.15–0.30 in practice) while `pos_sim`/`neg_sim` are
+    image↔image ones (~0.7–0.9 between any two cutouts of the same venue). Raw, the
+    gain therefore buys a near-constant offset plus a thin discriminative margin —
+    and a constant is not neutral downstream: `rank_localization_clusters`
+    normalises by `(best - min_similarity)`, so adding `c` to every cluster pushes
+    every `normalized_similarity` towards 1 and *flattens* the ranking.
+
+    The modes, all applied per query over the candidates actually retrieved:
+
+    - `"none"`: the raw column. The default, and what the baseline was measured with.
+    - `"center"`: subtract the median. Drops the offset, keeps the margin, so the
+      gain acts only on "is this closer to a prototype than the typical candidate".
+    - `"standardize"`: centre, then divide by a robust σ (MAD × 1.4826), which puts
+      the gain in units of the column's own spread instead of raw similarity.
+      Values are unbounded here; the clip in `apply_feedback_boost` is what keeps
+      the result sane.
+
+    Median and MAD rather than mean and σ: the prototype set is small and the
+    column is routinely dominated by a handful of near-duplicates of an annotated
+    cutout.
+    """
+    if mode == "none" or not values:
+        return list(values)
+
+    median = float(np.median(values))
+    centered = [float(value) - median for value in values]
+    if mode == "center":
+        return centered
+
+    mad = float(np.median([abs(value) for value in centered])) * _MAD_TO_SIGMA
+    if mad <= _MIN_SPREAD:
+        return [0.0] * len(centered)
+    return [value / mad for value in centered]
+
+
 def apply_feedback_boost(
     similarity: float, pos_sim: float, neg_sim: float, alpha: float, beta: float
 ) -> float:
@@ -152,6 +204,10 @@ def apply_feedback_boost(
     With `alpha = beta = 0` this returns `similarity` bit-for-bit — the term is
     multiplied to exactly 0.0, not merely made small — which is what "off by
     default" has to mean for the baseline to be the current code path.
+
+    `pos_sim`/`neg_sim` are whatever `normalize_prototype_similarities` produced,
+    so under `"center"`/`"standardize"` they can be negative: alpha then demotes a
+    candidate that is *less* prototype-like than its peers, which is the point.
     """
     boosted = float(similarity) + float(alpha) * float(pos_sim)
     boosted -= float(beta) * float(neg_sim)
@@ -192,6 +248,12 @@ class EnrichedCandidate:
     similarity_boosted: float | None = None
     pos_sim: float = 0.0
     neg_sim: float = 0.0
+    # The values the gains were actually multiplied by. Equal to `pos_sim`/`neg_sim`
+    # under `normalization="none"`, and the only way to read what a `"center"` or
+    # `"standardize"` run did: those are query-relative, so the raw column alone no
+    # longer explains why a candidate moved.
+    pos_sim_applied: float = 0.0
+    neg_sim_applied: float = 0.0
 
     @property
     def effective_similarity(self) -> float:
@@ -220,6 +282,7 @@ def load_enriched_candidates(
     feedback: ReviewFeedback | None = None,
     alpha: float = 0.0,
     beta: float = 0.0,
+    normalization: FeedbackNormalization = "none",
 ) -> list[EnrichedCandidate]:
     """Pre-filter HNSW hits, fetch DB rows, convert object positions to WGS84.
 
@@ -227,6 +290,11 @@ def load_enriched_candidates(
     **not** change which rows are fetched, how many survive the prefilter, or the
     sort order — that stays on raw `similarity`, so the retrieved set is identical
     with and without feedback and only the ranking downstream can differ.
+
+    `normalization` rescales the prototype columns across the retrieved set before
+    the gains apply — see `normalize_prototype_similarities`. It is therefore
+    query-relative: the same candidate boosted differently under two different
+    queries is expected, not a bug.
     """
     results = _prefilter_hnsw_results(hnsw_results)
     if not results:
@@ -268,6 +336,15 @@ def load_enriched_candidates(
     orientations_wxyz = np.array([r["orientation"] for r in rows], dtype=np.float64)
     vkf_headings = headings_from_orientations(orientations_wxyz)
 
+    # NULL when the prototype set is empty or every prototype was filtered out by
+    # geo_ref_id — treat as "no evidence", i.e. no contribution. Normalisation needs
+    # the whole column at once, so both are resolved before the per-row loop; the raw
+    # values stay on the candidate, the normalised ones only feed the boost.
+    pos_sims = [float(row.get("pos_sim") or 0.0) for row in rows]
+    neg_sims = [float(row.get("neg_sim") or 0.0) for row in rows]
+    boost_pos = normalize_prototype_similarities(pos_sims, normalization)
+    boost_neg = normalize_prototype_similarities(neg_sims, normalization)
+
     enriched: list[EnrichedCandidate] = []
     for i, row in enumerate(rows):
         orientation = quaternion.cast(np.asarray(row["orientation"], dtype=np.float64))
@@ -278,10 +355,8 @@ def load_enriched_candidates(
         level_val = levels_arr[i]
         vkf_level_val = vkf_levels_arr[i]
         similarity = float(sim_by_id[row["id"]])
-        # NULL when the prototype set is empty or every prototype was filtered out
-        # by geo_ref_id — treat as "no evidence", i.e. no contribution.
-        pos_sim = float(row.get("pos_sim") or 0.0)
-        neg_sim = float(row.get("neg_sim") or 0.0)
+        pos_sim = pos_sims[i]
+        neg_sim = neg_sims[i]
         enriched.append(
             EnrichedCandidate(
                 id=row["id"],
@@ -306,10 +381,12 @@ def load_enriched_candidates(
                 video_keyframe_heading=float(vkf_headings[i]),
                 video_keyframe_depth=os.path.basename(row["depth_map"] or ""),
                 similarity_boosted=apply_feedback_boost(
-                    similarity, pos_sim, neg_sim, alpha, beta
+                    similarity, boost_pos[i], boost_neg[i], alpha, beta
                 ),
                 pos_sim=pos_sim,
                 neg_sim=neg_sim,
+                pos_sim_applied=boost_pos[i],
+                neg_sim_applied=boost_neg[i],
             )
         )
 

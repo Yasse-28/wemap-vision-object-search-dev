@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from toolbox.bricks.candidates import EnrichedCandidate
+from toolbox.bricks.candidates import EnrichedCandidate, FeedbackNormalization
 from toolbox.bricks.vendored.candidate_orientation import candidate_orientation
 from toolbox.bricks.vendored.geo_transform import GeoTransform, Pose
 from toolbox.bricks.vendored.maths import quaternion
@@ -40,6 +40,11 @@ class LocalizationParams:
     # `_ranking_similarities`.
     feedback_alpha: float = 0.0
     feedback_beta: float = 0.0
+    # How the prototype columns are rescaled before the gains apply. Carried here
+    # only so the response and the logs can report what was measured — the rescaling
+    # itself happens in `candidates.load_enriched_candidates`, which is the only
+    # place that sees the whole retrieved set at once.
+    feedback_normalization: FeedbackNormalization = "none"
     # How a cluster picks the floor it claims: `"seed"` is production's behaviour and
     # stays the default, so this file's default path remains the ported one. `"median"`
     # is a dev-only experiment for objects whose observers straddle two floors; see
@@ -413,7 +418,7 @@ def _observation_feedback_fields(
     """
     if not params.feedback_enabled:
         return {}
-    return {
+    fields = {
         "pos_sim": round(float(candidate.pos_sim), 6),
         "neg_sim": round(float(candidate.neg_sim), 6),
         "similarity_boosted": round(float(candidate.effective_similarity), 6),
@@ -421,6 +426,12 @@ def _observation_feedback_fields(
             float(candidate.effective_similarity) - float(candidate.similarity), 6
         ),
     }
+    if params.feedback_normalization != "none":
+        # Only under a normalisation: otherwise these duplicate `pos_sim`/`neg_sim`
+        # exactly, and a field that is always a copy is a field nobody reads.
+        fields["pos_sim_applied"] = round(float(candidate.pos_sim_applied), 6)
+        fields["neg_sim_applied"] = round(float(candidate.neg_sim_applied), 6)
+    return fields
 
 
 def localize_from_enriched_candidates(

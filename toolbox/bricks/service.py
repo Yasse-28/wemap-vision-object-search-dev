@@ -45,7 +45,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -57,6 +57,7 @@ from pydantic import BaseModel, Field
 from toolbox.bricks import db
 from toolbox.bricks.candidates import (
     K_INTERNAL,
+    FeedbackNormalization,
     load_enriched_candidates,
     resolve_candidates_v2_response,
 )
@@ -66,7 +67,9 @@ from toolbox.bricks.localize import LocalizationParams, build_localize_response
 from toolbox.bricks.vendored.geo_transform import GeoTransform
 from toolbox.logging import logger
 
-DEFAULT_ANN_BASE_URL = "http://127.0.0.1:8000"
+# 45677, not the mirrored service's own default 8000: 8000 is too popular locally
+# (other Wemap PoCs listen there). Override with OBJECT_SEARCH_ANN_URL.
+DEFAULT_ANN_BASE_URL = "http://127.0.0.1:45677"
 # 45678 on purpose: this service is a drop-in replacement for the standalone one it
 # supersedes, so the toolbox, wemap-vision-tools and the benchmark keep the port and
 # the `/{map_id}/object-search/…` path shape they already agree on (ADR 0001 §gaps).
@@ -265,10 +268,17 @@ def query_by_image(
 # --------------------------------------------------------------------------- models
 
 
-class LocalizeRequest(BaseModel):
-    """Matches what the HTTP benchmark posts, plus livemap's `num_results`."""
+class LocalizeParams(BaseModel):
+    """Every localization knob, without the query itself.
 
-    text: str = Field(min_length=1)
+    Split out from `LocalizeRequest` so the multipart (image) branch validates the
+    *same* fields with the *same* defaults instead of hand-picking two of them from
+    the form — which is how `min_similarity`, `clustering_eps_m` and
+    `min_keyframes_per_cluster` silently did nothing for image queries while the UI
+    happily sent them. Form values arrive as strings; pydantic coerces them, and the
+    non-field parts of the form (`image`, `text`) are ignored.
+    """
+
     num_results: int = Field(default=100, gt=0, le=5000)
     min_similarity: float = 0.2
     candidate_count: int = Field(default=K_INTERNAL, gt=0, le=5000)
@@ -284,6 +294,11 @@ class LocalizeRequest(BaseModel):
     # retrieval score entirely, which is not a tuning regime, it is a bug.
     feedback_alpha: float = Field(default=0.0, ge=0.0, le=1.0)
     feedback_beta: float = Field(default=0.0, ge=0.0, le=1.0)
+    # How the prototype similarities are rescaled before the gains apply. `"none"`
+    # is the raw term the baseline was measured with; the other two remove the
+    # near-constant offset that image↔image similarities carry. See
+    # `candidates.normalize_prototype_similarities`.
+    feedback_normalization: FeedbackNormalization = "none"
     # Dev-only knob: `"seed"` is what production does and stays the default. See
     # `localize._cluster_level_from_detections`.
     level_strategy: Literal["seed", "median"] = "seed"
@@ -298,8 +313,15 @@ class LocalizeRequest(BaseModel):
             min_keyframes_per_cluster=self.min_keyframes_per_cluster,
             feedback_alpha=self.feedback_alpha,
             feedback_beta=self.feedback_beta,
+            feedback_normalization=self.feedback_normalization,
             level_strategy=self.level_strategy,
         )
+
+
+class LocalizeRequest(LocalizeParams):
+    """Matches what the HTTP benchmark posts, plus livemap's `num_results`."""
+
+    text: str = Field(min_length=1)
 
 
 class TextSearchRequest(BaseModel):
@@ -438,15 +460,17 @@ def create_app() -> FastAPI:
             upload = form.get("image")
             if upload is None or not hasattr(upload, "read"):
                 raise HTTPException(status_code=422, detail="Missing 'image' file.")
-            params = LocalizationParams(
-                num_results=int(form.get("num_results", 100)),
-                candidate_count=int(form.get("candidate_count", K_INTERNAL)),
-            )
             # No feedback for image queries, deliberately. `detection_review.query`
             # is the *filename* for an image search, which is both meaningless as a
             # semantic key and prone to collide across unrelated uploads
             # ("image.jpg"). Matching on it would apply one upload's annotations to
-            # another's results. This is a known limitation, not an oversight.
+            # another's results. This is a known limitation, not an oversight — so
+            # the gains are forced to zero rather than accepted and quietly ignored,
+            # which would emit feedback fields that are structurally always neutral.
+            params = LocalizeParams.model_validate(
+                {key: value for key, value in form.items() if key != "image"}
+            ).to_params()
+            params = replace(params, feedback_alpha=0.0, feedback_beta=0.0)
             try:
                 hits = query_by_image(
                     state.ann_base_url,
@@ -494,6 +518,7 @@ def create_app() -> FastAPI:
                 feedback=feedback,
                 alpha=params.feedback_alpha,
                 beta=params.feedback_beta,
+                normalization=params.feedback_normalization,
             )
         response = build_localize_response(
             candidates,

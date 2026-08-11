@@ -3,7 +3,7 @@
 Local TypeScript backend for the object-search toolbox UI.
 
 The Python services own object-search search/localization only (the bricks
-service on 45678, backed by the mirrored online service on 8000 — see
+service on 45678, backed by the mirrored online service on 45677 — see
 `../README.md`). This backend serves the UI and owns the local workbench /
 explorer metadata and preview routes.
 

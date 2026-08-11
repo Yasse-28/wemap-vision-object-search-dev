@@ -6,11 +6,13 @@ from pathlib import Path
 import pytest
 
 from toolbox.benchmark.object_search_http_benchmark import (
+    EMPTY_CURVE,
     FN_COLOR,
     FP_COLOR,
     REFERENCE_COLOR,
     TP_COLOR,
     Annotation,
+    Prediction,
     build_prompt_geojson,
     compute_prf,
     enrich_prediction_levels_from_artifact,
@@ -21,8 +23,11 @@ from toolbox.benchmark.object_search_http_benchmark import (
     load_annotations,
     parse_args,
     parse_predictions,
+    precision_recall_curve,
     prediction_level,
     resolve_localize_url,
+    targets_from_annotations,
+    targets_from_groups,
 )
 
 
@@ -701,3 +706,107 @@ def test_main_writes_raw_results_in_output_dir(tmp_path: Path) -> None:
     assert len(raw["prompts"]) == 1
     assert raw["prompts"][0]["annotations"][0]["class_name"] == "défibrillateur"
     assert (output_dir / "results.csv").exists()
+
+
+# ------------------------------------------------------- threshold-free evaluation
+
+
+def _prediction(score: float, lat: float, lng: float) -> Prediction:
+    return Prediction(id=f"p{score}", lat=lat, lng=lng, score=score)
+
+
+def _annotation(ident: str, lat: float, lng: float) -> Annotation:
+    return Annotation(
+        id=ident, class_name="c", lat=lat, lng=lng, accuracy_m=2.0, prompt="c"
+    )
+
+
+def test_recall_is_monotone_in_the_threshold() -> None:
+    """The property that forced score-ordered matching.
+
+    Under `match_predictions`' distance-ordered assignment, admitting a lower-scoring
+    prediction can steal a target from one already matched, so recall would dip as the
+    threshold falls. A curve with that shape cannot be read.
+    """
+    targets = targets_from_annotations(
+        [_annotation("a", 48.0, 2.0), _annotation("b", 48.0005, 2.0)]
+    )
+    predictions = [
+        _prediction(0.9, 48.00001, 2.0),  # good, far from perfect
+        _prediction(0.8, 48.0, 2.0),  # perfect on the same target, lower score
+        _prediction(0.7, 48.0005, 2.0),  # perfect on the other target
+    ]
+
+    curve = precision_recall_curve(predictions, targets)
+
+    recalls = [point.recall for point in curve.points]
+    assert recalls == sorted(recalls)
+    assert curve.points[-1].true_positives == 2
+
+
+def test_a_perfect_ranking_has_average_precision_one() -> None:
+    """Every true positive above every false positive, whatever the scores are."""
+    targets = targets_from_annotations(
+        [_annotation("a", 48.0, 2.0), _annotation("b", 48.001, 2.0)]
+    )
+    predictions = [
+        _prediction(0.9, 48.0, 2.0),
+        _prediction(0.8, 48.001, 2.0),
+        _prediction(0.7, 48.5, 2.5),  # nowhere near anything
+    ]
+
+    curve = precision_recall_curve(predictions, targets)
+
+    assert curve.average_precision == pytest.approx(1.0)
+    assert curve.best_f1 == pytest.approx(1.0)
+    assert curve.best_f1_threshold == pytest.approx(0.8)
+
+
+def test_average_precision_ignores_a_constant_score_shift() -> None:
+    """The whole point: a change that only shifts scores must not move AP.
+
+    The review-feedback boost shifts the score distribution, so a fixed-threshold F1
+    conflates "the ranking improved" with "the threshold moved". AP does not.
+    """
+    targets = targets_from_annotations([_annotation("a", 48.0, 2.0)])
+    predictions = [_prediction(0.9, 48.0, 2.0), _prediction(0.8, 48.5, 2.5)]
+    shifted = [
+        Prediction(id=p.id, lat=p.lat, lng=p.lng, score=p.score * 0.5 + 0.25)
+        for p in predictions
+    ]
+
+    assert precision_recall_curve(shifted, targets).average_precision == pytest.approx(
+        precision_recall_curve(predictions, targets).average_precision
+    )
+
+
+def test_tied_scores_produce_a_single_curve_point() -> None:
+    """No threshold can split a tie, so no point may describe a split."""
+    targets = targets_from_annotations([_annotation("a", 48.0, 2.0)])
+    predictions = [_prediction(0.5, 48.0, 2.0), _prediction(0.5, 48.5, 2.5)]
+
+    curve = precision_recall_curve(predictions, targets)
+
+    assert len(curve.points) == 1
+    assert curve.points[0].true_positives == 1
+    assert curve.points[0].false_positives == 1
+
+
+def test_no_predictions_or_no_targets_is_an_empty_curve() -> None:
+    targets = targets_from_annotations([_annotation("a", 48.0, 2.0)])
+    assert precision_recall_curve([], targets) is EMPTY_CURVE
+    assert precision_recall_curve([_prediction(0.9, 48.0, 2.0)], []) is EMPTY_CURVE
+
+
+def test_grouped_targets_match_on_their_nearest_member() -> None:
+    """A bank of screens is found by landing on any one of them, not on its centroid."""
+    # ~0.55 m apart: a bank of screens, well inside the 2 m grouping radius.
+    annotations = [_annotation(str(i), 48.0 + i * 0.000005, 2.0) for i in range(5)]
+    groups = group_annotations(annotations, radius_m=2.0)
+    assert len(groups) == 1
+
+    curve = precision_recall_curve(
+        [_prediction(0.9, 48.0, 2.0)], targets_from_groups(groups)
+    )
+    assert curve.points[-1].true_positives == 1
+    assert curve.best_f1 == pytest.approx(1.0)

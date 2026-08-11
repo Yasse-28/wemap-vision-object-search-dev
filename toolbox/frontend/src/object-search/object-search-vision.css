@@ -1882,6 +1882,13 @@ body.os-dragging * {
   color: #b42318;
 }
 
+/* Emphasised over the fixed-threshold P/R/F1 beside it: this is the number to read
+   when comparing two feedback settings, and the muted grey read as a footnote. */
+.object-search-review-score-curve {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
 .object-search-review-history-actions {
   display: inline-flex;
   gap: 6px;

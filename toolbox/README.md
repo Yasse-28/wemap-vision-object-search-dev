@@ -15,7 +15,7 @@ routes (see [ADR 0002](../docs/adr/0002-align-on-backend-pipeline.md)):
 | Service | Port | What it does | Started by |
 |---|---|---|---|
 | `toolbox.bricks.service` | 45678 | `/{map_id}/object-search/localize` — enrichment, clustering, ranking. The dev-only stand-in for Django's object-search API. | this backend, on demand |
-| `third_party/object_search/services/object_search_online` | 8000 | `/object-search/by-text\|by-image` — MetaCLIP embedding + HNSW. This is production's GPU service, mirrored verbatim. | you, via `scripts/run-online-service.sh` |
+| `third_party/object_search/services/object_search_online` | 45677 | `/object-search/by-text\|by-image` — MetaCLIP embedding + HNSW. This is production's GPU service, mirrored verbatim. | you, via `scripts/run-online-service.sh` |
 
 The toolbox never starts the second one: it loads MetaCLIP on the GPU, which is
 not something to trigger behind a button press. It also needs the local database
@@ -76,7 +76,7 @@ npm run dev:backend -- --config /path/to/config.json5
 ```
 
 Both service URLs have working defaults (`--python-api http://127.0.0.1:45678`,
-`--ann-api http://127.0.0.1:8000`); pass them only to override.
+`--ann-api http://127.0.0.1:45677`); pass them only to override.
 
 The config must contain a `maps` array. Relative map paths are resolved from
 the config file directory:

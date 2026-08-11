@@ -52,7 +52,7 @@ its local annotation SQLite store).
                         enrichment, clustering, ranking
                                   │ POST /object-search/by-text
                                   ▼
-                     mirrored online service (:8000)     ← you start this
+                     mirrored online service (:45677)     ← you start this
                      MetaCLIP2 embed + pgvector HNSW
                                   │
                                   ▼
@@ -109,7 +109,7 @@ That runs three steps, none of them optional:
 ### Serve and query
 
 ```bash
-scripts/run-online-service.sh                    # :8000, loads MetaCLIP (GPU)
+scripts/run-online-service.sh                    # :45677, loads MetaCLIP (GPU)
 scripts/run-bricks-service.sh /path/config.json  # :45678
 ```
 

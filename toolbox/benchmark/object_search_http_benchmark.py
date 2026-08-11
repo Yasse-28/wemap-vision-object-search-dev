@@ -62,6 +62,46 @@ class Match:
     score: float
 
 
+@dataclass(frozen=True)
+class Target:
+    """One thing that ought to be found: a lone annotation, or a group of them.
+
+    Carries every member point because a grouped target is matched on the distance to
+    its *nearest* member, not to the group's barycentre — a bank of screens is found
+    when a cluster lands on any of its screens.
+    """
+
+    id: str
+    points: tuple[tuple[float, float], ...]
+    radius_m: float
+
+
+@dataclass(frozen=True)
+class CurvePoint:
+    """Confusion counts when accepting every prediction scoring >= `threshold`."""
+
+    threshold: float
+    true_positives: int
+    false_positives: int
+    false_negatives: int
+    precision: float
+    recall: float
+    f1: float
+
+
+@dataclass(frozen=True)
+class CurveMetrics:
+    average_precision: float
+    best_f1: float
+    best_f1_threshold: float
+    best_f1_precision: float
+    best_f1_recall: float
+    points: list[CurvePoint] = field(default_factory=list)
+
+
+EMPTY_CURVE = CurveMetrics(0.0, 0.0, 0.0, 0.0, 0.0)
+
+
 @dataclass
 class PromptMetrics:
     class_name: str
@@ -78,6 +118,15 @@ class PromptMetrics:
     matches: list[Match] = field(default_factory=list)
     error: str | None = None
     elapsed_ms: float = 0.0
+    # Threshold-free summaries of the same predictions — see `precision_recall_curve`.
+    # They are what two runs should be compared on: a change that shifts the score
+    # distribution (the review-feedback boost does exactly that) moves the fixed
+    # threshold's P/R/F1 without the ranking having improved or worsened.
+    average_precision: float = 0.0
+    best_f1: float = 0.0
+    best_f1_threshold: float = 0.0
+    best_f1_precision: float = 0.0
+    best_f1_recall: float = 0.0
 
 
 def _polygon_centroid(coordinates: Any) -> tuple[float, float] | None:
@@ -534,6 +583,151 @@ def evaluate_prompt_grouped(
     )
 
 
+def targets_from_annotations(annotations: list[Annotation]) -> list[Target]:
+    return [
+        Target(
+            annotation.id,
+            ((annotation.lat, annotation.lng),),
+            annotation.accuracy_m,
+        )
+        for annotation in annotations
+    ]
+
+
+def targets_from_groups(groups: list[AnnotationGroup]) -> list[Target]:
+    return [
+        Target(
+            group.id,
+            tuple((a.lat, a.lng) for a in group.annotations),
+            group.match_radius_m,
+        )
+        for group in groups
+    ]
+
+
+def _distance_to_target(prediction: Prediction, target: Target) -> float:
+    return min(
+        haversine_m(prediction.lat, prediction.lng, lat, lng)
+        for lat, lng in target.points
+    )
+
+
+def rank_predictions_against_targets(
+    predictions: list[Prediction], targets: list[Target]
+) -> list[tuple[Prediction, bool]]:
+    """Predictions by descending score, each flagged true positive or not.
+
+    Matching is **score-ordered**: the best-scoring prediction picks its nearest free
+    target, and so on down. `match_predictions` instead sorts every admissible pair by
+    distance, which minimises total distance but is unusable for a curve — lowering the
+    threshold admits a new prediction that can *steal* an already-matched target, so
+    recall would not be monotone in the threshold.
+
+    Score order is also the detection-benchmark convention (PASCAL VOC, COCO), which
+    is what makes the resulting AP comparable to numbers from anywhere else.
+    """
+    used: set[str] = set()
+    ranked: list[tuple[Prediction, bool]] = []
+    for prediction in sorted(predictions, key=lambda item: -item.score):
+        best_target: Target | None = None
+        best_distance = float("inf")
+        for target in targets:
+            if target.id in used:
+                continue
+            distance_m = _distance_to_target(prediction, target)
+            if distance_m <= target.radius_m and distance_m < best_distance:
+                best_target, best_distance = target, distance_m
+        if best_target is not None:
+            used.add(best_target.id)
+        ranked.append((prediction, best_target is not None))
+    return ranked
+
+
+def _average_precision(points: list[CurvePoint]) -> float:
+    """All-point interpolated AP: sum of precision(interpolated) x recall increments.
+
+    Interpolated — precision at recall r is the *best* precision achievable at recall
+    >= r — because the raw curve saw-tooths on every false positive, and the raw
+    average would then reward the accident of where those land.
+    """
+    interpolated: list[tuple[float, float]] = []
+    running_max = 0.0
+    for point in reversed(points):
+        running_max = max(running_max, point.precision)
+        interpolated.append((point.recall, running_max))
+    interpolated.reverse()
+
+    area = 0.0
+    previous_recall = 0.0
+    for recall, precision in interpolated:
+        area += (recall - previous_recall) * precision
+        previous_recall = recall
+    return area
+
+
+def precision_recall_curve(
+    predictions: list[Prediction], targets: list[Target]
+) -> CurveMetrics:
+    """Sweep the acceptance threshold over the predictions' own scores.
+
+    Each point answers "what if we accepted everything scoring at least this?", so the
+    curve costs one matching pass, not one per threshold. `best_f1_threshold` is the
+    score at the best point: accept predictions scoring **>= it** (the runner's
+    `--acceptance-threshold` is a strict `>`, so pass a hair less).
+    """
+    if not predictions or not targets:
+        return EMPTY_CURVE
+
+    ranked = rank_predictions_against_targets(predictions, targets)
+    total_targets = len(targets)
+    points: list[CurvePoint] = []
+    true_positives = false_positives = 0
+
+    for index, (prediction, is_true_positive) in enumerate(ranked):
+        true_positives += int(is_true_positive)
+        false_positives += int(not is_true_positive)
+        # One point per distinct score: a threshold cannot separate ties, so emitting a
+        # point mid-run would describe a set no threshold can actually select.
+        if (
+            index + 1 < len(ranked)
+            and ranked[index + 1][0].score == prediction.score
+        ):
+            continue
+        false_negatives = total_targets - true_positives
+        precision, recall, f1 = compute_prf(
+            true_positives, false_positives, false_negatives
+        )
+        points.append(
+            CurvePoint(
+                threshold=float(prediction.score),
+                true_positives=true_positives,
+                false_positives=false_positives,
+                false_negatives=false_negatives,
+                precision=precision,
+                recall=recall,
+                f1=f1,
+            )
+        )
+
+    best = max(points, key=lambda point: (point.f1, point.threshold))
+    return CurveMetrics(
+        average_precision=_average_precision(points),
+        best_f1=best.f1,
+        best_f1_threshold=best.threshold,
+        best_f1_precision=best.precision,
+        best_f1_recall=best.recall,
+        points=points,
+    )
+
+
+def attach_curve(metrics: PromptMetrics, curve: CurveMetrics) -> None:
+    metrics.average_precision = curve.average_precision
+    metrics.best_f1 = curve.best_f1
+    metrics.best_f1_threshold = curve.best_f1_threshold
+    metrics.best_f1_precision = curve.best_f1_precision
+    metrics.best_f1_recall = curve.best_f1_recall
+
+
 def _slugify(value: str, max_length: int = 80) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip().lower())
     slug = slug.strip("-._")
@@ -759,6 +953,13 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             payload["feedback_alpha"] = args.feedback_alpha
         if args.feedback_beta != 0.0:
             payload["feedback_beta"] = args.feedback_beta
+        # Sent only alongside a non-zero gain: with both gains at zero the term is
+        # never consulted, and an unconditional field would make the request differ
+        # from the baseline's for no behavioural reason.
+        if args.feedback_normalization != "none" and (
+            args.feedback_alpha != 0.0 or args.feedback_beta != 0.0
+        ):
+            payload["feedback_normalization"] = args.feedback_normalization
         if args.min_keyframes_per_cluster is not None:
             payload["min_keyframes_per_cluster"] = args.min_keyframes_per_cluster
         if args.max_observations_per_cluster is not None:
@@ -776,6 +977,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 predictions=predictions,
                 acceptance_threshold=args.acceptance_threshold,
             )
+            # Threshold-free, on the *whole* prediction list — deliberately not on the
+            # accepted subset, since the sweep is what replaces the acceptance step.
+            strict_curve = precision_recall_curve(
+                predictions, targets_from_annotations(prompt_annotations)
+            )
+            attach_curve(metrics, strict_curve)
             grouped_metrics = (
                 evaluate_prompt_grouped(
                     class_name=class_name,
@@ -787,10 +994,20 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 if grouping_enabled
                 else None
             )
+            grouped_curve = (
+                precision_recall_curve(
+                    predictions, targets_from_groups(annotation_groups)
+                )
+                if grouping_enabled
+                else EMPTY_CURVE
+            )
+            if grouped_metrics is not None:
+                attach_curve(grouped_metrics, grouped_curve)
         except (
             Exception
         ) as exc:  # Keep long benchmark runs from aborting on one prompt.
             predictions = []
+            strict_curve = grouped_curve = EMPTY_CURVE
             precision, recall, f1 = compute_prf(0, 0, len(prompt_annotations))
             metrics = PromptMetrics(
                 class_name=class_name,
@@ -837,6 +1054,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "annotations": [asdict(annotation) for annotation in prompt_annotations],
             "predictions": [prediction.raw for prediction in predictions],
             "matches": [asdict(match) for match in metrics.matches],
+            # The full sweep lives here rather than in `by_prompt`: it is one point per
+            # distinct score, which would bloat metrics.json and the CSV for a series
+            # nobody reads as a table.
+            "precision_recall_curve": [asdict(p) for p in strict_curve.points],
             "error": metrics.error,
         }
         if grouped_metrics is not None:
@@ -847,6 +1068,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             ]
             raw_prompt["grouped_matches"] = [
                 asdict(match) for match in grouped_metrics.matches
+            ]
+            raw_prompt["grouped_precision_recall_curve"] = [
+                asdict(p) for p in grouped_curve.points
             ]
         raw_by_prompt.append(raw_prompt)
         if not args.no_prompt_geojson:
@@ -930,10 +1154,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "clustering_eps_m": args.clustering_eps_m,
         "feedback_alpha": args.feedback_alpha,
         "feedback_beta": args.feedback_beta,
+        "feedback_normalization": args.feedback_normalization,
         "min_keyframes_per_cluster": args.min_keyframes_per_cluster,
         "max_observations_per_cluster": args.max_observations_per_cluster,
         "score_field": args.score_field,
         "group_annotation_radius_m": args.group_annotation_radius_m,
+        "default_accuracy": args.default_accuracy,
         "prompt_geojson_dir": str(args.prompt_geojson_dir),
     }
     result: dict[str, Any] = {
@@ -1002,6 +1228,12 @@ def aggregate_summary(rows: list[PromptMetrics]) -> dict[str, Any]:
     fp = sum(row.false_positives for row in rows)
     fn = sum(row.false_negatives for row in rows)
     precision, recall, f1 = compute_prf(tp, fp, fn)
+    # Averaged over prompts, NOT pooled over predictions. `match_score` is normalised by
+    # the best cluster of its own query, so a 0.93 under one prompt and a 0.93 under
+    # another are not the same evidence — pooling them into one ranking would sort
+    # incomparable numbers. Every prompt therefore weighs the same here, whatever its
+    # number of annotations.
+    scored = [row for row in rows if not row.error and row.ground_truth]
     return {
         "prompt_count": len(rows),
         "error_count": sum(1 for row in rows if row.error),
@@ -1011,6 +1243,15 @@ def aggregate_summary(rows: list[PromptMetrics]) -> dict[str, Any]:
         "precision": precision,
         "recall": recall,
         "f1": f1,
+        "scored_prompt_count": len(scored),
+        "mean_average_precision": (
+            sum(row.average_precision for row in scored) / len(scored)
+            if scored
+            else 0.0
+        ),
+        "mean_best_f1": (
+            sum(row.best_f1 for row in scored) / len(scored) if scored else 0.0
+        ),
     }
 
 
@@ -1089,7 +1330,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--min-similarity", type=float, default=0.15)
     parser.add_argument("--acceptance-threshold", type=float, default=0.9)
     parser.add_argument("--score-field", default="match_score")
-    parser.add_argument("--default-accuracy", type=float, default=5.0)
+    parser.add_argument(
+        "--default-accuracy",
+        type=float,
+        default=5.0,
+        help=(
+            "Match radius, in metres, for annotations carrying no 'accuracy' property. "
+            "It must stay below half the spacing between distinct annotations of the "
+            "same class, otherwise the 1-1 assignment picks between neighbouring "
+            "targets on sub-metre differences and the metrics stop meaning anything."
+        ),
+    )
     parser.add_argument(
         "--group-annotation-radius-m",
         type=float,
@@ -1113,6 +1364,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--feedback-alpha", type=float, default=0.0)
     parser.add_argument("--feedback-beta", type=float, default=0.0)
+    parser.add_argument(
+        "--feedback-normalization",
+        choices=("none", "center", "standardize"),
+        default="none",
+        help=(
+            "How the review-feedback prototype similarities are rescaled across the "
+            "retrieved candidates before the gains apply. 'none' is the raw term; "
+            "'center' subtracts the median, 'standardize' also divides by a robust "
+            "sigma. Ignored when both gains are zero."
+        ),
+    )
     parser.add_argument("--min-keyframes-per-cluster", type=int, default=None)
     parser.add_argument("--max-observations-per-cluster", type=int, default=None)
     parser.add_argument(
@@ -1226,6 +1488,13 @@ def main(argv: list[str] | None = None) -> int:
             f"TP={summary['true_positives']} FP={summary['false_positives']} "
             f"FN={summary['false_negatives']} "
             f"errors={summary['error_count']}"
+        )
+        print(
+            "Threshold-free: "
+            f"mAP={summary['mean_average_precision']:.3f} "
+            f"mean best F1={summary['mean_best_f1']:.3f} "
+            f"over {summary['scored_prompt_count']} prompt(s) — compare runs on these, "
+            "not on the fixed-threshold line above."
         )
         grouped = result.get("grouped")
         if isinstance(grouped, dict):

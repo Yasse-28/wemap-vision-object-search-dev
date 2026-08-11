@@ -10,7 +10,9 @@
 # Do not try `python -m object_search_online.app` — there is no package there.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-PORT="${OBJECT_SEARCH_ONLINE_PORT:-8000}"
+# 45677, not production's 8000: locally 8000 collides with other Wemap PoCs. The
+# service tree is unchanged — only the port we bind it to here.
+PORT="${OBJECT_SEARCH_ONLINE_PORT:-45677}"
 HOST="${OBJECT_SEARCH_ONLINE_HOST:-127.0.0.1}"
 
 if [[ "${ENVIRONMENT_NAME:-}" != "onprem" ]]; then

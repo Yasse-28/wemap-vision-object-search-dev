@@ -19,5 +19,5 @@ exec "$PYTHON" -m toolbox.bricks.service \
   --config "$CONFIG" \
   --host "${BRICKS_HOST:-127.0.0.1}" \
   --port "${BRICKS_PORT:-45679}" \
-  --ann-base-url "${OBJECT_SEARCH_ANN_URL:-http://127.0.0.1:8000}" \
+  --ann-base-url "${OBJECT_SEARCH_ANN_URL:-http://127.0.0.1:45677}" \
   --cors

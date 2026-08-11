@@ -75,7 +75,7 @@ toolbox UI (:45700)
   └─ proxies /{map_id}/object-search/… →  bricks service (:45678)
                                             │  enrichment + clustering + ranking
                                             └─ POST /object-search/by-text
-                                                 →  mirrored online service (:8000)
+                                                 →  mirrored online service (:45677)
                                                       MetaCLIP2 embed + pgvector HNSW
                                                       ⇒ [{id, similarity}]
 ```
@@ -89,7 +89,7 @@ something to trigger implicitly.
 
 | Component | Listens | Calls | Path shape |
 |---|---|---|---|
-| Mirrored online service | 8000 | Postgres | `/object-search/by-text`, `/by-image`, `/health` — **no `{map_id}` segment**; scoping is the `geo_ref_id` body field |
+| Mirrored online service | 45677 | Postgres | `/object-search/by-text`, `/by-image`, `/health` — **no `{map_id}` segment**; scoping is the `geo_ref_id` body field |
 | Bricks service | 45678 | online service + Postgres | `/{map_id}/object-search/{localize,text}`, `/health` |
 | Toolbox backend | 45700 | bricks service | `/ui/api/…` owned; `/{map_id}/object-search/…` proxied |
 | annotation_service (production mirror only) | 8001 | its own SQLite | `/{slug}/object-search/…` |

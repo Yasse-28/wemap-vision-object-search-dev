@@ -18,7 +18,7 @@ The annotation ownership boundary is recorded in
 | Path | Responsibility | Key symbols |
 |---|---|---|
 | `main.ts` | Entry: HTTP server; routes `/ui/api/...`, serves UI, proxies `/{map_id}/object-search/…` to the bricks service | `server.listen(options.port…)`, `isObjectSearchRoute`, `mapSummaries`, `proxyRequest` |
-| `http-utils.ts` | Options/args, static serving, proxy | `parseArgs`, `WorkbenchOptions`; `pythonApiBaseUrl` = **bricks** service (`OBJECT_SEARCH_PYTHON_API`, :45678), `annApiBaseUrl` = **mirrored online** service (`OBJECT_SEARCH_ANN_URL`, :8000), `repoRoot`, `OBJECT_SEARCH_WORKBENCH_PORT=45700` |
+| `http-utils.ts` | Options/args, static serving, proxy | `parseArgs`, `WorkbenchOptions`; `pythonApiBaseUrl` = **bricks** service (`OBJECT_SEARCH_PYTHON_API`, :45678), `annApiBaseUrl` = **mirrored online** service (`OBJECT_SEARCH_ANN_URL`, :45677), `repoRoot`, `OBJECT_SEARCH_WORKBENCH_PORT=45700` |
 | `config.ts` | Load map config | `loadMapEntries`, `loadGlobalObjectSearch`, `MapEntry` (`id, path, emmid, geo_ref_id, object_search`) |
 | `annotation-store.ts` | Integrated per-map SQLite annotation CRUD, legacy migration, one-shot benchmark GeoJSON import, and ground-truth assembly | `annotationDatabasePath`, `listAnnotations`, `upsertDetectionReview`, `deleteDetectionReview`, `buildGroundTruth` |
 | `object-search-metadata.ts` | **Reads `{map}/object-search/metadata.parquet` natively** (`hyparquet`, pure JS). Replaces the retired `object-search.db` reader: no cutout→objects hierarchy, one row *is* one proposal and one detection. Caches by mtime and **drops the entry when the read fails**. | `resolveMetadataPath`, `loadMetadata`, `requireMetadata`, `rowsForKeyframe`, `rowByIndex`, `MetadataRow`, `LoadedMetadata`, `MetadataError` |
@@ -74,10 +74,23 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   cover the whole query. Mounted through `ObjectSearchPanel` in the dedicated
   `/ui/maps/:mapId/annotation` tab; `annotation-store.ts` in the backend owns the
   compatible per-map SQLite file directly.
-- `benchmark/` — run + view benchmark results (`BenchmarkPanel.tsx`).
+- The object-search panel's "Online overrides" are exactly the fields
+  `LocalizeParams` reads; `min_keyframes_per_cluster` defaults to **2** there, in the
+  Benchmark tab and in the service, so the three paths build the same clusters. The
+  four standalone-era knobs (`use_stored_positions`, `robust_centroid`,
+  `embedding_similarity_threshold`, `include_debug`) were removed — nothing consumed
+  them.
+- `benchmark/` — run + view benchmark results (`BenchmarkPanel.tsx`). The run form
+  exposes the review-feedback gains and `feedback_normalization`, and every stored
+  run shows its own parameters through `config-summary.ts` — without that, a boosted
+  run and a baseline are indistinguishable in the run list.
 - The Annotation tab's review toolbar explicitly scores its current prompt through
   `benchmark/score-prompt` and compares it with the same prompt in the newest full
-  run. Its ✓/× detection reviews affect feedback only; they do not create the
+  run. That comparison is *not* guaranteed to be a baseline: it is simply the newest
+  run, so both sides are labelled with their parameters. The score sends the panel's
+  own `min_similarity` and the Sensitivity slider as `acceptance_threshold`, so it
+  measures the clusters actually listed rather than the script's defaults.
+  Its ✓/× detection reviews affect feedback only; they do not create the
   positional manual annotations used as benchmark ground truth.
 - `App.tsx`, `main.tsx`, top-level `api.ts` — shell + shared client.
 

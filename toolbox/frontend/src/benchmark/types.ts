@@ -32,6 +32,14 @@ export type PromptProgress = {
 export type BenchmarkSummary = {
   prompt_count: number;
   error_count: number;
+  /**
+   * Threshold-free. Averaged over prompts rather than pooled over predictions:
+   * `match_score` is normalised by the best cluster of its own query, so scores from
+   * two prompts are not on one scale. These are what two runs should be compared on.
+   */
+  scored_prompt_count?: number;
+  mean_average_precision?: number;
+  mean_best_f1?: number;
   true_positives: number;
   false_positives: number;
   false_negatives: number;
@@ -93,6 +101,13 @@ export type ByPromptRow = {
   ground_truth: number;
   error: string | null;
   elapsed_ms: number;
+  /** Optional: runs stored before the sweep existed do not carry them. */
+  average_precision?: number;
+  best_f1?: number;
+  /** Accept predictions scoring **>= this** to obtain `best_f1`. */
+  best_f1_threshold?: number;
+  best_f1_precision?: number;
+  best_f1_recall?: number;
 };
 
 export type BenchmarkMetrics = {
@@ -117,11 +132,38 @@ export type BenchmarkRunParams = {
   clustering_eps_m: number;
   candidate_count: number;
   group_annotation_radius_m: number;
+  default_accuracy: number;
   feedback_alpha?: number;
   feedback_beta?: number;
+  feedback_normalization?: FeedbackNormalization;
   min_keyframes_per_cluster?: number;
   max_observations_per_cluster?: number;
 };
+
+/**
+ * How the review-feedback prototype similarities are rescaled before the gains apply.
+ * `"none"` is the raw term the baseline was measured with; see
+ * `toolbox/bricks/candidates.py::normalize_prototype_similarities`.
+ */
+export type FeedbackNormalization = "none" | "center" | "standardize";
+
+export const FEEDBACK_NORMALIZATIONS: readonly FeedbackNormalization[] = [
+  "none",
+  "center",
+  "standardize",
+];
+
+/**
+ * Match radius for annotations that carry no `accuracy` of their own — which is all of
+ * them created by the review tool.
+ *
+ * 2 m, not the script's own 5 m: on a real venue the annotated instances of one class
+ * sit closer together than 5 m (measured on `vinci-st-domingue`: median nearest
+ * neighbour 1.0 m for FIDS, 3.1 m for check-in counters), so a 5 m radius encloses
+ * *other* targets and the 1-1 assignment picks between them on differences far below
+ * the pipeline's own localisation error.
+ */
+export const DEFAULT_MATCH_ACCURACY_M = 2.0;
 
 export type PromptScore = {
   prompt: string;

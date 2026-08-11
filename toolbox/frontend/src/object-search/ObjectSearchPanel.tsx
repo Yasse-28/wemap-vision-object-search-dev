@@ -21,6 +21,8 @@ import {
   scorePrompt,
 } from "../benchmark/api";
 import type { ByPromptRow, PromptScore } from "../benchmark/types";
+import { DEFAULT_MATCH_ACCURACY_M, FEEDBACK_NORMALIZATIONS } from "../benchmark/types";
+import { configSummary as scoreConfigSummary } from "../benchmark/config-summary";
 import {
   fetchKeyframeGraph,
   fetchMetadataStatus,
@@ -81,6 +83,38 @@ function promptMetricSummary(row: ByPromptRow): string {
   return (
     `P ${row.precision.toFixed(2)} · R ${row.recall.toFixed(2)} · F1 ${row.f1.toFixed(2)}`
     + ` · ${row.true_positives}/${row.false_positives}/${row.false_negatives} (TP/FP/FN)`
+  );
+}
+
+/** The populations behind TP/FP/FN, which the three numbers alone do not reveal.
+ *
+ * TP+FP counts *predictions* the benchmark kept, TP+FN counts *ground-truth
+ * annotations*: adding all three together totals nothing, and `kept` is well below the
+ * cluster count on screen because the benchmark accepts only `match_score >
+ * acceptance_threshold` (0.9) while the list is filtered by the Sensitivity slider.
+ * `kept + rejected` is the identity that does hold — it equals the clusters returned.
+ */
+/** The threshold-free half: what to read when comparing two feedback settings.
+ *
+ * P/R/F1 above are one operating point, and the review-feedback gains *shift the score
+ * distribution* — so a change there conflates "the ranking improved" with "the fixed
+ * threshold now sits somewhere else on the same curve". AP does not move under a
+ * monotone rescaling of the scores, so it isolates the ranking.
+ */
+function promptCurveSummary(row: ByPromptRow): string | null {
+  if (row.average_precision == null) {
+    return null;
+  }
+  const best = row.best_f1 == null ? "" : ` · best F1 ${row.best_f1.toFixed(2)}`;
+  const at =
+    row.best_f1_threshold == null ? "" : ` @ ${row.best_f1_threshold.toFixed(3)}`;
+  return `AP ${row.average_precision.toFixed(3)}${best}${at}`;
+}
+
+function promptCountsSummary(row: ByPromptRow): string {
+  return (
+    `${row.accepted_predictions} kept · ${row.rejected_predictions} rejected`
+    + ` · ${row.ground_truth} ground truth`
   );
 }
 
@@ -264,6 +298,7 @@ function ObjectSearchPanel(props: Props) {
   const [promptBaseline, setPromptBaseline] = useState<{
     runId: string;
     row: ByPromptRow;
+    config: Record<string, unknown>;
   } | null>(null);
 
   const [selectedKeyframeId, setSelectedKeyframeId] = useState<string | null>(null);
@@ -375,9 +410,9 @@ function ObjectSearchPanel(props: Props) {
     localizations,
   });
 
-  // Also keyed on the feedback gains: a score describes the parameters it was measured
-  // with, and tuning alpha/beta between two scores is the whole workflow. Left keyed on
-  // the query alone, the stale numbers would sit there looking current.
+  // Keyed on every parameter the score is measured with, not just the query: tuning
+  // them between two scores is the whole workflow, and left keyed on the query alone
+  // the stale numbers would sit there looking current.
   useEffect(() => {
     setPromptScore(null);
     setPromptScoreMissing(false);
@@ -387,6 +422,14 @@ function ObjectSearchPanel(props: Props) {
     resultQuery,
     onlineOverrides.feedback_alpha,
     onlineOverrides.feedback_beta,
+    onlineOverrides.feedback_normalization,
+    onlineOverrides.min_similarity,
+    onlineOverrides.merge_radius,
+    onlineOverrides.candidate_count,
+    onlineOverrides.min_keyframes_per_cluster,
+    localizeSensitivity,
+    numResults,
+    maxObservationsPerCluster,
   ]);
 
   useEffect(() => {
@@ -408,7 +451,9 @@ function ObjectSearchPanel(props: Props) {
             !candidate.error
             && normalizeBenchmarkPrompt(candidate.prompt) === normalizedQuery,
         );
-        return row ? { runId: newestRun.run_id, row } : null;
+        return row
+          ? { runId: newestRun.run_id, row, config: metrics.config }
+          : null;
       })
       .then((baseline) => {
         if (!cancelled) setPromptBaseline(baseline);
@@ -434,8 +479,27 @@ function ObjectSearchPanel(props: Props) {
         candidate_count: onlineOverrides.candidate_count,
         feedback_alpha: onlineOverrides.feedback_alpha,
         feedback_beta: onlineOverrides.feedback_beta,
+        feedback_normalization: onlineOverrides.feedback_normalization,
         min_keyframes_per_cluster: onlineOverrides.min_keyframes_per_cluster,
         max_observations_per_cluster: maxObservationsPerCluster,
+        // The script defaults to 0.15, the service to 0.2. Left unsent, the score
+        // clusters the results differently from the list it claims to describe —
+        // min_similarity gates eligibility *and* scales `normalized_similarity`.
+        min_similarity: onlineOverrides.min_similarity,
+        // Scoring parameters, not localization ones — they decide what the metrics
+        // count. The group radius tracks the clustering radius (the pipeline cannot
+        // emit two clusters closer than that, so a finer ground truth caps recall),
+        // and the match radius must stay under half the spacing between neighbouring
+        // annotations of one class. Same values as the Benchmark tab's defaults.
+        group_annotation_radius_m: onlineOverrides.merge_radius,
+        default_accuracy: DEFAULT_MATCH_ACCURACY_M,
+        // Score the clusters the user is actually looking at. The benchmark keeps
+        // predictions scoring *strictly above* its acceptance threshold, while the list
+        // is filtered on `>= localizationDisplayThreshold`; the epsilon makes the two
+        // sets identical instead of off by the clusters sitting exactly on the bar.
+        // Without this the score ignored the Sensitivity slider entirely and always
+        // measured the script's own default of 0.9.
+        acceptance_threshold: Math.max(0, localizationDisplayThreshold - 1e-9),
       });
       setPromptScore(score);
     } catch (scoreError) {
@@ -1573,14 +1637,39 @@ function ObjectSearchPanel(props: Props) {
                           : undefined
                       }
                       title={
-                        `Benchmark min_similarity=${String(
-                          promptScore.config.min_similarity ?? 0.15,
-                        )}; acceptance_threshold=${String(
-                          promptScore.config.acceptance_threshold ?? 0.9,
-                        )}. These are independent of the Sensitivity slider.`
+                        `Scored with ${scoreConfigSummary(promptScore.config)}. The `
+                        + "acceptance threshold follows the Sensitivity slider and "
+                        + "min_similarity is sent from these controls, so the scored "
+                        + "clusters are the ones listed."
                       }
                     >
                       {promptMetricSummary(promptScore.row)}
+                    </span>
+                  ) : null}
+                  {promptScore && promptCurveSummary(promptScore.row) ? (
+                    <span
+                      className="object-search-review-score-curve"
+                      title={
+                        "Threshold-free. Compare two feedback settings on AP, not on "
+                        + "F1: the gains shift the score distribution, so the fixed "
+                        + "threshold lands elsewhere on the curve even when the "
+                        + "ranking is unchanged. The full sweep is in the run's "
+                        + "raw_results.json."
+                      }
+                    >
+                      {promptCurveSummary(promptScore.row)}
+                    </span>
+                  ) : null}
+                  {promptScore && !promptScore.row.error ? (
+                    <span
+                      className="object-search-review-score-muted"
+                      title={
+                        "TP+FP counts kept predictions, TP+FN counts ground-truth "
+                        + "annotations — the three do not sum to anything. "
+                        + "kept + rejected equals the clusters returned."
+                      }
+                    >
+                      {promptCountsSummary(promptScore.row)}
                     </span>
                   ) : null}
                   {promptScoreMissing ? (
@@ -1595,9 +1684,21 @@ function ObjectSearchPanel(props: Props) {
                     </span>
                   ) : null}
                   {promptBaseline ? (
-                    <span className="object-search-review-score-muted">
-                      baseline (run {promptBaseline.runId}): F1{" "}
-                      {promptBaseline.row.f1.toFixed(2)}
+                    <span
+                      className="object-search-review-score-muted"
+                      title={
+                        "The newest benchmark run that covers this prompt — not "
+                        + "necessarily an unboosted one, and not necessarily measured "
+                        + "at the current sensitivity. Compare F1 only against a run "
+                        + `whose parameters match. Run parameters: ${scoreConfigSummary(
+                          promptBaseline.config,
+                        )}.`
+                      }
+                    >
+                      last run {promptBaseline.runId}: F1{" "}
+                      {promptBaseline.row.f1.toFixed(2)} ({
+                        scoreConfigSummary(promptBaseline.config)
+                      })
                     </span>
                   ) : null}
                 </span>
@@ -1716,53 +1817,6 @@ function CollapsibleOnlineOverrides(props: {
       </button>
       {props.open ? (
         <div className="object-search-online-overrides">
-          <label className="object-search-online-checkbox">
-            <input
-              type="checkbox"
-              checked={props.overrides.use_stored_positions}
-              onChange={(event) =>
-                props.onChange({
-                  ...props.overrides,
-                  use_stored_positions: event.target.checked,
-                })
-              }
-            />
-            <span>Use stored 3D positions</span>
-          </label>
-          <label className="object-search-online-checkbox">
-            <input
-              type="checkbox"
-              checked={props.overrides.robust_centroid}
-              onChange={(event) =>
-                props.onChange({ ...props.overrides, robust_centroid: event.target.checked })
-              }
-            />
-            <span>Robust centroid</span>
-          </label>
-          <label className="object-search-online-checkbox">
-            <input
-              type="checkbox"
-              checked={props.overrides.include_debug}
-              onChange={(event) =>
-                props.onChange({ ...props.overrides, include_debug: event.target.checked })
-              }
-            />
-            <span>Include debug keyframes (slower)</span>
-          </label>
-          <label className="object-search-online-input">
-            <span>embedding_similarity_threshold</span>
-            <input
-              type="number"
-              step={0.01}
-              value={props.overrides.embedding_similarity_threshold}
-              onChange={(event) =>
-                props.onChange({
-                  ...props.overrides,
-                  embedding_similarity_threshold: Number(event.target.value),
-                })
-              }
-            />
-          </label>
           <label className="object-search-online-input">
             <span>min_keyframes_per_cluster</span>
             <input
@@ -1804,6 +1858,60 @@ function CollapsibleOnlineOverrides(props: {
                 props.onChange({
                   ...props.overrides,
                   feedback_beta: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label
+            className="object-search-online-input"
+            title={
+              "Rescales pos_sim/neg_sim across the retrieved candidates before the "
+              + "gains apply. They are image↔image similarities (~0.7–0.9), so raw "
+              + "they are mostly a constant offset, and a constant offset flattens "
+              + "the cluster ranking rather than sharpening it. Inert while both "
+              + "gains are 0."
+            }
+          >
+            <span>feedback_normalization</span>
+            <select
+              value={props.overrides.feedback_normalization}
+              disabled={
+                !props.overrides.feedback_alpha && !props.overrides.feedback_beta
+              }
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  feedback_normalization: event.target
+                    .value as OnlineLocalizeOverrides["feedback_normalization"],
+                })
+              }
+            >
+              {FEEDBACK_NORMALIZATIONS.map((mode) => (
+                <option key={mode} value={mode}>
+                  {mode}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label
+            className="object-search-online-input"
+            title={
+              "Cluster eligibility floor, and the zero of normalized_similarity. Sent "
+              + "explicitly so 'Score this prompt' measures the list you see — the "
+              + "benchmark script's own default is 0.15, the service's is 0.2."
+            }
+          >
+            <span>min_similarity</span>
+            <input
+              type="number"
+              min={-1}
+              max={1}
+              step={0.05}
+              value={props.overrides.min_similarity}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  min_similarity: Number(event.target.value),
                 })
               }
             />

@@ -7,7 +7,7 @@
  * - the **bricks service** (`toolbox.bricks.service`, :45678) serves
  *   `/{map_id}/object-search/localize`. It is cheap to start, so we spawn it on
  *   demand and keep it alive across runs — same as the standalone service before it.
- * - the **mirrored online service** (`services/object_search_online`, :8000) does the
+ * - the **mirrored online service** (`services/object_search_online`, :45677) does the
  *   embedding on the GPU. We only health-check it and tell the user how to start it.
  *   Loading MetaCLIP behind a button press is not a decision to make implicitly.
  *
@@ -68,12 +68,17 @@ export type BenchmarkRunParams = {
   clustering_eps_m?: number;
   candidate_count?: number;
   group_annotation_radius_m?: number;
+  default_accuracy?: number;
   score_field?: string;
   feedback_alpha?: number;
   feedback_beta?: number;
+  feedback_normalization?: string;
   min_keyframes_per_cluster?: number;
   max_observations_per_cluster?: number;
 };
+
+/** Mirrors the script's `--feedback-normalization` choices; anything else is dropped. */
+const FEEDBACK_NORMALIZATIONS = new Set(["none", "center", "standardize"]);
 
 type BenchmarkJob = {
   runId: string;
@@ -544,6 +549,7 @@ function benchmarkScriptArgs(
     "--clustering-eps-m", String(numberParam(params, "clustering_eps_m", 1.5)),
     "--candidate-count", String(numberParam(params, "candidate_count", 1000)),
     "--group-annotation-radius-m", String(numberParam(params, "group_annotation_radius_m", 0)),
+    "--default-accuracy", String(numberParam(params, "default_accuracy", 5)),
   ];
   if (benchmarkTarget(params) === "remote") {
     args.push("--localize-url", remoteLocalizeUrl(params));
@@ -562,6 +568,15 @@ function benchmarkScriptArgs(
     if (typeof value === "number" && Number.isFinite(value)) {
       args.push(flag, String(value));
     }
+  }
+  // Passed unconditionally when valid, unlike the gains: the script already drops it
+  // when both gains are zero, and echoing it into metrics.json even then records what
+  // a baseline run would have used had it been boosted.
+  if (
+    typeof params.feedback_normalization === "string"
+    && FEEDBACK_NORMALIZATIONS.has(params.feedback_normalization)
+  ) {
+    args.push("--feedback-normalization", params.feedback_normalization);
   }
   return args;
 }

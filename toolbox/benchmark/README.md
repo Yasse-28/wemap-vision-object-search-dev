@@ -28,7 +28,7 @@ GeoPose service example:
 python -m toolbox.benchmark.object_search_http_benchmark \
   --map-path /path/to/vps-data/maps/<map-id> \
   --api-style geopose \
-  --base-url http://localhost:8000
+  --base-url http://localhost:45677
 ```
 
 Standalone online localization example:
