@@ -35,6 +35,14 @@ class LocalizationParams:
     max_observations_per_cluster: int = 10
     clustering_eps_m: float = 2.0
     min_keyframes_per_cluster: int = 2
+    # Geometric support, as *filters* rather than score terms. A cluster failing one
+    # is dropped outright instead of being scored lower: measured on bbhotel-choisy,
+    # blending them into `match_score` cost ranking quality (see the module docstring
+    # of `rank_localization_clusters`), while a filter leaves the score interpretable.
+    # Both default to off, because the same measurement found no threshold that pays
+    # for itself — they exist to be swept, not to be on.
+    min_observations_per_cluster: int = 1
+    max_cluster_spread_m: float | None = None
     # Review-feedback gains. Both zero (the default) means the boosted similarity
     # is not merely equal to the raw one — it is never consulted at all. See
     # `_ranking_similarities`.
@@ -61,7 +69,6 @@ class LocalizationParams:
 class ClusterRanking:
     cluster_id: int
     similarity_score: float
-    normalized_similarity: float
     match_score: float
 
 
@@ -74,6 +81,10 @@ class ClusterStatistics:
     observation_counts: np.ndarray
     confidence_scores: np.ndarray
     cluster_levels: np.ndarray
+    # Mean per-axis standard deviation of the cluster's member positions, in metres.
+    # Folded into `confidence_scores` as well, but exposed on its own because it is
+    # the only purely geometric quantity here and `max_cluster_spread_m` filters on it.
+    spread_m: np.ndarray
 
 
 def v1_5_observation_quaternion(
@@ -138,6 +149,40 @@ def filter_clusters_by_min_keyframes(
         if cluster_keyframes.size < min_keyframes:
             filtered[cluster_ids == cluster_id] = -1
     return _relabel_clusters_compact(filtered)
+
+
+def filter_clusters_by_geometry(
+    cluster_best_sim: dict[int, float],
+    stats: ClusterStatistics,
+    *,
+    min_observations: int,
+    max_spread_m: float | None,
+) -> dict[int, float]:
+    """Drop clusters whose geometric support is too thin, before ranking.
+
+    Applied **before** `rank_localization_clusters` on purpose: `match_score` is a
+    ratio to the query's best cluster, so the denominator must be a cluster we would
+    actually return. Filtering afterwards would leave every score normalised against
+    something the caller never sees.
+
+    A dropped cluster is gone, not demoted — that is the whole point of the split
+    between filtering and scoring.
+    """
+    if min_observations <= 1 and max_spread_m is None:
+        return cluster_best_sim
+
+    kept: dict[int, float] = {}
+    for cluster_id, sim in cluster_best_sim.items():
+        if cluster_id >= stats.observation_counts.shape[0]:
+            continue
+        if int(stats.observation_counts[cluster_id]) < int(min_observations):
+            continue
+        if max_spread_m is not None and float(stats.spread_m[cluster_id]) > float(
+            max_spread_m
+        ):
+            continue
+        kept[cluster_id] = sim
+    return kept
 
 
 def _levels_compatible(
@@ -256,6 +301,7 @@ def compute_cluster_statistics(
     centroids_alt = np.zeros(n_clusters, dtype=np.float64)
     observation_counts = np.zeros(n_clusters, dtype=np.int32)
     confidence_scores = np.zeros(n_clusters, dtype=np.float64)
+    spread_values = np.zeros(n_clusters, dtype=np.float64)
     cluster_levels = np.full(n_clusters, UNRESOLVED_LEVEL, dtype=np.int32)
 
     level_by_value = {int(lv.value): lv for lv in geo_transform.levels}
@@ -274,6 +320,7 @@ def compute_cluster_statistics(
             if cluster_positions.shape[0] > 1
             else 0.0
         )
+        spread_values[i] = spread
         count_factor = min(1.0, observation_counts[i] / 5.0)
         spread_factor = max(0.0, 1.0 - spread / 2.0)
         confidence_scores[i] = count_factor * (0.5 + 0.5 * spread_factor)
@@ -328,23 +375,27 @@ def compute_cluster_statistics(
         observation_counts=observation_counts,
         confidence_scores=confidence_scores,
         cluster_levels=cluster_levels,
+        spread_m=spread_values,
     )
 
 
-def _relative_similarity_scores(
-    cluster_best_sim: dict[int, float], *, min_similarity: float
-) -> dict[int, float]:
+def _similarity_ratio_scores(cluster_best_sim: dict[int, float]) -> dict[int, float]:
+    """Each cluster's similarity as a fraction of the query's best one.
+
+    Deliberately *not* a min-max rescale. The old denominator was
+    ``best - min_similarity``, which made every score a function of a **filter
+    parameter**: moving `min_similarity` from 0.2 to 0.15 moved every `match_score`
+    without any evidence having changed. The ratio has no free parameter, so the two
+    knobs are finally independent — `min_similarity` is the absolute floor, this is
+    the relative gate.
+    """
     if not cluster_best_sim:
         return {}
-    values = np.asarray(list(cluster_best_sim.values()), dtype=np.float32)
-    best = float(np.max(values))
-    denom = best - float(min_similarity)
-    if denom <= 1e-6:
-        return {cluster_id: 1.0 for cluster_id in cluster_best_sim}
+    best = max(float(sim) for sim in cluster_best_sim.values())
+    if best <= 1e-6:
+        return {int(cluster_id): 1.0 for cluster_id in cluster_best_sim}
     return {
-        cluster_id: float(
-            np.clip((float(sim) - float(min_similarity)) / denom, 0.0, 1.0)
-        )
+        int(cluster_id): float(np.clip(float(sim) / best, 0.0, 1.0))
         for cluster_id, sim in cluster_best_sim.items()
     }
 
@@ -352,40 +403,50 @@ def _relative_similarity_scores(
 def rank_localization_clusters(
     *,
     cluster_best_sim: dict[int, float],
-    cluster_confidence: dict[int, float],
-    cluster_keyframes: dict[int, set[str]],
     min_similarity: float,
 ) -> list[ClusterRanking]:
+    """``match_score = best_sim / best_sim_of_the_query`` — one term, one meaning.
+
+    "This cluster reaches X% of the quality of this query's best match."
+
+    It replaces production's
+    ``0.50·norm_sim + 0.15·confidence + 0.35·min(1, keyframes/3)``, measured on
+    bbhotel-choisy (12 prompts, 674 annotations, 1287 clusters):
+
+    - the two size terms carry no ranking signal. `similarity_score` alone scores
+      mAP 0.653 against the full mixture's 0.652 (0.713 vs 0.715 grouped);
+      `min(1, kf/3)` alone scores 0.318, i.e. half the weight budget bought noise;
+    - they were also *saturated*, so mostly constant: 65% of clusters have >= 3
+      keyframes and 53% have >= 5 observations, and both terms cap there;
+    - size was counted three times over — `kf/3`, `min(1, n_obs/5)` inside
+      `confidence`, and `max` over N detections, which grows with N;
+    - as a global acceptance gate the ratio transfers between prompts, which the
+      mixture does not: leave-one-prompt-out macro F1 0.611 vs 0.533 (strict ground
+      truth) and 0.627 vs 0.552 (grouped at 2 m).
+
+    Geometric support did not disappear, it moved: `min_keyframes_per_cluster`,
+    `min_observations_per_cluster` and `max_cluster_spread_m` are filters now, and
+    `confidence` / `observation_count` / `spread_m` stay on the response so a caller
+    can gate on them itself rather than receive them diluted into one number.
+
+    **This is a deliberate divergence from `wemap-vision-backend`**, not a port
+    artefact — see AI_CONTEXT/bricks.md. Production still ships the weighted mixture.
+    """
     eligible = {
         int(cluster_id): float(sim)
         for cluster_id, sim in cluster_best_sim.items()
         if float(sim) >= float(min_similarity)
     }
-    relative_scores = _relative_similarity_scores(
-        eligible, min_similarity=float(min_similarity)
-    )
+    ratios = _similarity_ratio_scores(eligible)
 
-    rankings: list[ClusterRanking] = []
-    for cluster_id, sim in eligible.items():
-        confidence = float(cluster_confidence.get(cluster_id, 0.0))
-        confidence = float(
-            np.clip(confidence if np.isfinite(confidence) else 0.0, 0.0, 1.0)
+    rankings = [
+        ClusterRanking(
+            cluster_id=cluster_id,
+            similarity_score=sim,
+            match_score=ratios.get(cluster_id, 0.0),
         )
-        keyframe_count = len(cluster_keyframes.get(cluster_id, set()))
-        keyframe_score = min(1.0, max(0, keyframe_count) / 3.0)
-        normalized_similarity = relative_scores.get(cluster_id, 0.0)
-        match_score = (
-            0.50 * normalized_similarity + 0.15 * confidence + 0.35 * keyframe_score
-        )
-        rankings.append(
-            ClusterRanking(
-                cluster_id=cluster_id,
-                similarity_score=sim,
-                normalized_similarity=normalized_similarity,
-                match_score=float(match_score),
-            )
-        )
-
+        for cluster_id, sim in eligible.items()
+    ]
     rankings.sort(key=lambda r: (r.match_score, r.similarity_score), reverse=True)
     return rankings
 
@@ -532,16 +593,13 @@ def localize_from_enriched_candidates(
             (local_idx, float(similarities[local_idx]))
         )
 
-    cluster_confidence = {
-        cid: float(stats.confidence_scores[cid])
-        for cid in cluster_best_sim
-        if cid < stats.confidence_scores.shape[0]
-    }
-
     ranked = rank_localization_clusters(
-        cluster_best_sim=cluster_best_sim,
-        cluster_confidence=cluster_confidence,
-        cluster_keyframes=cluster_keyframes,
+        cluster_best_sim=filter_clusters_by_geometry(
+            cluster_best_sim,
+            stats,
+            min_observations=params.min_observations_per_cluster,
+            max_spread_m=params.max_cluster_spread_m,
+        ),
         min_similarity=params.min_similarity,
     )
     ranked = ranked[: params.num_results]
@@ -602,6 +660,9 @@ def localize_from_enriched_candidates(
                 "coordinates": [lat, lng, alt],
                 "confidence": float(stats.confidence_scores[cluster_id]),
                 "observation_count": int(stats.observation_counts[cluster_id]),
+                # Geometric support, reported rather than mixed into `match_score`.
+                # `max_cluster_spread_m` filters on exactly this value.
+                "spread_m": float(stats.spread_m[cluster_id]),
                 "similarity_score": float(ranking.similarity_score),
                 "match_score": float(ranking.match_score),
                 "level": level,

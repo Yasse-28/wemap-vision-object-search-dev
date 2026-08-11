@@ -15,8 +15,7 @@ Three shapes of "off" are covered, because they are reached differently:
 
 from __future__ import annotations
 
-
-import pytest
+from typing import Any
 
 from toolbox.bricks.candidates import EnrichedCandidate, apply_feedback_boost
 from toolbox.bricks.localize import (
@@ -76,7 +75,7 @@ def _candidate(
     )
 
 
-def _fixture(**kwargs) -> list[EnrichedCandidate]:
+def _fixture(**kwargs: Any) -> list[EnrichedCandidate]:
     """Two clusters, four keyframes — enough that ranking is not a tautology."""
     return [
         _candidate(1, (0.0, 0.5, 0.0), keyframe_id=10, similarity=0.90, **kwargs),
@@ -87,7 +86,7 @@ def _fixture(**kwargs) -> list[EnrichedCandidate]:
     ]
 
 
-def _localize(candidates: list[EnrichedCandidate], **param_kwargs) -> list[dict]:
+def _localize(candidates: list[EnrichedCandidate], **param_kwargs: Any) -> list[dict]:
     return localize_from_enriched_candidates(
         candidates,
         _geo_transform(),
@@ -244,9 +243,10 @@ def test_clustering_geometry_is_unaffected_by_the_boost() -> None:
 def test_a_hard_penalty_can_drop_a_cluster_below_min_similarity() -> None:
     """The only way the boost *removes* a false positive rather than reordering it.
 
-    `match_score = 0.50·normalized_similarity + 0.15·confidence + 0.35·keyframe_score`,
-    so similarity is half the score: a penalty that merely lowers it reshuffles the
-    list. Pushing a cluster under `min_similarity` is what makes it disappear.
+    `match_score` is the cluster's similarity as a ratio to the query's best, so a
+    penalty that merely lowers similarity reshuffles the list — and if it hits the
+    *top* cluster it rescales every score without removing anything. Pushing a cluster
+    under `min_similarity` is what makes it disappear.
     """
     weak_ids = {4, 5}  # the far cluster, similarities 0.65 / 0.60
     penalised = [

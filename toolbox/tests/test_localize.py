@@ -6,9 +6,11 @@ no tests for that module — the port is the first chance to add them.
 
 Two things are asserted deliberately rather than incidentally:
 
-- the **ranking weights** (0.50 similarity / 0.15 confidence / 0.35 keyframes), so a
+- the **ranking rule** (`match_score = best_sim / best_sim_of_the_query`), so a
   well-meaning tweak here shows up as a failing test rather than as silently
-  different result ordering than production;
+  different result ordering. This is a deliberate divergence from production's
+  weighted mixture; `rank_localization_clusters`' docstring carries the measurement
+  that motivated it;
 - the **response shape**, because `toolbox/benchmark/object_search_http_benchmark.py`
   parses `localizations[].coordinates` and `match_score` directly.
 """
@@ -28,6 +30,7 @@ from toolbox.bricks.localize import (
     build_localize_response,
     cluster_detections_leader_canopy,
     compute_cluster_statistics,
+    filter_clusters_by_geometry,
     filter_clusters_by_min_keyframes,
     localize_from_enriched_candidates,
     rank_localization_clusters,
@@ -170,58 +173,136 @@ def test_empty_input_returns_no_labels() -> None:
 # ---------------------------------------------------------------------- ranking
 
 
-def test_match_score_uses_the_production_weights() -> None:
-    """match_score = 0.50·normalised_similarity + 0.15·confidence + 0.35·keyframes.
-
-    keyframe_score saturates at 3 distinct keyframes.
-    """
+def test_match_score_is_the_ratio_to_the_best_cluster() -> None:
+    """match_score = best_sim / best_sim_of_the_query. The top cluster always gets 1."""
     rankings = rank_localization_clusters(
-        cluster_best_sim={0: 0.9},
-        cluster_confidence={0: 1.0},
-        cluster_keyframes={0: {"a", "b", "c"}},
+        cluster_best_sim={0: 0.30, 1: 0.24, 2: 0.21},
         min_similarity=0.2,
     )
-    (ranking,) = rankings
-    # Single eligible cluster ⇒ normalised similarity is 1.0 by construction.
-    assert ranking.normalized_similarity == pytest.approx(1.0)
-    assert ranking.match_score == pytest.approx(0.50 * 1.0 + 0.15 * 1.0 + 0.35 * 1.0)
+    by_id = {r.cluster_id: r.match_score for r in rankings}
+    assert by_id[0] == pytest.approx(1.0)
+    assert by_id[1] == pytest.approx(0.24 / 0.30)
+    assert by_id[2] == pytest.approx(0.21 / 0.30)
 
 
-def test_keyframe_score_saturates_at_three() -> None:
-    def score(n_keyframes: int) -> float:
-        (ranking,) = rank_localization_clusters(
-            cluster_best_sim={0: 0.9},
-            cluster_confidence={0: 0.0},
-            cluster_keyframes={0: {str(i) for i in range(n_keyframes)}},
-            min_similarity=0.2,
-        )
-        return ranking.match_score
+def test_match_score_does_not_depend_on_min_similarity() -> None:
+    """The whole point of dropping the min-max rescale.
 
-    assert score(1) == pytest.approx(0.50 + 0.35 / 3.0)
-    assert score(3) == pytest.approx(0.50 + 0.35)
-    assert score(10) == score(3), "keyframe_score must cap at 1.0"
+    Under the old ``(sim - min_similarity) / (best - min_similarity)`` these two calls
+    returned different scores for identical evidence.
+    """
+
+    def scores(min_similarity: float) -> list[float]:
+        return [
+            r.match_score
+            for r in rank_localization_clusters(
+                cluster_best_sim={0: 0.30, 1: 0.24},
+                min_similarity=min_similarity,
+            )
+        ]
+
+    assert scores(0.20) == pytest.approx(scores(0.15))
+
+
+def test_match_score_ignores_cluster_size() -> None:
+    """Keyframe count and observation count are filters now, never score terms."""
+    rankings = rank_localization_clusters(
+        cluster_best_sim={0: 0.30, 1: 0.30},
+        min_similarity=0.2,
+    )
+    assert [r.match_score for r in rankings] == pytest.approx([1.0, 1.0])
 
 
 def test_clusters_below_min_similarity_are_dropped() -> None:
     rankings = rank_localization_clusters(
         cluster_best_sim={0: 0.9, 1: 0.05},
-        cluster_confidence={},
-        cluster_keyframes={},
         min_similarity=0.2,
     )
     assert [r.cluster_id for r in rankings] == [0]
 
 
+def test_min_similarity_drops_before_the_ratio_is_taken() -> None:
+    """A filtered-out cluster must not set the denominator it is excluded from."""
+    rankings = rank_localization_clusters(
+        cluster_best_sim={0: 0.24, 1: 0.12},
+        min_similarity=0.2,
+    )
+    assert [(r.cluster_id, r.match_score) for r in rankings] == [(0, 1.0)]
+
+
 def test_rankings_are_sorted_by_match_score_descending() -> None:
     rankings = rank_localization_clusters(
         cluster_best_sim={0: 0.5, 1: 0.9, 2: 0.7},
-        cluster_confidence={0: 0.0, 1: 0.0, 2: 0.0},
-        cluster_keyframes={0: {"a"}, 1: {"a"}, 2: {"a"}},
         min_similarity=0.2,
     )
     scores = [r.match_score for r in rankings]
     assert scores == sorted(scores, reverse=True)
     assert rankings[0].cluster_id == 1
+
+
+# ------------------------------------------------------- geometry as a filter
+
+
+def _stats(observation_counts: Any, spreads: Any) -> Any:
+    from toolbox.bricks.localize import ClusterStatistics
+
+    n = len(observation_counts)
+    return ClusterStatistics(
+        centroids_eus=np.zeros((n, 3)),
+        centroids_lat=np.zeros(n),
+        centroids_lng=np.zeros(n),
+        centroids_alt=np.zeros(n),
+        observation_counts=np.asarray(observation_counts, dtype=np.int32),
+        confidence_scores=np.zeros(n),
+        cluster_levels=np.zeros(n, dtype=np.int32),
+        spread_m=np.asarray(spreads, dtype=np.float64),
+    )
+
+
+def test_geometry_filter_is_a_noop_when_both_knobs_are_off() -> None:
+    best_sim = {0: 0.3, 1: 0.2}
+    assert (
+        filter_clusters_by_geometry(
+            best_sim,
+            _stats([1, 1], [9.0, 9.0]),
+            min_observations=1,
+            max_spread_m=None,
+        )
+        is best_sim
+    ), "the default path must not even copy the dict"
+
+
+def test_min_observations_drops_thin_clusters() -> None:
+    kept = filter_clusters_by_geometry(
+        {0: 0.3, 1: 0.25, 2: 0.2},
+        _stats([5, 3, 1], [0.5, 0.5, 0.5]),
+        min_observations=3,
+        max_spread_m=None,
+    )
+    assert sorted(kept) == [0, 1]
+
+
+def test_max_spread_drops_diffuse_clusters() -> None:
+    kept = filter_clusters_by_geometry(
+        {0: 0.3, 1: 0.25},
+        _stats([5, 5], [0.4, 1.9]),
+        min_observations=1,
+        max_spread_m=1.0,
+    )
+    assert sorted(kept) == [0]
+
+
+def test_geometry_filter_runs_before_the_ratio() -> None:
+    """Dropping the best cluster must re-normalise the survivors, not keep its scale."""
+    kept = filter_clusters_by_geometry(
+        {0: 0.30, 1: 0.24},
+        _stats([1, 5], [0.5, 0.5]),
+        min_observations=5,
+        max_spread_m=None,
+    )
+    (ranking,) = rank_localization_clusters(cluster_best_sim=kept, min_similarity=0.2)
+    assert ranking.cluster_id == 1
+    assert ranking.match_score == pytest.approx(1.0)
 
 
 # ------------------------------------------------------- end-to-end response shape

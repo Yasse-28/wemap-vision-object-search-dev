@@ -285,6 +285,11 @@ class LocalizeParams(BaseModel):
     clustering_eps_m: float = 2.0
     min_keyframes_per_cluster: int = 2
     max_observations_per_cluster: int = 10
+    # Geometric support as filters, not as score terms — see
+    # `localize.filter_clusters_by_geometry`. Both default to off (no cluster dropped),
+    # so they change nothing until they are swept.
+    min_observations_per_cluster: int = Field(default=1, ge=1)
+    max_cluster_spread_m: float | None = Field(default=None, gt=0.0)
     # Accepted and ignored: the benchmark always sends it, the router that would
     # have consumed it was a stub and went to legacy/.
     search_type: str | None = None
@@ -311,6 +316,8 @@ class LocalizeParams(BaseModel):
             max_observations_per_cluster=self.max_observations_per_cluster,
             clustering_eps_m=self.clustering_eps_m,
             min_keyframes_per_cluster=self.min_keyframes_per_cluster,
+            min_observations_per_cluster=self.min_observations_per_cluster,
+            max_cluster_spread_m=self.max_cluster_spread_m,
             feedback_alpha=self.feedback_alpha,
             feedback_beta=self.feedback_beta,
             feedback_normalization=self.feedback_normalization,

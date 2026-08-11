@@ -26,7 +26,7 @@ diverge, production wins. A "small improvement" here is a bug.
 | `ingest_cli.py` | `object_search_ingest.py` | `run_ingest`, `_compute_object_positions`, `_ingest_capture`, `_upsert_geokeyframes`, `discover_capture_dirs`, `EMBEDDING_DIM=1024`, `DEFAULT_MIN_DISTANCE=1.5` |
 | `candidates.py` | `candidates.py` | `EnrichedCandidate`, `load_enriched_candidates`, `_prefilter_hnsw_results`, `apply_feedback_boost`, `normalize_prototype_similarities`, `FEEDBACK_NORMALIZATIONS`, `K_INTERNAL=1000`, `LOOSE_ALPHA=0.3` |
 | `feedback.py` | *(dev-only — no production counterpart)* | `ReviewFeedback`, `load_review_feedback`, `normalize_query`, `DB_FILENAME` — reads the toolbox's `object-search-annotations.db` |
-| `localize.py` | `v1_5_logic.py` | `cluster_detections_leader_canopy`, `compute_cluster_statistics`, `rank_localization_clusters`, `localize_from_enriched_candidates`, `build_localize_response`, `LocalizationParams`, `UNRESOLVED_LEVEL=-9999`, `PLACEHOLDER_BBOX` |
+| `localize.py` | `v1_5_logic.py` | `cluster_detections_leader_canopy`, `compute_cluster_statistics`, `rank_localization_clusters`, `_similarity_ratio_scores`, `filter_clusters_by_geometry`, `localize_from_enriched_candidates`, `build_localize_response`, `LocalizationParams`, `UNRESOLVED_LEVEL=-9999`, `PLACEHOLDER_BBOX` |
 | `prepare_runner.py` | `object_search_prepare.py` (its `image_entries` construction) | `collect_image_entries`, `run` |
 | `prepare_postprocess.py` | `object_search_prepare.py::_sample_depths` | `postprocess_metadata`, `sample_depths` |
 | `map_manifest.py` | *(no counterpart — replaces the ORM)* | `load_map_manifest`, `find_manifest`, `MapManifest`, `ManifestKeyframe` |
@@ -56,10 +56,57 @@ all stay on raw similarity — the boost changes cluster *ranking*, never cluste
 reingest; `_log_prototype_resolution` warns when the prototypes resolve to nothing,
 which is the only way to tell an inert boost from an unhelpful one.
 
-`localize.py` differs from production in four import lines, one dev-only opt-in, and one
-bug fix. `LocalizationParams.level_strategy` (`"seed"`, the default and production's
-behaviour, or `"median"`) selects how `_cluster_level_from_detections` picks the floor a
-cluster claims. `UNRESOLVED_LEVEL=-9999` avoids colliding with the real basement level;
+### Scoring: one term, and geometry moved to filters (dev-only divergence)
+
+`match_score = cluster_best_sim / best_cluster_of_the_query` — "this cluster reaches
+X% of the quality of this query's best match". It **replaces** production's
+`0.50·norm_sim + 0.15·confidence + 0.35·min(1, n_keyframes/3)`, and the replacement is
+deliberate, not a port slip. Measured on `bbhotel-choisy` (12 prompts, 674 annotations,
+1287 clusters — the only benchmark ground truth to trust, see the memory note):
+
+| | mAP | macro F1 @ best shared threshold | leave-one-prompt-out |
+|---|---|---|---|
+| weighted mixture | 0.652 | 0.598 (t=0.776) | 0.533 |
+| **ratio** | 0.653 | **0.632** (t=0.905) | **0.611** |
+| raw similarity | 0.653 | 0.502 (t=0.224) | 0.496 |
+
+Why the mixture had to go:
+
+- **the size terms carry no ranking signal.** `similarity_score` alone scores mAP
+  0.653 against the mixture's 0.652; `min(1, kf/3)` alone scores 0.318;
+- **they were saturated** — 65% of clusters have ≥ 3 keyframes, 53% have ≥ 5
+  observations, and both terms cap there, so for two thirds of clusters they were a
+  constant;
+- **size was counted three times** — `kf/3`, `min(1, n_obs/5)` inside `confidence`,
+  and `max` over N detections (which grows with N);
+- **the old normalisation depended on a filter parameter.** The denominator was
+  `best − min_similarity`, so moving `min_similarity` moved every score with no change
+  in evidence. The ratio has no free parameter: `min_similarity` is now purely the
+  absolute floor, the ratio is purely the relative gate, and the two can be swept
+  independently.
+
+Known cost, stated plainly: the per-prompt *ceiling* is slightly lower (mean best F1
+0.693 vs 0.712). The ratio trades unreachable ceiling for reachable, transferable
+performance — the mixture's optimum does not survive being applied to a prompt it was
+not fitted on, and the ratio's nearly does (−2.1 points vs −6.5).
+
+Geometry did not disappear, it became **filters** (`filter_clusters_by_geometry`, run
+*before* ranking so the ratio's denominator is a cluster we would actually return):
+`min_keyframes_per_cluster` (2), `min_observations_per_cluster` (1 = off),
+`max_cluster_spread_m` (`None` = off). Both new knobs default to off because no
+threshold paid for itself when swept — `kf ≥ 3` as a hard filter *cost* 4.7 points of
+mAP. `confidence`, `observation_count` and `spread_m` are all on the response so a
+caller can gate on them itself instead of receiving them diluted into one number.
+
+Not established: that one threshold transfers across **maps**. The LOO above covers
+prompts on one map only.
+
+### Other divergences from production
+
+`localize.py` also differs in four import lines, one dev-only opt-in, and one bug fix.
+`LocalizationParams.level_strategy` (`"seed"`, the default and production's behaviour,
+or `"median"`) selects how `_cluster_level_from_detections` picks the floor a cluster
+claims. `UNRESOLVED_LEVEL=-9999` avoids colliding with the real basement level;
 production still uses `-1` and must be fixed before the next re-sync. Treat any other
 behavioural change as a bug, and any change of the strategy default as one too.
 

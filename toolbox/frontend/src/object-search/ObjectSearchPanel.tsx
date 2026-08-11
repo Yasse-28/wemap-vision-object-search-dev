@@ -482,9 +482,9 @@ function ObjectSearchPanel(props: Props) {
         feedback_normalization: onlineOverrides.feedback_normalization,
         min_keyframes_per_cluster: onlineOverrides.min_keyframes_per_cluster,
         max_observations_per_cluster: maxObservationsPerCluster,
-        // The script defaults to 0.15, the service to 0.2. Left unsent, the score
-        // clusters the results differently from the list it claims to describe —
-        // min_similarity gates eligibility *and* scales `normalized_similarity`.
+        // The script defaults to 0.15, the service to 0.2. Left unsent, the metrics
+        // are computed on a different candidate set from the list on screen — the
+        // floor decides which clusters exist, and therefore which one is the best.
         min_similarity: onlineOverrides.min_similarity,
         // Scoring parameters, not localization ones — they decide what the metrics
         // count. The group radius tracks the clustering radius (the pipeline cannot
@@ -1896,7 +1896,8 @@ function CollapsibleOnlineOverrides(props: {
           <label
             className="object-search-online-input"
             title={
-              "Cluster eligibility floor, and the zero of normalized_similarity. Sent "
+              "Absolute cluster eligibility floor. match_score is a ratio to the "
+              + "query's best cluster and no longer depends on this value. Sent "
               + "explicitly so 'Score this prompt' measures the list you see — the "
               + "benchmark script's own default is 0.15, the service's is 0.2."
             }

@@ -179,6 +179,7 @@ function parseLocalizations(raw: unknown): ObjectLocalization[] {
         level: loc.level == null ? null : String(loc.level),
         confidence,
         observationCount: Number(loc.observation_count ?? observations.length),
+        spreadM: Number(loc.spread_m ?? 0),
         similarityScore,
         matchScore,
         keyframeIds,

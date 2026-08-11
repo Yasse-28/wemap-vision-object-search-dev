@@ -109,9 +109,13 @@ gap 2 of ADR 0001; **gap 1 remains** — livemap calls
   `halfvec_l2_ops`, `m=16`, `ef_construction=64`, partial per georef.
 - Query: `ef_search = max(k, 1000)`; cosine recovered as `1 − d²/2`.
 - `object_position`: `geometry(PointZ, 0)` — **SRID 0, not 4326**.
-- Ranking: `0.50·normalised_similarity + 0.15·confidence + 0.35·keyframe_score`,
-  with `keyframe_score = min(1, n_keyframes/3)`.
-- Clustering: leader-canopy, `eps = 2.0 m`, `min_keyframes_per_cluster = 2`.
+- Ranking: `match_score = cluster_best_sim / best_cluster_of_the_query`. One term, no
+  free parameter. **Dev-only divergence** — production still ships
+  `0.50·normalised_similarity + 0.15·confidence + 0.35·min(1, n_keyframes/3)`; see
+  [`bricks.md`](bricks.md) for the measurement that replaced it.
+- Geometric support is **filtered, not scored**: `min_keyframes_per_cluster = 2`,
+  `min_observations_per_cluster = 1` (off), `max_cluster_spread_m = None` (off).
+- Clustering: leader-canopy, `eps = 2.0 m`.
 - Local DB needs **both** `vector` and `postgis` — see `infra/postgres/Dockerfile`.
 
 ## Pose source and coordinate frames

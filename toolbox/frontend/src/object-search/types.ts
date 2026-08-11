@@ -56,7 +56,14 @@ export type ObjectLocalization = {
   level: string | null;
   confidence: number;
   observationCount: number;
+  /**
+   * Mean per-axis standard deviation of the cluster's members, in metres. Reported
+   * on its own rather than folded into `matchScore`: geometric support is a filter
+   * (`max_cluster_spread_m`) now, not a score term.
+   */
+  spreadM: number;
   similarityScore: number;
+  /** `similarityScore` as a fraction of the best cluster of the *same* query. */
   matchScore: number;
   keyframeIds: string[];
   observations: ObjectObservation[];
@@ -84,10 +91,11 @@ export type OnlineLocalizeOverrides = {
   feedback_normalization: FeedbackNormalization;
   /**
    * Sent explicitly rather than left to the service default, so the same number
-   * reaches both `/localize` and the benchmark behind "Score this prompt". It gates
-   * cluster eligibility *and* the denominator of `normalized_similarity`, so two
-   * values mean two different `match_score`s — i.e. a score that does not describe
-   * the list on screen.
+   * reaches both `/localize` and the benchmark behind "Score this prompt". It is the
+   * absolute eligibility floor; `match_score` is the *relative* gate (a ratio to the
+   * query's best cluster) and no longer depends on this value, so the two can now be
+   * swept independently. Two different floors still admit two different candidate
+   * sets, hence two different top clusters — so it still has to match.
    */
   min_similarity: number;
   min_keyframes_per_cluster: number;

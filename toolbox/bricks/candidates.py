@@ -164,9 +164,9 @@ def normalize_prototype_similarities(
     text↔image similarity (~0.15–0.30 in practice) while `pos_sim`/`neg_sim` are
     image↔image ones (~0.7–0.9 between any two cutouts of the same venue). Raw, the
     gain therefore buys a near-constant offset plus a thin discriminative margin —
-    and a constant is not neutral downstream: `rank_localization_clusters`
-    normalises by `(best - min_similarity)`, so adding `c` to every cluster pushes
-    every `normalized_similarity` towards 1 and *flattens* the ranking.
+    and a constant is not neutral downstream: `rank_localization_clusters` scores a
+    cluster as its similarity divided by the query's best, so adding `c` to every
+    cluster pushes every ratio towards 1 and *flattens* the ranking.
 
     The modes, all applied per query over the candidates actually retrieved:
 

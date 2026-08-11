@@ -688,10 +688,7 @@ def precision_recall_curve(
         false_positives += int(not is_true_positive)
         # One point per distinct score: a threshold cannot separate ties, so emitting a
         # point mid-run would describe a set no threshold can actually select.
-        if (
-            index + 1 < len(ranked)
-            and ranked[index + 1][0].score == prediction.score
-        ):
+        if index + 1 < len(ranked) and ranked[index + 1][0].score == prediction.score:
             continue
         false_negatives = total_targets - true_positives
         precision, recall, f1 = compute_prf(
@@ -964,6 +961,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             payload["min_keyframes_per_cluster"] = args.min_keyframes_per_cluster
         if args.max_observations_per_cluster is not None:
             payload["max_observations_per_cluster"] = args.max_observations_per_cluster
+        if args.min_observations_per_cluster is not None:
+            payload["min_observations_per_cluster"] = args.min_observations_per_cluster
+        if args.max_cluster_spread_m is not None:
+            payload["max_cluster_spread_m"] = args.max_cluster_spread_m
 
         started = time.perf_counter()
         try:
@@ -1157,6 +1158,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "feedback_normalization": args.feedback_normalization,
         "min_keyframes_per_cluster": args.min_keyframes_per_cluster,
         "max_observations_per_cluster": args.max_observations_per_cluster,
+        "min_observations_per_cluster": args.min_observations_per_cluster,
+        "max_cluster_spread_m": args.max_cluster_spread_m,
         "score_field": args.score_field,
         "group_annotation_radius_m": args.group_annotation_radius_m,
         "default_accuracy": args.default_accuracy,
@@ -1377,6 +1380,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--min-keyframes-per-cluster", type=int, default=None)
     parser.add_argument("--max-observations-per-cluster", type=int, default=None)
+    parser.add_argument(
+        "--min-observations-per-cluster",
+        type=int,
+        default=None,
+        help=(
+            "Geometric filter: drop clusters with fewer detections than this. Off by "
+            "default. It is a filter and not a score term on purpose — blending "
+            "cluster size into match_score cost ranking quality when measured."
+        ),
+    )
+    parser.add_argument(
+        "--max-cluster-spread-m",
+        type=float,
+        default=None,
+        help=(
+            "Geometric filter: drop clusters whose member positions have a mean "
+            "per-axis standard deviation above this, in metres. Off by default."
+        ),
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
