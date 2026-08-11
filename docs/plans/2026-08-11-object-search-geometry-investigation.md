@@ -1,7 +1,14 @@
 # Session — boost de feedback, banc de mesure, et sept tentatives géométriques
 
 Date : 2026-08-11. Carte : `bbhotel-choisy` (et `vinci-st-domingue` pour la première
-moitié). Branche `feat/explorer-reads-parquet`. **Rien n'est commité.**
+moitié). Le travail décrit en §1 est depuis commité (`78b98a4`, branche
+`wip/improve-search-strategy`). La suite — score interprétable et double porte
+d'association — est dans
+[`2026-08-11-scoring-ratio-and-two-gate-association.md`](2026-08-11-scoring-ratio-and-two-gate-association.md).
+
+**`vinci-st-domingue` ne doit plus servir de banc** : le défaut de données amont
+soupçonné en §2 est confirmé (mAP 0.154 contre 0.652, `emergency power plant` 0 VP
+sur 6). Toute mesure sur `bbhotel-choisy`.
 
 Ce document existe pour qu'aucune des sept expériences négatives ci-dessous ne soit
 refaite. Chacune est décrite avec sa question, sa méthode, ses chiffres et son verdict.
@@ -247,16 +254,17 @@ ni la qualité du matching (DISK > SIFT et le résultat empire).
 
 ## 5. À faire, par rapport gain/effort décroissant
 
-1. **Optimiser `acceptance_threshold` par prompt.** Meilleur F1 atteignable **0.658**
-   en moyenne contre **0.397** obtenu à 0.9. Vingt-six points de F1 sans toucher un
-   algorithme — la courbe PR est en place pour le lire. *Non fait, demandé puis
-   interrompu.*
-2. **Agrégateur `cluster_best_sim` : `max` → quantile.** Le max est l'estimateur le plus
-   optimiste : un seul cutout chanceux promeut 40 membres. C'est aussi le point d'entrée
-   du boost, donc à changer **avant** de tuner α et β.
-3. **Séparer le filtre du score.** `min_keyframes` doit être un filtre franc ; aujourd'hui
-   la même règle est appliquée deux fois, dont une invisiblement — un cluster à 2
-   keyframes plafonne à `match_score` 0.883 et ne peut **jamais** passer le seuil 0.9.
+1. ~~**Optimiser `acceptance_threshold` par prompt.**~~ *Repris et dépassé.* Sur les 12
+   classes, le plafond par prompt vaut +26.7 points — mais **plus de la moitié du gain
+   s'obtient avec un seuil unique**, et seule cette moitié survit à la validation
+   croisée. Le fit par prompt ne transfère pas, par construction. Voir le document de
+   suite.
+2. ~~**Agrégateur `cluster_best_sim` : `max` → quantile.**~~ *Rendu sans objet côté
+   score* : le `max` était l'un des trois endroits où la taille du cluster était comptée,
+   et le score n'a plus de terme de taille. Reste pertinent pour le boost.
+3. ~~**Séparer le filtre du score.**~~ *Fait* (`filter_clusters_by_geometry`). Le plafond
+   à 0.883 était réel mais marginal : sur les 191 prédictions de la bande (0.776, 0.9],
+   15 seulement étaient des clusters à 2 keyframes.
 4. **Rejet des profondeurs aberrantes sur rayons montants** à l'ingestion (ou médiane sur
    patch dans `prepare_postprocess.sample_depths`).
 5. **Corriger l'outil d'annotation** : niveau depuis la pose du keyframe.
@@ -266,6 +274,13 @@ ni la qualité du matching (DISK > SIFT et le résultat empire).
 Hors cadre mais seule piste géométrique non épuisée : un **partitionnement** du graphe
 au lieu de composantes connexes (détection de communautés, coupes normalisées, ou modèle
 à nombre d'objets explicite). C'est un sujet en soi, pas un réglage.
+
+*Mise à jour* : la cause commune identifiée en §4 a reçu une réponse partielle. La
+**double porte** (géométrie ET sémantique, conjonctives — la règle de ConceptGraphs)
+bat l'existant en moyenne sur les 12 classes, et gagne précisément sur les objets
+étendus qui fusionnaient. C'est la première méthode d'association de la série à y
+arriver. Le partitionnement de graphe reste ouvert et a lui aussi une littérature
+(C-DOG, 2025).
 
 ---
 
