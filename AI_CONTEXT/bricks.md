@@ -135,12 +135,28 @@ any class whose optimum is elsewhere. At the 0.80 gate, versus no gate:
   `cctv` 0.908 → 0.909, and `ascenseur` improves (0.929 → 0.970). The only real losses
   are `detecteur de fumée` (−0.054) and `TV` (−0.089).
 
-**Why it stays off by default:** the two ground-truth views disagree structurally. The
-strict view (one target per annotation) rewards splitting, the grouped view (single
-linkage at 2 m, 674 annotations collapsed to 118 targets) rewards merging, so the gate
-wins on one and loses on the other. That is not a tuning question — it is the
-annotation-grouping defect (single linkage chains: 213 chairs → 5 targets). Fix the
-grouping to leader/canopy first, then this decision becomes measurable.
+**Why it stays off by default — two reasons, and the second is the stronger one.**
+
+The two ground-truth views disagree structurally: the strict view (one target per
+annotation) rewards splitting, the grouped view (single linkage at 2 m, 674 annotations
+collapsed to 118 targets) rewards merging, so the gate wins on one and loses on the
+other. That is the annotation-grouping defect (single linkage chains: 213 chairs → 5
+targets), not a tuning question.
+
+And **the gate is redundant with a smaller `clustering_eps_m`.** Every number above was
+measured at the 2 m default. Sweeping the radius: strict mAP is 0.788 at `eps` = 0.5
+against 0.653 at 2 m — a bigger gain than the gate's, from one parameter — and at
+`eps` = 0.5 the gate *degrades* it (0.788 → 0.752 → 0.703). The gate was undoing an
+over-merge the radius had created; two splitting mechanisms for one need, and the radius
+is the cheaper (no per-query embeddings). The one place they still compound is `chaise`
+(0.620 → 0.831).
+
+Do not read that as "set `eps` to 0.5" either: strict and grouped mAP move in **opposite,
+monotone** directions across the whole range, so the bench cannot rank two granularities
+at all — it reports which ground truth you picked. See
+`docs/plans/2026-08-11-clustering-radius-and-a-degenerate-metric.md`. Interventions that
+change *ranking* at fixed granularity are measurable here; interventions that change
+granularity are not.
 
 ### Other divergences from production
 

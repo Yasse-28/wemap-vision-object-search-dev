@@ -98,11 +98,13 @@ partagé).
 - **Un seuil sur la similarité brute ne marche pas.** Les optima par prompt s'étalent sur
   0.084 quand la dynamique intra-prompt fait 0.025 à 0.099 — `plante` tient entre 0.207
   et 0.231, l'optimum de `defibrillateur` est 0.290. Aucun point de fonctionnement commun.
-- **La double porte marche, et exactement là où l'enquête géométrie prédisait qu'elle
+- ~~**La double porte marche, et exactement là où l'enquête géométrie prédisait qu'elle
   marcherait.** C'est le premier résultat de la série où une méthode d'association bat
-  l'existant en moyenne. La raison est celle de la littérature : le graphe SIFT/DISK
-  n'avait qu'une porte, la géométrique, et le contenu partagé dans la boîte suffisait à
-  la franchir.
+  l'existant en moyenne.~~ **Rétracté au volet 4** : vrai à `eps` figé à 2 m, faux si on
+  bouge `eps`. À `eps` = 0.5 la porte *dégrade* le strict (0.788 → 0.703) ; elle défaisait
+  un sur-regroupement créé par le rayon. Le mécanisme reste juste — une porte unique se
+  laisse franchir, deux portes conjonctives non — mais le rayon fait la même chose moins
+  cher. Seule `chaise` cumule encore les deux (0.620 → 0.831).
 - **Le rescoring hors-ligne est fidèle** : reconstruction du `match_score` à 1.55e-15 sur
   2148 clusters, et le run bout-en-bout reproduit la prédiction (0.632 contre 0.632).
 
