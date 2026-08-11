@@ -11,6 +11,7 @@ Operates on Postgres ``object_position`` values loaded via
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -53,7 +54,9 @@ class LocalizationParams:
     # Association experiments are opt-in. The default remains the ported production
     # leader/canopy path above, byte-for-byte; incremental association always uses
     # embeddings and greedily chooses the highest-scoring live cluster.
-    association: Literal["leader_canopy", "incremental", "cdog"] = "leader_canopy"
+    association: Literal["leader_canopy", "incremental", "cdog", "multicut"] = (
+        "leader_canopy"
+    )
     combination: Literal["conjunctive", "sum"] = "sum"
     association_sim_threshold: float = 1.1
     descriptor: Literal["seed", "running_mean"] = "running_mean"
@@ -62,6 +65,12 @@ class LocalizationParams:
     cdog_range_m: tuple[float, float] = (0.3, 30.0)
     cdog_semantic_threshold: float | None = None
     cdog_delta: float = 0.5
+    multicut_pair_radius_m: float = 6.0
+    multicut_geo_weight: float = 1.0
+    multicut_geo_pivot: float = 1.0
+    multicut_sem_weight: float = 0.0
+    multicut_sem_pivot: float = 0.8
+    multicut_geo_source: Literal["depth", "ray"] = "depth"
     # Independent of association so ray triangulation can be measured without
     # changing which detections belong to each cluster.
     centroid_from: Literal["depth", "rays"] = "depth"
@@ -530,6 +539,309 @@ def ray_closest_approach(
     point_i = oi + t_i * di
     point_j = oj + t_j * dj
     return float(np.linalg.norm(point_i - point_j)), t_i, t_j
+
+
+def greedy_additive_edge_contraction(
+    node_count: int,
+    edges: list[tuple[int, int, float]],
+    *,
+    forbidden_pairs: set[tuple[int, int]] | None = None,
+) -> np.ndarray:
+    """Partition a signed graph with greedy additive edge contraction (GAEC).
+
+    The maximum positive edge is contracted repeatedly. Parallel edges created by a
+    contraction are **summed**, which is the additive objective update that
+    distinguishes GAEC from ordinary maximum-edge agglomeration. A lazy heap keeps
+    obsolete edge entries until they reach the top. Equal costs are ordered by the
+    smallest component node indices, so input dictionary or edge order cannot affect
+    the result.
+
+    This straightforward adjacency-merge implementation uses ``O(V + E)`` memory and
+    ``O(V E log E)`` time in the worst case; sparse practical graphs are much closer
+    to ``O(E log E)`` because each contraction touches only its incident edges.
+
+    Args:
+        node_count: Number of graph nodes, indexed from zero.
+        edges: Undirected ``(u, v, signed_cost)`` edges. Duplicate edges are summed.
+        forbidden_pairs: Optional hard cannot-link constraints. Components containing
+            either endpoint are never contracted together.
+
+    Returns:
+        Compact deterministic cluster labels, ordered by smallest member index.
+    """
+    if node_count < 0:
+        raise ValueError("node_count must be non-negative")
+
+    adjacency: dict[int, dict[int, float]] = {node: {} for node in range(node_count)}
+    forbidden: dict[int, set[int]] = {node: set() for node in range(node_count)}
+    for raw_u, raw_v in forbidden_pairs or set():
+        u, v = sorted((int(raw_u), int(raw_v)))
+        if u < 0 or v >= node_count or u == v:
+            raise ValueError("forbidden pair contains an invalid node")
+        forbidden[u].add(v)
+        forbidden[v].add(u)
+
+    for raw_u, raw_v, raw_cost in edges:
+        u, v = sorted((int(raw_u), int(raw_v)))
+        if u < 0 or v >= node_count or u == v:
+            raise ValueError("edge contains an invalid node")
+        if v in forbidden[u]:
+            continue
+        cost = float(raw_cost)
+        adjacency[u][v] = adjacency[u].get(v, 0.0) + cost
+        adjacency[v][u] = adjacency[u][v]
+
+    heap: list[tuple[float, int, int]] = []
+    for u in range(node_count):
+        for v, cost in adjacency[u].items():
+            if u < v:
+                heapq.heappush(heap, (-cost, u, v))
+
+    active = np.ones(node_count, dtype=bool)
+    parent = np.arange(node_count, dtype=np.int32)
+    while heap:
+        negative_cost, u, v = heapq.heappop(heap)
+        if not active[u] or not active[v]:
+            continue
+        live_cost = adjacency[u].get(v)
+        if live_cost is None or live_cost != -negative_cost:
+            continue
+        if live_cost <= 0.0:
+            break
+
+        # Component representatives are always their smallest member, which makes
+        # both tie-breaking and final labels independent of merge history.
+        keep, remove = (u, v) if u < v else (v, u)
+        adjacency[keep].pop(remove, None)
+        adjacency[remove].pop(keep, None)
+        neighbors = sorted(set(adjacency[keep]) | set(adjacency[remove]))
+        for neighbor in neighbors:
+            if neighbor in (keep, remove) or not active[neighbor]:
+                continue
+            combined = adjacency[keep].get(neighbor, 0.0) + adjacency[remove].get(
+                neighbor, 0.0
+            )
+            adjacency[neighbor].pop(keep, None)
+            adjacency[neighbor].pop(remove, None)
+            if neighbor in forbidden[keep] or neighbor in forbidden[remove]:
+                adjacency[keep].pop(neighbor, None)
+                continue
+            adjacency[keep][neighbor] = combined
+            adjacency[neighbor][keep] = combined
+            low, high = sorted((keep, neighbor))
+            heapq.heappush(heap, (-combined, low, high))
+
+        merged_forbidden = (forbidden[keep] | forbidden[remove]) - {keep, remove}
+        for blocked in merged_forbidden:
+            forbidden[blocked].discard(keep)
+            forbidden[blocked].discard(remove)
+            forbidden[blocked].add(keep)
+        forbidden[keep] = merged_forbidden
+        forbidden[remove].clear()
+        adjacency[remove].clear()
+        active[remove] = False
+        parent[parent == remove] = keep
+
+    roots = sorted(set(int(value) for value in parent.tolist()))
+    compact = {root: label for label, root in enumerate(roots)}
+    return np.asarray([compact[int(root)] for root in parent], dtype=np.int32)
+
+
+def _ray_closest_approach_pairs(
+    origins_i: np.ndarray,
+    directions_i: np.ndarray,
+    origins_j: np.ndarray,
+    directions_j: np.ndarray,
+    *,
+    parallel_epsilon: float = 1e-8,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized counterpart of :func:`ray_closest_approach` for pair arrays."""
+    cross_norms = np.linalg.norm(np.cross(directions_i, directions_j), axis=1)
+    parallel = cross_norms < float(parallel_epsilon)
+    dots = np.einsum("ij,ij->i", directions_i, directions_j)
+    relative = origins_i - origins_j
+    projection_i = np.einsum("ij,ij->i", directions_i, relative)
+    projection_j = np.einsum("ij,ij->i", directions_j, relative)
+    denominator = 1.0 - dots * dots
+    safe_denominator = np.where(parallel, 1.0, denominator)
+    t_i = (dots * projection_j - projection_i) / safe_denominator
+    t_j = (projection_j - dots * projection_i) / safe_denominator
+    point_i = origins_i + t_i[:, None] * directions_i
+    point_j = origins_j + t_j[:, None] * directions_j
+    distances = np.linalg.norm(point_i - point_j, axis=1)
+
+    if np.any(parallel):
+        parallel_offset = origins_j[parallel] - origins_i[parallel]
+        projection = np.maximum(
+            0.0,
+            np.einsum("ij,ij->i", parallel_offset, directions_i[parallel]),
+        )
+        parallel_points = (
+            origins_i[parallel] + projection[:, None] * directions_i[parallel]
+        )
+        distances[parallel] = np.linalg.norm(
+            origins_j[parallel] - parallel_points, axis=1
+        )
+        systems = np.stack((directions_i[parallel], -directions_j[parallel]), axis=2)
+        parameters = np.einsum("ijk,ik->ij", np.linalg.pinv(systems), parallel_offset)
+        t_i[parallel] = parameters[:, 0]
+        t_j[parallel] = parameters[:, 1]
+    return distances, t_i, t_j
+
+
+def cluster_detections_multicut(
+    positions_local: np.ndarray,
+    ray_origins: np.ndarray,
+    ray_directions: np.ndarray,
+    valid_mask: np.ndarray,
+    object_keyframe_ids: np.ndarray,
+    detection_levels: np.ndarray | None,
+    *,
+    pair_radius_m: float = 6.0,
+    geo_weight: float = 1.0,
+    geo_pivot: float = 1.0,
+    sem_weight: float = 0.0,
+    sem_pivot: float = 0.8,
+    geo_source: Literal["depth", "ray"] = "depth",
+    range_m: tuple[float, float] = (0.3, 30.0),
+    min_keyframes_per_cluster: int = 2,
+    embeddings: np.ndarray | None = None,
+) -> np.ndarray:
+    """Associate detections with a sparse signed graph and GAEC.
+
+    The signed edge cost is a linear log-odds model: positive costs favor the same
+    object and negative costs favor a cut. Candidate edges are sparsified to pairs
+    whose depth-projected points are within ``pair_radius_m``; this is only a graph
+    sparsification and is not itself a local merge decision. Same-keyframe pairs are
+    deliberately retained, allowing overlapping proposals of one object to merge.
+
+    Pair distances, candidate selection, and costs are computed in NumPy. Only the
+    sparse GAEC contraction loop runs in Python. Its complexity is documented on
+    :func:`greedy_additive_edge_contraction`.
+
+    Args:
+        positions_local: Depth-projected EUS points.
+        ray_origins: Camera origins in EUS metres.
+        ray_directions: Unit ray directions in EUS.
+        valid_mask: Boolean mask selecting usable detections.
+        object_keyframe_ids: Keyframe identifier for every detection.
+        detection_levels: Per-detection levels, or ``None`` to disable hard cuts.
+        pair_radius_m: Depth-point radius used to sparsify candidate pairs.
+        geo_weight: Coefficient of ``1 - distance / geo_pivot``.
+        geo_pivot: Metres at which the geometric log-odds term changes sign.
+        sem_weight: Coefficient of ``cosine - sem_pivot``; zero disables semantics.
+        sem_pivot: Cosine at which the semantic term changes sign.
+        geo_source: ``"depth"`` for point distance or ``"ray"`` for ray distance.
+        range_m: Inclusive valid closest-approach interval for ray geometry.
+        min_keyframes_per_cluster: Minimum distinct-keyframe support after clustering.
+        embeddings: Cutout embeddings, required only when ``sem_weight`` is nonzero.
+
+    Returns:
+        Compact labels aligned with inputs, with filtered detections labelled ``-1``.
+    """
+    positions = np.asarray(positions_local, dtype=np.float64)
+    origins = np.asarray(ray_origins, dtype=np.float64)
+    directions = np.asarray(ray_directions, dtype=np.float64)
+    valid = np.asarray(valid_mask, dtype=bool).reshape(-1)
+    keyframes = np.asarray(object_keyframe_ids).reshape(-1)
+    detection_count = len(positions)
+    if any(
+        len(array) != detection_count
+        for array in (origins, directions, valid, keyframes)
+    ):
+        raise ValueError("multicut inputs must have one row per detection")
+    if positions.shape != (detection_count, 3) or origins.shape != positions.shape:
+        raise ValueError("multicut positions and ray origins must have shape (n, 3)")
+    if directions.shape != positions.shape:
+        raise ValueError("multicut ray directions must have shape (n, 3)")
+    if pair_radius_m < 0.0 or geo_pivot <= 0.0:
+        raise ValueError(
+            "multicut pair radius must be non-negative and geometric pivot positive"
+        )
+    if geo_source not in ("depth", "ray"):
+        raise ValueError(f"Unknown multicut geometry source: {geo_source!r}")
+
+    labels = np.full(detection_count, -1, dtype=np.int32)
+    valid_indices = np.flatnonzero(valid)
+    if valid_indices.size == 0:
+        return labels
+    subset_positions = positions[valid_indices]
+    pair_distances = np.linalg.norm(
+        subset_positions[:, None, :] - subset_positions[None, :, :], axis=2
+    )
+    local_i, local_j = np.where(np.triu(pair_distances <= float(pair_radius_m), k=1))
+    global_i = valid_indices[local_i]
+    global_j = valid_indices[local_j]
+
+    forbidden_pairs: set[tuple[int, int]] = set()
+    compatible = np.ones(local_i.size, dtype=bool)
+    if detection_levels is not None:
+        all_levels = np.asarray(detection_levels).reshape(-1)
+        if len(all_levels) != detection_count:
+            raise ValueError("multicut levels must have one row per detection")
+        levels = all_levels[valid_indices]
+        known = levels != UNRESOLVED_LEVEL
+        incompatible_matrix = (
+            known[:, None] & known[None, :] & (levels[:, None] != levels[None, :])
+        )
+        blocked_i, blocked_j = np.where(np.triu(incompatible_matrix, k=1))
+        forbidden_pairs = {
+            (int(i), int(j)) for i, j in zip(blocked_i, blocked_j, strict=True)
+        }
+        compatible = ~incompatible_matrix[local_i, local_j]
+        # A level veto is a true cannot-link constraint. It is represented outside
+        # the cost graph, never as a large negative cost: additive contraction could
+        # otherwise overwhelm it by summing enough positive parallel edges.
+
+    geometry = pair_distances[local_i, local_j]
+    if geo_source == "ray":
+        range_min, range_max = (float(value) for value in range_m)
+        if range_min < 0.0 or range_max < range_min:
+            raise ValueError("multicut range_m must be an ordered non-negative pair")
+        if local_i.size:
+            geometry, t_i, t_j = _ray_closest_approach_pairs(
+                origins[global_i],
+                directions[global_i],
+                origins[global_j],
+                directions[global_j],
+            )
+            compatible &= (
+                (t_i > 0.0)
+                & (t_j > 0.0)
+                & (t_i >= range_min)
+                & (t_i <= range_max)
+                & (t_j >= range_min)
+                & (t_j <= range_max)
+            )
+
+    costs = float(geo_weight) * (1.0 - geometry / float(geo_pivot))
+    if sem_weight != 0.0:
+        if embeddings is None:
+            raise ValueError("multicut semantic weight requires embeddings")
+        matrix = np.asarray(embeddings, dtype=np.float64)
+        if matrix.ndim != 2 or matrix.shape[0] != detection_count:
+            raise ValueError("multicut embeddings must have one row per detection")
+        subset_embeddings = matrix[valid_indices]
+        norms = np.linalg.norm(subset_embeddings, axis=1, keepdims=True)
+        if np.any(norms <= 0.0):
+            raise ValueError("multicut embeddings must be non-zero")
+        normalized = subset_embeddings / norms
+        cosines = np.einsum("ij,ij->i", normalized[local_i], normalized[local_j])
+        costs += float(sem_weight) * (cosines - float(sem_pivot))
+
+    edges = [
+        (int(i), int(j), float(cost))
+        for i, j, cost in zip(
+            local_i[compatible], local_j[compatible], costs[compatible], strict=True
+        )
+    ]
+    subset_labels = greedy_additive_edge_contraction(
+        int(valid_indices.size), edges, forbidden_pairs=forbidden_pairs
+    )
+    labels[valid_indices] = subset_labels
+    return filter_clusters_by_min_keyframes(
+        labels, keyframes, min_keyframes=min_keyframes_per_cluster
+    )
 
 
 def _filter_edges_by_delta_overlap(
@@ -1116,6 +1428,24 @@ def localize_from_enriched_candidates(
             min_keyframes_per_cluster=params.min_keyframes_per_cluster,
             embeddings=embeddings,
             semantic_threshold=params.cdog_semantic_threshold,
+        )
+    elif params.association == "multicut":
+        cluster_ids = cluster_detections_multicut(
+            positions_eus,
+            ray_origins,
+            ray_directions,
+            ray_valid_mask if params.multicut_geo_source == "ray" else valid_mask,
+            keyframe_ids,
+            detection_levels,
+            pair_radius_m=params.multicut_pair_radius_m,
+            geo_weight=params.multicut_geo_weight,
+            geo_pivot=params.multicut_geo_pivot,
+            sem_weight=params.multicut_sem_weight,
+            sem_pivot=params.multicut_sem_pivot,
+            geo_source=params.multicut_geo_source,
+            range_m=params.cdog_range_m,
+            min_keyframes_per_cluster=params.min_keyframes_per_cluster,
+            embeddings=embeddings,
         )
     else:
         raise ValueError(f"Unknown association mode: {params.association!r}")

@@ -269,6 +269,76 @@ because it changes where a cluster is, not which detections are in it. It fades 
 tightens (+0.001 at 1 m, −0.002 at 0.5 m), which is consistent: it helps most where
 clusters are largest.
 
+### Minimum-cost multicut association — opt-in experiment
+
+`association="multicut"` builds a signed graph and partitions it with greedy additive
+edge contraction (GAEC). Positive costs attract and negative costs repel, so the
+partition chooses its own number of clusters instead of applying a local edge cutoff.
+Pairs are generated only when their depth-projected points are within
+`multicut_pair_radius_m` (6 m by default). That radius is a **graph sparsification**,
+not the association rule: every retained pair contributes its signed evidence. Unlike
+C-DOG, same-keyframe pairs are retained so duplicate proposals around one object can
+merge.
+
+The cost is the linear log-odds model
+`geo_weight * (1 - distance / geo_pivot) + sem_weight * (cosine - sem_pivot)`.
+Defaults are `(1.0, 1 m, 0.0, 0.8)`: depth geometry carries the measured signal and
+semantics remains explicitly sweepable while defaulting to exact zero. Setting
+`multicut_geo_source="ray"` substitutes closest-approach ray distance; behind-camera
+or out-of-range approaches create no edge. Level incompatibility is a hard cannot-link
+constraint outside the weighted graph, never a large negative cost that summed positive
+parallel edges could overwhelm during contraction.
+
+GAEC repeatedly contracts the maximum positive edge and sums parallel costs after each
+merge. It uses a lazy heap with node-index tie-breaking and has no Kernighan–Lin pass.
+Run `python -m toolbox.benchmark.pair_cue_separability --map-path ...
+--ann-base-url ... --prompts ...` to reproduce the depth/ray/cosine percentile and AUC
+diagnostic before adding another pairwise term.
+
+### Minimum-cost multicut — neutral, and that is the informative part
+
+`association="multicut"` drops the threshold-then-greedy shape entirely: a sparse signed
+graph (`w = geo_weight·(1 − d/geo_pivot) + sem_weight·(cos − sem_pivot)`, a linear form
+that *is* the log-odds of a logistic model), partitioned by greedy additive edge
+contraction. The number of clusters is an output, not a parameter, and unlike every
+other mode here it lets two proposals from the **same keyframe** merge. Level
+incompatibility is a hard cut on the edge, not a large negative cost, because summed
+parallel edges could otherwise outvote one.
+
+Swept against the `eps` curve at equal median spread, over the whole useful range of
+`geo_pivot` (0.15 m to 3 m): **−0.017 to +0.013, and ±0.005 almost everywhere.** Sorted
+by granularity, the multicut points and the `eps` points interleave. Global
+correlation-clustering buys nothing over greedy leader/canopy on this data — which is
+worth knowing, because it says the greedy pass was never the limitation.
+
+Two negatives that were *predicted* by the pair-cue AUC table above, which is the best
+argument for running that diagnostic before implementing anything:
+
+- **the semantic weight is monotonically harmful**: −0.006, −0.014, −0.017 as
+  `sem_weight` goes 0.5 → 1 → 2. Exactly what an AUC of 0.529 implies;
+- **ray geometry is much worse than depth geometry** here too: −0.069 and −0.145 at
+  `geo_pivot` 1 m and 2 m.
+
+### The frontier, and what it means
+
+Four association rules, one curve. Strict mAP against median cluster spread:
+
+| median spread | leader/canopy `eps` | multicut `geo_pivot` |
+|---|---|---|
+| 0.046–0.049 | 0.719 | 0.725 |
+| 0.055–0.056 | 0.735 | 0.748 |
+| 0.069–0.073 | 0.787 | 0.788 |
+| 0.089–0.101 | 0.792 | 0.779 |
+| 0.277 | 0.702 | 0.702 |
+| 0.374 | 0.672 | 0.672 |
+
+The best strict point on the whole surface is `eps` ≈ 0.55 (mAP 0.802, macro F1 0.691,
+LOO 0.653 — against 0.672 / 0.632 / 0.611 at the 2 m default), and grouped mAP is 0.680
+there against 0.738 at `eps` 3 m. So the two views still disagree monotonically and the
+bench still cannot say which granularity is right. **No association rule tested today
+moves that frontier; they only move along it.** The thing to fix is the ground truth, not
+the algorithm — see the annotation-grouping defect.
+
 ### Other divergences from production
 
 `localize.py` also differs in four import lines, one dev-only opt-in, and one bug fix.

@@ -33,6 +33,12 @@ _IMAGE_FORM = {
     "cdog_range_m": "0.5,25.0",
     "cdog_semantic_threshold": "0.8",
     "cdog_delta": "0.6",
+    "multicut_pair_radius_m": "7.0",
+    "multicut_geo_weight": "1.2",
+    "multicut_geo_pivot": "0.9",
+    "multicut_sem_weight": "0.4",
+    "multicut_sem_pivot": "0.75",
+    "multicut_geo_source": "ray",
     "centroid_from": "rays",
 }
 
@@ -55,6 +61,12 @@ def test_form_strings_reach_the_localization_params() -> None:
     assert params.cdog_range_m == (0.5, 25.0)
     assert params.cdog_semantic_threshold == 0.8
     assert params.cdog_delta == 0.6
+    assert params.multicut_pair_radius_m == 7.0
+    assert params.multicut_geo_weight == 1.2
+    assert params.multicut_geo_pivot == 0.9
+    assert params.multicut_sem_weight == 0.4
+    assert params.multicut_sem_pivot == 0.75
+    assert params.multicut_geo_source == "ray"
     assert params.centroid_from == "rays"
 
 

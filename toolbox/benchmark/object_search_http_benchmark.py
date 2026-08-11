@@ -988,6 +988,17 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             )
             if args.cdog_semantic_threshold is not None:
                 payload["cdog_semantic_threshold"] = args.cdog_semantic_threshold
+        if args.association == "multicut":
+            payload.update(
+                {
+                    "multicut_pair_radius_m": args.multicut_pair_radius_m,
+                    "multicut_geo_weight": args.multicut_geo_weight,
+                    "multicut_geo_pivot": args.multicut_geo_pivot,
+                    "multicut_sem_weight": args.multicut_sem_weight,
+                    "multicut_sem_pivot": args.multicut_sem_pivot,
+                    "multicut_geo_source": args.multicut_geo_source,
+                }
+            )
         if args.centroid_from != "depth":
             payload["centroid_from"] = args.centroid_from
 
@@ -1195,6 +1206,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "cdog_range_m": args.cdog_range_m,
         "cdog_semantic_threshold": args.cdog_semantic_threshold,
         "cdog_delta": args.cdog_delta,
+        "multicut_pair_radius_m": args.multicut_pair_radius_m,
+        "multicut_geo_weight": args.multicut_geo_weight,
+        "multicut_geo_pivot": args.multicut_geo_pivot,
+        "multicut_sem_weight": args.multicut_sem_weight,
+        "multicut_sem_pivot": args.multicut_sem_pivot,
+        "multicut_geo_source": args.multicut_geo_source,
         "centroid_from": args.centroid_from,
         "score_field": args.score_field,
         "group_annotation_radius_m": args.group_annotation_radius_m,
@@ -1439,13 +1456,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--association",
-        choices=("leader_canopy", "incremental", "cdog"),
+        choices=("leader_canopy", "incremental", "cdog", "multicut"),
         default="leader_canopy",
         help=(
             "Detection association algorithm. 'leader_canopy' preserves the current "
             "production-compatible path; 'incremental' enables greedy best-match "
             "association and requires cutout embeddings; 'cdog' builds a ray-"
-            "consistency graph and filters its edges by neighbourhood overlap."
+            "consistency graph and filters its edges by neighbourhood overlap; "
+            "'multicut' applies GAEC to a sparse signed graph."
         ),
     )
     parser.add_argument(
@@ -1483,6 +1501,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Optional cutout cosine gate for C-DOG edges.",
     )
     parser.add_argument("--cdog-delta", type=float, default=0.5)
+    parser.add_argument("--multicut-pair-radius-m", type=float, default=6.0)
+    parser.add_argument("--multicut-geo-weight", type=float, default=1.0)
+    parser.add_argument("--multicut-geo-pivot", type=float, default=1.0)
+    parser.add_argument("--multicut-sem-weight", type=float, default=0.0)
+    parser.add_argument("--multicut-sem-pivot", type=float, default=0.8)
+    parser.add_argument(
+        "--multicut-geo-source", choices=("depth", "ray"), default="depth"
+    )
     parser.add_argument(
         "--centroid-from",
         choices=("depth", "rays"),

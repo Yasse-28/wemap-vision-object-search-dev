@@ -293,7 +293,9 @@ class LocalizeParams(BaseModel):
     # Optional seed-cosine gate for the legacy leader/canopy mode, or for the
     # incremental conjunctive experiment. Bounded to a cosine's range.
     semantic_gate_threshold: float | None = Field(default=None, ge=-1.0, le=1.0)
-    association: Literal["leader_canopy", "incremental", "cdog"] = "leader_canopy"
+    association: Literal["leader_canopy", "incremental", "cdog", "multicut"] = (
+        "leader_canopy"
+    )
     combination: Literal["conjunctive", "sum"] = "sum"
     association_sim_threshold: float = Field(default=1.1, ge=0.0, le=2.0)
     descriptor: Literal["seed", "running_mean"] = "running_mean"
@@ -302,6 +304,12 @@ class LocalizeParams(BaseModel):
     cdog_range_m: tuple[float, float] = (0.3, 30.0)
     cdog_semantic_threshold: float | None = Field(default=None, ge=-1.0, le=1.0)
     cdog_delta: float = Field(default=0.5, ge=0.0, le=1.0)
+    multicut_pair_radius_m: float = Field(default=6.0, ge=0.0)
+    multicut_geo_weight: float = 1.0
+    multicut_geo_pivot: float = Field(default=1.0, gt=0.0)
+    multicut_sem_weight: float = 0.0
+    multicut_sem_pivot: float = Field(default=0.8, ge=-1.0, le=1.0)
+    multicut_geo_source: Literal["depth", "ray"] = "depth"
     centroid_from: Literal["depth", "rays"] = "depth"
     # Accepted and ignored: the benchmark always sends it, the router that would
     # have consumed it was a stub and went to legacy/.
@@ -359,6 +367,12 @@ class LocalizeParams(BaseModel):
             cdog_range_m=self.cdog_range_m,
             cdog_semantic_threshold=self.cdog_semantic_threshold,
             cdog_delta=self.cdog_delta,
+            multicut_pair_radius_m=self.multicut_pair_radius_m,
+            multicut_geo_weight=self.multicut_geo_weight,
+            multicut_geo_pivot=self.multicut_geo_pivot,
+            multicut_sem_weight=self.multicut_sem_weight,
+            multicut_sem_pivot=self.multicut_sem_pivot,
+            multicut_geo_source=self.multicut_geo_source,
             centroid_from=self.centroid_from,
             feedback_alpha=self.feedback_alpha,
             feedback_beta=self.feedback_beta,
@@ -576,6 +590,10 @@ def create_app() -> FastAPI:
                     or (
                         params.association == "cdog"
                         and params.cdog_semantic_threshold is not None
+                    )
+                    or (
+                        params.association == "multicut"
+                        and params.multicut_sem_weight != 0.0
                     )
                 ),
             )

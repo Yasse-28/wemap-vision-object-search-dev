@@ -33,9 +33,11 @@ from toolbox.bricks.localize import (
     cluster_detections_cdog,
     cluster_detections_incremental,
     cluster_detections_leader_canopy,
+    cluster_detections_multicut,
     compute_cluster_statistics,
     filter_clusters_by_geometry,
     filter_clusters_by_min_keyframes,
+    greedy_additive_edge_contraction,
     localize_from_enriched_candidates,
     rank_localization_clusters,
     ray_closest_approach,
@@ -136,6 +138,112 @@ def test_unresolved_level_stays_mergeable() -> None:
         eps=2.0,
     )
     assert labels[0] == labels[1]
+
+
+# ---------------------------------------------------------------------- multicut
+
+
+def _multicut_cluster(
+    positions: Any,
+    *,
+    levels: Any = None,
+    embeddings: Any = None,
+    sem_weight: float = 0.0,
+) -> NDArray[np.int32]:
+    """Run depth-based multicut on concise test fixtures."""
+    points = np.asarray(positions, dtype=np.float64)
+    origins = np.zeros_like(points)
+    directions = points / np.where(
+        np.linalg.norm(points, axis=1, keepdims=True) > 0.0,
+        np.linalg.norm(points, axis=1, keepdims=True),
+        1.0,
+    )
+    return cluster_detections_multicut(
+        points,
+        origins,
+        directions,
+        np.ones(len(points), dtype=bool),
+        np.arange(len(points), dtype=np.int64),
+        None if levels is None else np.asarray(levels, dtype=np.int32),
+        pair_radius_m=10.0,
+        geo_pivot=1.0,
+        sem_weight=sem_weight,
+        min_keyframes_per_cluster=1,
+        embeddings=(
+            None if embeddings is None else np.asarray(embeddings, dtype=np.float64)
+        ),
+    )
+
+
+def test_gaec_known_four_node_partition_changes_with_bridge_sign() -> None:
+    negative_bridge = greedy_additive_edge_contraction(
+        4, [(0, 1, 2.0), (2, 3, 2.0), (1, 2, -1.0)]
+    )
+    positive_bridge = greedy_additive_edge_contraction(
+        4, [(0, 1, 2.0), (2, 3, 2.0), (1, 2, 1.0)]
+    )
+
+    np.testing.assert_array_equal(negative_bridge, [0, 0, 1, 1])
+    np.testing.assert_array_equal(positive_bridge, [0, 0, 0, 0])
+
+
+def test_gaec_sums_parallel_costs_created_by_contraction() -> None:
+    labels = greedy_additive_edge_contraction(
+        3,
+        [
+            (0, 1, 2.0),
+            (0, 2, 1.0),
+            (1, 2, -1.5),
+        ],
+    )
+
+    # A max-only merge would retain +1 and merge node 2. GAEC sums +1 and -1.5,
+    # leaving a negative component edge and therefore exactly two clusters.
+    np.testing.assert_array_equal(labels, [0, 0, 1])
+
+
+def test_multicut_level_incompatibility_is_a_hard_component_cut() -> None:
+    labels = _multicut_cluster(
+        [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.2, 0.0, 0.0]],
+        levels=[0, UNRESOLVED_LEVEL, 1],
+    )
+
+    assert labels[0] != labels[2]
+
+
+def test_multicut_allows_same_keyframe_proposals_to_merge() -> None:
+    points = np.asarray([[1.0, 0.0, 0.0], [1.1, 0.0, 0.0]], dtype=np.float64)
+    labels = cluster_detections_multicut(
+        points,
+        np.zeros_like(points),
+        points / np.linalg.norm(points, axis=1, keepdims=True),
+        np.ones(2, dtype=bool),
+        np.asarray([7, 7], dtype=np.int64),
+        None,
+        min_keyframes_per_cluster=1,
+    )
+
+    assert labels[0] == labels[1]
+
+
+def test_multicut_zero_semantic_weight_ignores_embeddings() -> None:
+    positions = [[0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [3.0, 0.0, 0.0]]
+    embeddings = np.eye(3, dtype=np.float64)
+    first = _multicut_cluster(positions, embeddings=embeddings, sem_weight=0.0)
+    second = _multicut_cluster(
+        positions, embeddings=embeddings[[2, 0, 1]], sem_weight=0.0
+    )
+
+    np.testing.assert_array_equal(first, second)
+
+
+def test_gaec_equal_cost_ties_use_node_indices_not_edge_order() -> None:
+    edges = [(1, 2, 1.0), (0, 1, 1.0), (0, 2, -1.5)]
+    forward = greedy_additive_edge_contraction(3, edges)
+    reversed_order = greedy_additive_edge_contraction(3, list(reversed(edges)))
+
+    np.testing.assert_array_equal(forward, [0, 0, 1])
+    np.testing.assert_array_equal(reversed_order, forward)
 
 
 def test_basement_level_does_not_disable_the_clustering_veto() -> None:
