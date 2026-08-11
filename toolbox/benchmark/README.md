@@ -91,3 +91,30 @@ Per-prompt GeoJSON colors:
 - FP prediction clusters: red (`#ef4444`)
 - FN reference annotations: grey (`#9ca3af`)
 - Matched reference annotations: blue (`#2563eb`)
+
+## Offline association sweeps
+
+`association_sweep.py` scores many localization configurations without re-running
+retrieval. Retrieval is identical across association/ranking configs, so it fetches the
+ANN hits and enriches them **once per prompt**, caches that, and then calls
+`localize_from_enriched_candidates` in process — about 6 s per configuration on
+`bbhotel-choisy` instead of a full HTTP run.
+
+It reuses this module's own matching, curve and threshold code, so it cannot disagree
+with the HTTP benchmark about what a true positive is. `--verify` proves that on the
+default configuration by comparing every cluster against the live bricks service
+(measured deviation: exactly 0).
+
+```bash
+python -m toolbox.benchmark.association_sweep \
+  --map-path /path/to/maps/bbhotel-choisy \
+  --ann-base-url http://127.0.0.1:45677 \
+  --cache-dir .cache/assoc --grid grid.json --out-dir out/ --verify
+```
+
+Each grid entry is a `LocalizationParams` override plus a `label`; an unknown key is an
+error, not a silent no-op. Every row carries both ground-truth views (strict and
+grouped, each with its own fitted shared threshold and leave-one-prompt-out estimate)
+plus granularity controls — cluster counts, median observation count, median spread.
+Those controls are not decoration: the bench cannot rank two granularities, so a change
+in split/merge behaviour has to be read off them rather than off the metric.
