@@ -4,6 +4,10 @@ Quatre volets, une seule carte (`bbhotel-choisy`), une branche
 (`wip/improve-search-strategy`). Ce fichier est l'entrée : il dit dans quel ordre lire,
 ce qui est décidé, et ce qui a été **rétracté en cours de route**.
 
+Le déroulé complet — chaque demande, chaque détour, les incidents d'outillage et les
+arbitrages — est dans [`2026-08-11-session-log.md`](2026-08-11-session-log.md). Les quatre
+volets disent *quoi* ; le journal dit *dans quel ordre et pourquoi*.
+
 | volet | document | commits |
 |---|---|---|
 | 1. Sept tentatives géométriques, défauts de données | [`…-object-search-geometry-investigation.md`](2026-08-11-object-search-geometry-investigation.md) | `78b98a4` |
