@@ -148,3 +148,6 @@ de graphe que la §4 du document précédent laissait ouvert : arêtes par consi
 épipolaire puis clustering par δ-recouvrement, pas des composantes connexes. FroDO
 formule le clustering de rayons comme problème ouvert, ce qui recadre l'échec 3.3.
 Aucun de ces travaux ne tourne sans reconstruction dense — c'est là qu'on est seuls.
+
+Liens et niveau de fiabilité de chaque référence :
+[`2026-08-11-session-log.md`](2026-08-11-session-log.md) § 6.

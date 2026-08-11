@@ -145,6 +145,30 @@ Trois transferts retenus : la double porte, la hiérarchie étage/pièce, et le 
 scaling comme concurrent du ratio. Aucun de ces travaux ne tourne sans reconstruction
 dense — c'est là qu'on est seuls.
 
+### Références
+
+Liste canonique de la session. La colonne « lu » est honnête et importe pour la réutilisation :
+les papiers marqués *résumé* n'ont été vus qu'à travers un résumé de recherche, pas lus.
+
+| sujet | référence | lu |
+|---|---|---|
+| L'analogue structurel le plus proche : propositions 2D open-vocab fusionnées en instances 3D, sans entraînement 3D. Fusion sur similarité de features, pas sur la géométrie. | [OVIR-3D: Open-Vocabulary 3D Instance Retrieval Without Training on 3D Data](https://arxiv.org/abs/2311.02873) (CoRL 2023) | résumé |
+| **La double porte** implémentée en `a0a9a7c` : IoU de boîtes 3D (seuil 0.03) *puis* vérification par cosinus, conjonctives. | [ConceptGraphs: Open-Vocabulary 3D Scene Graphs for Perception and Planning](https://concept-graphs.github.io/) (ICRA 2024) | résumé |
+| Hiérarchie étage → pièce → objet, requête décomposée et interrogée séquentiellement. Piste pour les 9 niveaux de bbhotel, où le niveau est aujourd'hui un veto tardif. | [Hierarchical Open-Vocabulary 3D Scene Graphs for Language-Grounded Robot Navigation](https://hovsg.github.io/) (RSS 2024) | résumé |
+| Le plus proche de notre modèle de données — scene graph hiérarchique bâti sur des **keyframes**, évalué sur de la récupération d'objets multi-étages. | [KeySG: Hierarchical Keyframe-Based 3D Scene Graphs](https://arxiv.org/pdf/2510.01049) (2025) | résumé |
+| Localisation d'objets 3D **sans reconstruction** — le cadre le plus proche du nôtre. À lire en premier si on reprend le sujet. | [Memory Over Maps: 3D Object Localization Without Reconstruction](https://arxiv.org/pdf/2603.20530) (2026) | résumé automatique, vague — ne rien en citer sans l'avoir ouvert |
+| Le partitionnement de graphe que la §4 du volet 1 laissait ouvert : arêtes par consistance épipolaire, puis clustering par δ-recouvrement et filtrage — **pas** des composantes connexes. Sans entraînement. | [C-DOG: Training-Free Multi-View Multi-Object Association](https://arxiv.org/pdf/2507.14095) (2025) | résumé |
+| Formule l'association comme « identifier un nombre inconnu de segments de droite s'intersectant approximativement en un point » — soit exactement l'expérience 3.3 du volet 1, posée comme problème ouvert. | [FroDO: From Detections to 3D Objects](https://arxiv.org/pdf/2005.05125) (2020) | résumé |
+| Soutient que le goulot de la perception open-world fine est la discrimination de CLIP lui-même. Recoupe l'axe compact/étendu. | [Is CLIP the main roadblock for fine-grained open-world perception?](https://arxiv.org/pdf/2404.03539) (2024) | résumé |
+| Normaliser le score d'un échantillon par sa similarité à ses paires contrastives (negCLIPLoss). Notre `sim / max_sim` en est la version pauvre ; le **temperature scaling** y est le concurrent à tester. | [CLIPLoss and Norm-Based Data Selection Methods for Multimodal Contrastive Learning](https://arxiv.org/html/2405.19547v1) (2024) | résumé |
+| Jeu de référence pour la détection sur équirectangulaire (~3 000 images, 90 000 labels). | [360-Indoor: Towards Learning Real-World Objects in 360° Indoor Equirectangular Images](https://arxiv.org/abs/1910.01712) (WACV 2020) | résumé |
+| Estimation de profondeur sur panoramas sphériques. Contexte du défaut §2 du volet 1 : la profondeur explose sur les rayons montants, cohérent avec la distorsion ERP près des pôles. | [Rethinking Supervised Depth Estimation for 360° Panoramic Imagery](https://openaccess.thecvf.com/content/CVPR2022W/OmniCV/papers/He_Rethinking_Supervised_Depth_Estimation_for_360deg_Panoramic_Imagery_CVPRW_2022_paper.pdf) (CVPRW 2022) | résumé |
+
+Réserve valable pour toute la liste : elle vient d'une recherche menée en une passe, et
+aucun de ces papiers n'a été lu intégralement. Les chiffres qu'ils annoncent (seuils, mIoU)
+ne sont pas vérifiés ; ce qui a été **repris et mesuré ici**, c'est la règle d'association
+de ConceptGraphs, et elle l'a été sur nos données, pas sur les leurs.
+
 ## 7. La double porte, implémentée et mesurée
 
 **Demande : tester et benchmarker la double porte de ConceptGraphs.**
