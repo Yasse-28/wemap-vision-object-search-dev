@@ -12,6 +12,7 @@ Operates on Postgres ``object_position`` values loaded via
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -43,6 +44,11 @@ class LocalizationParams:
     # for itself — they exist to be swept, not to be on.
     min_observations_per_cluster: int = 1
     max_cluster_spread_m: float | None = None
+    # Two-gate association (ConceptGraphs): a detection joins a cluster only if it
+    # passes the spatial gate *and* a cutout↔cutout cosine gate against the seed.
+    # `None` = off, which is production's geometry-only rule. Requires candidates
+    # loaded with `with_embeddings=True`; the service arranges that when it is set.
+    semantic_gate_threshold: float | None = None
     # Review-feedback gains. Both zero (the default) means the boosted similarity
     # is not merely equal to the raw one — it is never consulted at all. See
     # `_ranking_similarities`.
@@ -203,6 +209,49 @@ def _levels_compatible(
     return True
 
 
+def _embedding_matrix(candidates: list[EnrichedCandidate]) -> np.ndarray | None:
+    """Stack the candidates' embeddings, or None if any is missing.
+
+    All-or-nothing on purpose: a partially populated matrix would gate some pairs and
+    wave others through, which is indistinguishable from a threshold that happens not
+    to bite. The default path carries no embeddings at all, so this returns None.
+    """
+    if not candidates or any(c.embedding is None for c in candidates):
+        return None
+    return np.vstack([c.embedding for c in candidates])
+
+
+def _semantic_gate(
+    embeddings: np.ndarray | None,
+    valid_indices: np.ndarray,
+    threshold: float | None,
+) -> Callable[[int, int], bool] | None:
+    """`(seed_local, other_local) -> bool` cosine gate, or None when disabled.
+
+    The second half of the two-gate association. Embeddings are L2-normalised by the
+    pipeline (norms measured 0.999428–1.000566), so a dot product *is* the cosine —
+    the same identity the prototype-similarity SQL relies on. Re-normalised here
+    anyway, because a silent scale error would read as "the gate does nothing".
+
+    Rows are reindexed to the valid subset once, so the hot loop indexes with the
+    same local indices the caller already uses.
+    """
+    if threshold is None or embeddings is None:
+        return None
+    matrix = np.asarray(embeddings, dtype=np.float32)
+    if matrix.ndim != 2 or matrix.shape[0] == 0:
+        return None
+    subset = matrix[valid_indices]
+    norms = np.linalg.norm(subset, axis=1, keepdims=True)
+    subset = subset / np.where(norms > 0, norms, 1.0)
+    cut = float(threshold)
+
+    def gate(seed_local: int, other_local: int) -> bool:
+        return bool(float(subset[seed_local] @ subset[other_local]) >= cut)
+
+    return gate
+
+
 def cluster_detections_leader_canopy(
     positions_local: np.ndarray,
     valid_mask: np.ndarray,
@@ -212,8 +261,16 @@ def cluster_detections_leader_canopy(
     *,
     eps_meters: float,
     min_keyframes_per_cluster: int,
+    embeddings: np.ndarray | None = None,
+    semantic_gate_threshold: float | None = None,
 ) -> np.ndarray:
-    """Greedy similarity-seeded spatial clustering (leader / canopy)."""
+    """Greedy similarity-seeded spatial clustering (leader / canopy).
+
+    With `semantic_gate_threshold` set, a detection joins the seed's cluster only if
+    it also passes a **cutout↔cutout cosine** gate against the seed — the two-gate
+    (geometric AND semantic) association ConceptGraphs uses, in place of production's
+    geometry-only rule. Off by default; `embeddings` must be supplied for it to apply.
+    """
     labels = np.full(len(positions_local), -1, dtype=np.int32)
     valid_indices = np.where(valid_mask)[0]
     if valid_indices.size == 0:
@@ -226,6 +283,8 @@ def cluster_detections_leader_canopy(
     next_label = 0
     eps = float(eps_meters)
 
+    gate = _semantic_gate(embeddings, valid_indices, semantic_gate_threshold)
+
     for seed_local in order:
         if assigned[seed_local]:
             continue
@@ -234,6 +293,8 @@ def cluster_detections_leader_canopy(
         neighbors = np.where((dists <= eps) & ~assigned)[0]
         for j in neighbors:
             if not _levels_compatible(detection_levels, seed_local, int(j)):
+                continue
+            if gate is not None and not gate(int(seed_local), int(j)):
                 continue
             assigned[j] = True
             labels[int(valid_indices[j])] = next_label
@@ -559,6 +620,8 @@ def localize_from_enriched_candidates(
         detection_levels,
         eps_meters=params.clustering_eps_m,
         min_keyframes_per_cluster=params.min_keyframes_per_cluster,
+        embeddings=_embedding_matrix(selected),
+        semantic_gate_threshold=params.semantic_gate_threshold,
     )
 
     stats = compute_cluster_statistics(

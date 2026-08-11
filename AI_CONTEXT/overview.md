@@ -115,7 +115,8 @@ gap 2 of ADR 0001; **gap 1 remains** — livemap calls
   [`bricks.md`](bricks.md) for the measurement that replaced it.
 - Geometric support is **filtered, not scored**: `min_keyframes_per_cluster = 2`,
   `min_observations_per_cluster = 1` (off), `max_cluster_spread_m = None` (off).
-- Clustering: leader-canopy, `eps = 2.0 m`.
+- Clustering: leader-canopy, `eps = 2.0 m`. `semantic_gate_threshold` (`None` = off)
+  adds ConceptGraphs' second, semantic gate — see [`bricks.md`](bricks.md).
 - Local DB needs **both** `vector` and `postgis` — see `infra/postgres/Dockerfile`.
 
 ## Pose source and coordinate frames

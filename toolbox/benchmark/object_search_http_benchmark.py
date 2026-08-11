@@ -965,6 +965,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             payload["min_observations_per_cluster"] = args.min_observations_per_cluster
         if args.max_cluster_spread_m is not None:
             payload["max_cluster_spread_m"] = args.max_cluster_spread_m
+        if args.semantic_gate_threshold is not None:
+            payload["semantic_gate_threshold"] = args.semantic_gate_threshold
 
         started = time.perf_counter()
         try:
@@ -1160,6 +1162,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "max_observations_per_cluster": args.max_observations_per_cluster,
         "min_observations_per_cluster": args.min_observations_per_cluster,
         "max_cluster_spread_m": args.max_cluster_spread_m,
+        "semantic_gate_threshold": args.semantic_gate_threshold,
         "score_field": args.score_field,
         "group_annotation_radius_m": args.group_annotation_radius_m,
         "default_accuracy": args.default_accuracy,
@@ -1388,6 +1391,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Geometric filter: drop clusters with fewer detections than this. Off by "
             "default. It is a filter and not a score term on purpose — blending "
             "cluster size into match_score cost ranking quality when measured."
+        ),
+    )
+    parser.add_argument(
+        "--semantic-gate-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Two-gate association (ConceptGraphs): a detection joins a cluster only "
+            "if it is within the spatial radius AND its cutout embedding is at least "
+            "this cosine-similar to the cluster seed. Off by default, which is "
+            "production's geometry-only rule."
         ),
     )
     parser.add_argument(

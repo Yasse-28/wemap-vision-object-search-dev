@@ -24,7 +24,7 @@ diverge, production wins. A "small improvement" here is a bug.
 |---|---|---|
 | `ingest.py` | `db/ingest.py` | `encode_copy_stream`, `bulk_copy`, `create_partial_hnsw_index`, `_EWKB_POINTZ_PREFIX`, `_HNSW_INDEX_LOCK_KEY`, `INDEX_NAME_TEMPLATE` |
 | `ingest_cli.py` | `object_search_ingest.py` | `run_ingest`, `_compute_object_positions`, `_ingest_capture`, `_upsert_geokeyframes`, `discover_capture_dirs`, `EMBEDDING_DIM=1024`, `DEFAULT_MIN_DISTANCE=1.5` |
-| `candidates.py` | `candidates.py` | `EnrichedCandidate`, `load_enriched_candidates`, `_prefilter_hnsw_results`, `apply_feedback_boost`, `normalize_prototype_similarities`, `FEEDBACK_NORMALIZATIONS`, `K_INTERNAL=1000`, `LOOSE_ALPHA=0.3` |
+| `candidates.py` | `candidates.py` | `EnrichedCandidate`, `load_enriched_candidates`, `_prefilter_hnsw_results`, `apply_feedback_boost`, `normalize_prototype_similarities`, `_parse_embedding`, `FEEDBACK_NORMALIZATIONS`, `K_INTERNAL=1000`, `LOOSE_ALPHA=0.3` |
 | `feedback.py` | *(dev-only — no production counterpart)* | `ReviewFeedback`, `load_review_feedback`, `normalize_query`, `DB_FILENAME` — reads the toolbox's `object-search-annotations.db` |
 | `localize.py` | `v1_5_logic.py` | `cluster_detections_leader_canopy`, `compute_cluster_statistics`, `rank_localization_clusters`, `_similarity_ratio_scores`, `filter_clusters_by_geometry`, `localize_from_enriched_candidates`, `build_localize_response`, `LocalizationParams`, `UNRESOLVED_LEVEL=-9999`, `PLACEHOLDER_BBOX` |
 | `prepare_runner.py` | `object_search_prepare.py` (its `image_entries` construction) | `collect_image_entries`, `run` |
@@ -100,6 +100,43 @@ caller can gate on them itself instead of receiving them diluted into one number
 
 Not established: that one threshold transfers across **maps**. The LOO above covers
 prompts on one map only.
+
+### Two-gate association (ConceptGraphs) — opt-in experiment
+
+`semantic_gate_threshold` (`None` = off = production's rule) makes
+`cluster_detections_leader_canopy` require **both** gates before a detection joins a
+cluster: the 2 m spatial radius *and* a cutout↔cutout cosine against the seed. It is
+ConceptGraphs' conjunctive association rule (geometry AND semantics) in place of
+geometry alone. Needs `load_enriched_candidates(..., with_embeddings=True)`, which the
+service turns on exactly when the threshold is set — the embeddings are a few MB per
+query, so the default path never fetches them.
+
+Swept on `bbhotel-choisy`, acceptance threshold refit for every row:
+
+| association | mAP | macro F1 | LOO | mAP groupé | LOO groupé |
+|---|---|---|---|---|---|
+| geometry only | 0.653 | 0.632 | 0.611 | 0.713 | 0.627 |
+| + gate 0.70 | 0.652 | 0.625 | 0.600 | 0.706 | 0.604 |
+| **+ gate 0.80** | 0.694 | 0.649 | 0.628 | 0.692 | 0.610 |
+| **+ gate 0.85** | 0.698 | 0.654 | 0.629 | 0.639 | 0.565 |
+| + gate 0.90 | 0.630 | 0.579 | 0.556 | 0.559 | 0.457 |
+
+The optimum is a flat band at **0.80–0.85**; 0.70 does not bite (any two cutouts of one
+venue already sit near 0.7) and 0.90 over-splits. Per class it moves in **opposite
+directions**, exactly along the axis the geometry investigation identified:
+
+- extended / smooth / over-merged objects gain — `table` 0.400 → 0.702,
+  `lampe` 0.494 → 0.690, `chaise` 0.202 → 0.359 (0.793 at 0.90);
+- compact objects lose, because splitting a correct cluster manufactures duplicates —
+  `extincteur` 0.935 → 0.829, `ascenseur` 0.927 → 0.833, `detecteur de fumée`
+  0.845 → 0.767.
+
+**Why it stays off by default:** the two ground-truth views disagree structurally. The
+strict view (one target per annotation) rewards splitting, the grouped view (single
+linkage at 2 m, 674 annotations collapsed to 118 targets) rewards merging, so the gate
+wins on one and loses on the other. That is not a tuning question — it is the
+annotation-grouping defect (single linkage chains: 213 chairs → 5 targets). Fix the
+grouping to leader/canopy first, then this decision becomes measurable.
 
 ### Other divergences from production
 

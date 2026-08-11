@@ -240,6 +240,88 @@ def test_rankings_are_sorted_by_match_score_descending() -> None:
     assert rankings[0].cluster_id == 1
 
 
+# ------------------------------------- two-gate association (semantic gate)
+
+
+def _cluster_gated(
+    positions: Any,
+    keyframe_ids: Any,
+    similarities: Any,
+    embeddings: Any,
+    threshold: float | None,
+    *,
+    eps: float = 2.0,
+) -> NDArray[np.int32]:
+    positions_arr = np.asarray(positions, dtype=np.float64)
+    return cluster_detections_leader_canopy(
+        positions_arr,
+        np.ones(len(positions_arr), dtype=bool),
+        np.asarray(keyframe_ids, dtype=np.int64),
+        np.asarray(similarities, dtype=np.float64),
+        None,
+        eps_meters=eps,
+        min_keyframes_per_cluster=1,
+        embeddings=np.asarray(embeddings, dtype=np.float32),
+        semantic_gate_threshold=threshold,
+    )
+
+
+def test_semantic_gate_splits_two_objects_the_spatial_gate_merges() -> None:
+    """The case the whole experiment is about: two objects inside one 2 m ball.
+
+    Orthogonal embeddings, so the cosine between the two groups is 0 and any positive
+    threshold must separate them — while geometry alone cannot.
+    """
+    positions = [(0.0, 0.0, 0.0), (0.4, 0.0, 0.0), (0.8, 0.0, 0.0), (1.2, 0.0, 0.0)]
+    embeddings = [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+    similarities = [0.9, 0.8, 0.7, 0.6]
+
+    merged = _cluster_gated(positions, [1, 2, 3, 4], similarities, embeddings, None)
+    split = _cluster_gated(positions, [1, 2, 3, 4], similarities, embeddings, 0.5)
+
+    assert len(set(merged.tolist())) == 1, "geometry alone merges all four"
+    assert split.tolist() == [0, 0, 1, 1]
+
+
+def test_semantic_gate_keeps_one_object_together() -> None:
+    """Guard the guard: a gate that splits everything would also pass the test above."""
+    positions = [(0.0, 0.0, 0.0), (0.4, 0.0, 0.0), (0.8, 0.0, 0.0)]
+    embeddings = [[1.0, 0.0], [0.99, 0.141], [0.98, 0.199]]
+
+    labels = _cluster_gated(positions, [1, 2, 3], [0.9, 0.8, 0.7], embeddings, 0.9)
+
+    assert len(set(labels.tolist())) == 1
+
+
+def test_semantic_gate_is_off_without_embeddings() -> None:
+    """A threshold with no embeddings must be inert, not a silent no-op filter."""
+    positions = [(0.0, 0.0, 0.0), (0.4, 0.0, 0.0)]
+    labels = cluster_detections_leader_canopy(
+        np.asarray(positions, dtype=np.float64),
+        np.ones(2, dtype=bool),
+        np.asarray([1, 2], dtype=np.int64),
+        np.asarray([0.9, 0.8], dtype=np.float64),
+        None,
+        eps_meters=2.0,
+        min_keyframes_per_cluster=1,
+        embeddings=None,
+        semantic_gate_threshold=0.99,
+    )
+    assert labels.tolist() == [0, 0]
+
+
+def test_semantic_gate_normalises_before_comparing() -> None:
+    """Un-normalised rows must not sneak past a threshold by being long."""
+    positions = [(0.0, 0.0, 0.0), (0.4, 0.0, 0.0)]
+    # Cosine is 0, but the raw dot product of these two is 0 as well — scale the first
+    # so a missing normalisation would show up as a dot product far above 1.
+    embeddings = [[10.0, 0.0], [7.07, 7.07]]
+
+    labels = _cluster_gated(positions, [1, 2], [0.9, 0.8], embeddings, 0.9)
+
+    assert labels.tolist() == [0, 1], "cos = 0.707 must fail a 0.9 gate"
+
+
 # ------------------------------------------------------- geometry as a filter
 
 

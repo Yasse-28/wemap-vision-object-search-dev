@@ -80,6 +80,15 @@ _PROTOTYPE_SIM_SQL = """,
        FROM object_search_candidate AS p
       WHERE p.id = ANY(%s) AND p.geo_ref_id = %s) AS {alias}"""
 
+# The cutout embedding itself, spliced in only when a caller asks for it. Cast to
+# text because this repo does not register pgvector's psycopg2 adapter, and 1000
+# rows x 1024 halfvec is a few MB of text — cheap enough for a dev experiment, and
+# the reason this is opt-in rather than always fetched.
+#
+# Needed by the two-gate association (`semantic_gate_threshold`): the gate is a
+# cutout↔cutout cosine, which no other part of the pipeline computes.
+_ENRICH_EMBEDDING_SQL = ",\n    c.embedding::text AS embedding"
+
 # Where the extra SELECT columns get spliced. Anchoring on this exact substring
 # means the no-feedback path emits `_ENRICH_SQL` *unchanged* — not a regenerated
 # equivalent — which is what makes "alpha = beta = 0 reproduces today's output"
@@ -87,24 +96,49 @@ _PROTOTYPE_SIM_SQL = """,
 _ENRICH_FROM_ANCHOR = "\nFROM object_search_candidate AS c"
 
 
+def _parse_embedding(raw: object) -> np.ndarray | None:
+    """`"[0.1,0.2,...]"` → unit-norm float32 array. None when the column is absent."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text.startswith("["):
+        return None
+    values = np.fromstring(text[1:-1], sep=",", dtype=np.float32)
+    return values if values.size else None
+
+
 def _build_enrich_query(
     geo_ref_id: int,
     ids: list[int],
     feedback: ReviewFeedback | None,
+    with_embeddings: bool = False,
 ) -> tuple[str, list, bool, bool]:
     """`(sql, params, has_pos, has_neg)` for the enrichment fetch.
 
     The prototype subqueries live in the SELECT list, so their parameters come
     *before* the WHERE clause's — get that order wrong and psycopg2 silently binds
-    a map id where an id array belongs.
+    a map id where an id array belongs. The embedding column carries no parameter,
+    so it is appended last and the order above is unaffected.
     """
+    embedding = _ENRICH_EMBEDDING_SQL if with_embeddings else ""
+
+    def plain() -> tuple[str, list, bool, bool]:
+        sql = (
+            _ENRICH_SQL
+            if not embedding
+            else _ENRICH_SQL.replace(
+                _ENRICH_FROM_ANCHOR, embedding + _ENRICH_FROM_ANCHOR, 1
+            )
+        )
+        return sql, [geo_ref_id, ids], False, False
+
     if feedback is None:
-        return _ENRICH_SQL, [geo_ref_id, ids], False, False
+        return plain()
 
     has_pos = bool(feedback.positive_ids)
     has_neg = bool(feedback.negative_ids)
     if not has_pos and not has_neg:
-        return _ENRICH_SQL, [geo_ref_id, ids], False, False
+        return plain()
 
     extra = ""
     params: list = []
@@ -115,7 +149,9 @@ def _build_enrich_query(
         extra += _PROTOTYPE_SIM_SQL.format(alias="neg_sim")
         params += [feedback.negative_ids, geo_ref_id]
 
-    sql = _ENRICH_SQL.replace(_ENRICH_FROM_ANCHOR, extra + _ENRICH_FROM_ANCHOR, 1)
+    sql = _ENRICH_SQL.replace(
+        _ENRICH_FROM_ANCHOR, extra + embedding + _ENRICH_FROM_ANCHOR, 1
+    )
     return sql, params + [geo_ref_id, ids], has_pos, has_neg
 
 
@@ -254,6 +290,10 @@ class EnrichedCandidate:
     # longer explains why a candidate moved.
     pos_sim_applied: float = 0.0
     neg_sim_applied: float = 0.0
+    # The cutout's own embedding, fetched only when a caller asked for it (see
+    # `_ENRICH_EMBEDDING_SQL`). None on every default-path candidate, which is why
+    # the two-gate association has to check for it rather than assume it.
+    embedding: np.ndarray | None = None
 
     @property
     def effective_similarity(self) -> float:
@@ -283,6 +323,7 @@ def load_enriched_candidates(
     alpha: float = 0.0,
     beta: float = 0.0,
     normalization: FeedbackNormalization = "none",
+    with_embeddings: bool = False,
 ) -> list[EnrichedCandidate]:
     """Pre-filter HNSW hits, fetch DB rows, convert object positions to WGS84.
 
@@ -295,6 +336,10 @@ def load_enriched_candidates(
     the gains apply — see `normalize_prototype_similarities`. It is therefore
     query-relative: the same candidate boosted differently under two different
     queries is expected, not a bug.
+
+    `with_embeddings` additionally fetches each cutout's embedding, which only the
+    two-gate association needs. Off by default: it is a few MB per query and the
+    default path's SQL must stay byte-identical.
     """
     results = _prefilter_hnsw_results(hnsw_results)
     if not results:
@@ -303,7 +348,9 @@ def load_enriched_candidates(
     sim_by_id = {r["id"]: r["similarity"] for r in results}
     ids = list(sim_by_id.keys())
 
-    sql, params, has_pos, has_neg = _build_enrich_query(geo_ref_id, ids, feedback)
+    sql, params, has_pos, has_neg = _build_enrich_query(
+        geo_ref_id, ids, feedback, with_embeddings=with_embeddings
+    )
     with conn.cursor() as cursor:
         cursor.execute(sql, params)
         columns = [col[0] for col in cursor.description]
@@ -387,6 +434,7 @@ def load_enriched_candidates(
                 neg_sim=neg_sim,
                 pos_sim_applied=boost_pos[i],
                 neg_sim_applied=boost_neg[i],
+                embedding=_parse_embedding(row.get("embedding")),
             )
         )
 
