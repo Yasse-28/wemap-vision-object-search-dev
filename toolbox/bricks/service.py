@@ -290,10 +290,13 @@ class LocalizeParams(BaseModel):
     # so they change nothing until they are swept.
     min_observations_per_cluster: int = Field(default=1, ge=1)
     max_cluster_spread_m: float | None = Field(default=None, gt=0.0)
-    # Two-gate association (ConceptGraphs). `None` = off = production's geometry-only
-    # clustering. Bounded to a cosine's range; the useful band is well above 0 because
-    # any two cutouts of one venue already sit around 0.7.
+    # Optional seed-cosine gate for the legacy leader/canopy mode, or for the
+    # incremental conjunctive experiment. Bounded to a cosine's range.
     semantic_gate_threshold: float | None = Field(default=None, ge=-1.0, le=1.0)
+    association: Literal["leader_canopy", "incremental"] = "leader_canopy"
+    combination: Literal["conjunctive", "sum"] = "sum"
+    association_sim_threshold: float = Field(default=1.1, ge=0.0, le=2.0)
+    descriptor: Literal["seed", "running_mean"] = "running_mean"
     # Accepted and ignored: the benchmark always sends it, the router that would
     # have consumed it was a stub and went to legacy/.
     search_type: str | None = None
@@ -323,6 +326,10 @@ class LocalizeParams(BaseModel):
             min_observations_per_cluster=self.min_observations_per_cluster,
             max_cluster_spread_m=self.max_cluster_spread_m,
             semantic_gate_threshold=self.semantic_gate_threshold,
+            association=self.association,
+            combination=self.combination,
+            association_sim_threshold=self.association_sim_threshold,
+            descriptor=self.descriptor,
             feedback_alpha=self.feedback_alpha,
             feedback_beta=self.feedback_beta,
             feedback_normalization=self.feedback_normalization,
@@ -531,9 +538,12 @@ def create_app() -> FastAPI:
                 alpha=params.feedback_alpha,
                 beta=params.feedback_beta,
                 normalization=params.feedback_normalization,
-                # Only the two-gate association needs the raw cutout embeddings, and
-                # they are a few MB per query — fetched exactly when the gate is on.
-                with_embeddings=params.semantic_gate_threshold is not None,
+                # Incremental association always scores semantics. Leader/canopy only
+                # needs the few-MB matrix when its optional seed gate is enabled.
+                with_embeddings=(
+                    params.association == "incremental"
+                    or params.semantic_gate_threshold is not None
+                ),
             )
         response = build_localize_response(
             candidates,

@@ -85,7 +85,7 @@ _PROTOTYPE_SIM_SQL = """,
 # rows x 1024 halfvec is a few MB of text — cheap enough for a dev experiment, and
 # the reason this is opt-in rather than always fetched.
 #
-# Needed by the two-gate association (`semantic_gate_threshold`): the gate is a
+# Needed by semantic association (`semantic_gate_threshold` or `incremental`): it is a
 # cutout↔cutout cosine, which no other part of the pipeline computes.
 _ENRICH_EMBEDDING_SQL = ",\n    c.embedding::text AS embedding"
 
@@ -292,7 +292,7 @@ class EnrichedCandidate:
     neg_sim_applied: float = 0.0
     # The cutout's own embedding, fetched only when a caller asked for it (see
     # `_ENRICH_EMBEDDING_SQL`). None on every default-path candidate, which is why
-    # the two-gate association has to check for it rather than assume it.
+    # semantic association has to check for it rather than assume it.
     embedding: np.ndarray | None = None
 
     @property

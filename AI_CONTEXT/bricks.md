@@ -101,15 +101,18 @@ caller can gate on them itself instead of receiving them diluted into one number
 Not established: that one threshold transfers across **maps**. The LOO above covers
 prompts on one map only.
 
-### Two-gate association (ConceptGraphs) — opt-in experiment
+### Two-gate association — legacy opt-in experiment
 
 `semantic_gate_threshold` (`None` = off = production's rule) makes
 `cluster_detections_leader_canopy` require **both** gates before a detection joins a
-cluster: the 2 m spatial radius *and* a cutout↔cutout cosine against the seed. It is
-ConceptGraphs' conjunctive association rule (geometry AND semantics) in place of
-geometry alone. Needs `load_enriched_candidates(..., with_embeddings=True)`, which the
-service turns on exactly when the threshold is set — the embeddings are a few MB per
-query, so the default path never fetches them.
+cluster: the 2 m spatial radius *and* a cutout↔cutout cosine against the seed. This was
+previously attributed to ConceptGraphs, incorrectly: it is our conjunctive seed rule.
+ConceptGraphs uses an accumulated descriptor, greedy-best assignment, and a sum of
+semantic and geometric scores. The opt-in `incremental` association implements those
+choices, while substituting a distance falloff between single depth-projected points
+for the paper's point-cloud nearest-neighbour ratio. Both modes need
+`load_enriched_candidates(..., with_embeddings=True)` when they use semantics; the
+default geometry-only leader/canopy path still does not fetch embeddings.
 
 Swept on `bbhotel-choisy`, acceptance threshold refit for every row:
 
@@ -157,6 +160,45 @@ at all — it reports which ground truth you picked. See
 `docs/plans/2026-08-11-clustering-radius-and-a-degenerate-metric.md`. Interventions that
 change *ranking* at fixed granularity are measurable here; interventions that change
 granularity are not.
+
+### ConceptGraphs' own rule, measured — and negative
+
+`association="incremental"` (`"leader_canopy"` = the default = production) implements
+what the paper actually does, after we read it and found our attribution wrong: an
+**accumulated descriptor** `f_obj ← (n·f_obj + f_new)/(n+1)` instead of the seed cutout,
+**greedy-best** assignment instead of first-catch, and a **sum** `φ_sem + φ_geo ≥ δ_sim`
+instead of a conjunction. `descriptor` and `combination` exist so the three can be
+attributed separately. Our `φ_geo = max(0, 1 − d/eps)` on the nearest member is a
+substitution: they use a nearest-neighbour ratio between point clouds, and we have one
+point per detection.
+
+Measured on `bbhotel-choisy`, and the answer is no — **read the last column, not the
+first**:
+
+| association | median spread | mAP strict | vs the eps curve at that spread | mAP groupé |
+|---|---|---|---|---|
+| leader/canopy, eps 2 m | 0.374 | 0.672 | — | 0.713 |
+| + seed gate 0.80 | 0.267 | 0.703 | **−0.001** | 0.694 |
+| greedy-best, no semantics | 0.382 | 0.649 | −0.021 | 0.726 |
+| + gate 0.80, seed descriptor | 0.248 | 0.686 | −0.022 | 0.711 |
+| + gate 0.80, running mean | 0.271 | 0.652 | −0.051 | 0.715 |
+| sum, δ_sim 1.2, running mean | 0.263 | 0.690 | −0.015 | 0.715 |
+| sum, δ_sim 1.4, running mean | 0.184 | 0.699 | −0.033 | 0.698 |
+
+Every raw gain in column three is bought by cutting clusters smaller, and `eps` alone
+buys the same cut more cheaply: sweeping it from 3 m to 0.3 m traces a strict-mAP curve
+from 0.630 to 0.792 that **no association variant beats at its own granularity**. The
+accumulated descriptor is the worst of the three ideas here (−0.051 against −0.022 for
+the same rule on the seed), and best-match assignment on its own costs 0.021.
+
+The one thing that is not noise: all the semantic variants gain +0.005 to +0.023 on the
+**grouped** view at matched granularity, where the geometric radius gains nothing. Weak
+evidence, on the ground truth with the single-linkage defect, and not a reason to ship.
+
+Method, and it is the reusable part: compare on the granularity curve, not on the
+metric. `median_spread_m` is the confounder for every intervention that splits or
+merges, and `toolbox/benchmark/association_sweep.py` reports it on every row for that
+reason.
 
 ### Other divergences from production
 

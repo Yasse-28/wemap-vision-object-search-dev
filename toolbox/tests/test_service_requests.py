@@ -24,6 +24,10 @@ _IMAGE_FORM = {
     "min_keyframes_per_cluster": "3",
     "max_observations_per_cluster": "1000",
     "level_strategy": "median",
+    "association": "incremental",
+    "combination": "conjunctive",
+    "association_sim_threshold": "1.25",
+    "descriptor": "seed",
 }
 
 
@@ -36,6 +40,10 @@ def test_form_strings_reach_the_localization_params() -> None:
     assert params.min_keyframes_per_cluster == 3
     assert params.max_observations_per_cluster == 1000
     assert params.level_strategy == "median"
+    assert params.association == "incremental"
+    assert params.combination == "conjunctive"
+    assert params.association_sim_threshold == 1.25
+    assert params.descriptor == "seed"
 
 
 def test_both_branches_share_one_set_of_defaults() -> None:

@@ -967,6 +967,15 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             payload["max_cluster_spread_m"] = args.max_cluster_spread_m
         if args.semantic_gate_threshold is not None:
             payload["semantic_gate_threshold"] = args.semantic_gate_threshold
+        if args.association != "leader_canopy":
+            payload.update(
+                {
+                    "association": args.association,
+                    "combination": args.combination,
+                    "association_sim_threshold": args.association_sim_threshold,
+                    "descriptor": args.descriptor,
+                }
+            )
 
         started = time.perf_counter()
         try:
@@ -1163,6 +1172,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "min_observations_per_cluster": args.min_observations_per_cluster,
         "max_cluster_spread_m": args.max_cluster_spread_m,
         "semantic_gate_threshold": args.semantic_gate_threshold,
+        "association": args.association,
+        "combination": args.combination,
+        "association_sim_threshold": args.association_sim_threshold,
+        "descriptor": args.descriptor,
         "score_field": args.score_field,
         "group_annotation_radius_m": args.group_annotation_radius_m,
         "default_accuracy": args.default_accuracy,
@@ -1403,6 +1416,34 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "this cosine-similar to the cluster seed. Off by default, which is "
             "production's geometry-only rule."
         ),
+    )
+    parser.add_argument(
+        "--association",
+        choices=("leader_canopy", "incremental"),
+        default="leader_canopy",
+        help=(
+            "Detection association algorithm. 'leader_canopy' preserves the current "
+            "production-compatible path; 'incremental' enables greedy best-match "
+            "association and requires cutout embeddings."
+        ),
+    )
+    parser.add_argument(
+        "--combination",
+        choices=("conjunctive", "sum"),
+        default="sum",
+        help="Incremental eligibility rule; ignored by leader_canopy.",
+    )
+    parser.add_argument(
+        "--association-sim-threshold",
+        type=float,
+        default=1.1,
+        help="Minimum semantic-plus-geometric score for incremental sum association.",
+    )
+    parser.add_argument(
+        "--descriptor",
+        choices=("seed", "running_mean"),
+        default="running_mean",
+        help="Incremental cluster descriptor update; ignored by leader_canopy.",
     )
     parser.add_argument(
         "--max-cluster-spread-m",

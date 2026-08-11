@@ -17,7 +17,8 @@ Two things are asserted deliberately rather than incidentally:
 
 from __future__ import annotations
 
-from typing import Any
+import math
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -28,6 +29,7 @@ from toolbox.bricks.localize import (
     UNRESOLVED_LEVEL,
     LocalizationParams,
     build_localize_response,
+    cluster_detections_incremental,
     cluster_detections_leader_canopy,
     compute_cluster_statistics,
     filter_clusters_by_geometry,
@@ -266,6 +268,35 @@ def _cluster_gated(
     )
 
 
+def _cluster_incremental(
+    positions: Any,
+    similarities: Any,
+    embeddings: Any,
+    *,
+    combination: Literal["conjunctive", "sum"] = "conjunctive",
+    semantic_gate_threshold: float | None = None,
+    association_sim_threshold: float = 1.1,
+    descriptor: Literal["seed", "running_mean"] = "running_mean",
+    eps: float = 2.0,
+) -> NDArray[np.int32]:
+    """Build aligned arrays for focused incremental-association cases."""
+    positions_arr = np.asarray(positions, dtype=np.float64)
+    return cluster_detections_incremental(
+        positions_arr,
+        np.ones(len(positions_arr), dtype=bool),
+        np.arange(len(positions_arr), dtype=np.int64),
+        np.asarray(similarities, dtype=np.float64),
+        None,
+        eps_meters=eps,
+        min_keyframes_per_cluster=1,
+        embeddings=np.asarray(embeddings, dtype=np.float32),
+        semantic_gate_threshold=semantic_gate_threshold,
+        combination=combination,
+        association_sim_threshold=association_sim_threshold,
+        descriptor=descriptor,
+    )
+
+
 def test_semantic_gate_splits_two_objects_the_spatial_gate_merges() -> None:
     """The case the whole experiment is about: two objects inside one 2 m ball.
 
@@ -320,6 +351,108 @@ def test_semantic_gate_normalises_before_comparing() -> None:
     labels = _cluster_gated(positions, [1, 2], [0.9, 0.8], embeddings, 0.9)
 
     assert labels.tolist() == [0, 1], "cos = 0.707 must fail a 0.9 gate"
+
+
+# ----------------------------------------------- incremental association
+
+
+def test_incremental_best_match_beats_leader_first_catch() -> None:
+    """The third detection is in both catchments but strictly nearer cluster 1."""
+    positions = [(0.0, 0.0, 0.0), (3.0, 0.0, 0.0), (1.8, 0.0, 0.0)]
+    similarities = [0.9, 0.8, 0.7]
+    embeddings = [[1.0, 0.0]] * 3
+
+    leader = _cluster_gated(
+        positions, [1, 2, 3], similarities, embeddings, threshold=None, eps=2.0
+    )
+    incremental = _cluster_incremental(
+        positions, similarities, embeddings, combination="conjunctive", eps=2.0
+    )
+
+    assert leader.tolist() == [0, 1, 0]
+    assert incremental.tolist() == [0, 1, 1]
+
+
+def test_incremental_running_mean_moves_the_descriptor() -> None:
+    """A 50° cutout clears the moved 15° descriptor, but not the 0° seed."""
+    angles = np.deg2rad([0.0, 30.0, 50.0])
+    embeddings = np.column_stack((np.cos(angles), np.sin(angles)))
+    positions = [(0.0, 0.0, 0.0)] * 3
+    similarities = [0.9, 0.8, 0.7]
+    seed = _cluster_incremental(
+        positions,
+        similarities,
+        embeddings,
+        combination="conjunctive",
+        semantic_gate_threshold=0.7,
+        descriptor="seed",
+    )
+    running_mean = _cluster_incremental(
+        positions,
+        similarities,
+        embeddings,
+        combination="conjunctive",
+        semantic_gate_threshold=0.7,
+        descriptor="running_mean",
+    )
+
+    assert seed.tolist() == [0, 0, 1]
+    assert running_mean.tolist() == [0, 0, 0]
+
+
+def test_incremental_sum_can_trade_semantics_against_geometry() -> None:
+    """A near-perfect cosine misses a strict gate but clears the combined score."""
+    cosine = 0.98
+    embeddings = [[1.0, 0.0], [cosine, math.sqrt(1.0 - cosine**2)]]
+    positions = [(0.0, 0.0, 0.0), (1.6, 0.0, 0.0)]
+    similarities = [0.9, 0.8]
+
+    conjunctive = _cluster_incremental(
+        positions,
+        similarities,
+        embeddings,
+        combination="conjunctive",
+        semantic_gate_threshold=0.99,
+        eps=2.0,
+    )
+    summed = _cluster_incremental(
+        positions,
+        similarities,
+        embeddings,
+        combination="sum",
+        association_sim_threshold=1.1,
+        eps=2.0,
+    )
+
+    assert conjunctive.tolist() == [0, 1]
+    assert summed.tolist() == [0, 0]
+
+
+def test_incremental_sum_rejects_two_mediocre_terms() -> None:
+    labels = _cluster_incremental(
+        [(0.0, 0.0, 0.0), (1.6, 0.0, 0.0)],
+        [0.9, 0.8],
+        [[1.0, 0.0], [0.0, 1.0]],
+        combination="sum",
+        association_sim_threshold=1.1,
+        eps=2.0,
+    )
+
+    assert labels.tolist() == [0, 1]
+
+
+def test_incremental_missing_embeddings_raises() -> None:
+    with pytest.raises(ValueError, match="requires embeddings"):
+        cluster_detections_incremental(
+            np.asarray([(0.0, 0.0, 0.0)], dtype=np.float64),
+            np.ones(1, dtype=bool),
+            np.asarray([1], dtype=np.int64),
+            np.asarray([0.9], dtype=np.float64),
+            None,
+            eps_meters=2.0,
+            min_keyframes_per_cluster=1,
+            embeddings=None,
+        )
 
 
 # ------------------------------------------------------- geometry as a filter
@@ -474,6 +607,26 @@ def test_response_has_the_shape_the_benchmark_parses() -> None:
     assert observation["bbox"] == [0.0, 0.0, 1.0, 1.0]
     assert len(observation["quaternion"]) == 4
     assert 0.0 <= observation["heading"] < 360.0
+
+
+def test_explicit_leader_canopy_reproduces_default_fixture() -> None:
+    candidates = [
+        _candidate(1, (0.0, 0.5, 0.0), keyframe_id=10, similarity=0.9),
+        _candidate(2, (0.3, 0.5, 0.0), keyframe_id=11, similarity=0.85),
+        _candidate(3, (5.0, 0.5, 0.0), keyframe_id=12, similarity=0.8),
+    ]
+    baseline = localize_from_enriched_candidates(
+        candidates,
+        _geo_transform(),
+        LocalizationParams(min_keyframes_per_cluster=1),
+    )
+    explicit = localize_from_enriched_candidates(
+        candidates,
+        _geo_transform(),
+        LocalizationParams(association="leader_canopy", min_keyframes_per_cluster=1),
+    )
+
+    assert explicit == baseline
 
 
 def test_no_candidates_gives_no_localizations() -> None:

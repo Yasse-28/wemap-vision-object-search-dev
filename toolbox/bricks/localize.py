@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -44,11 +45,17 @@ class LocalizationParams:
     # for itself — they exist to be swept, not to be on.
     min_observations_per_cluster: int = 1
     max_cluster_spread_m: float | None = None
-    # Two-gate association (ConceptGraphs): a detection joins a cluster only if it
-    # passes the spatial gate *and* a cutout↔cutout cosine gate against the seed.
-    # `None` = off, which is production's geometry-only rule. Requires candidates
-    # loaded with `with_embeddings=True`; the service arranges that when it is set.
+    # Optional semantic gate on the legacy leader/canopy experiment. This conjunctive
+    # seed rule is ours, not ConceptGraphs' accumulated-descriptor sum rule. `None` =
+    # off, which is production's geometry-only behavior.
     semantic_gate_threshold: float | None = None
+    # Association experiments are opt-in. The default remains the ported production
+    # leader/canopy path above, byte-for-byte; incremental association always uses
+    # embeddings and greedily chooses the highest-scoring live cluster.
+    association: Literal["leader_canopy", "incremental"] = "leader_canopy"
+    combination: Literal["conjunctive", "sum"] = "sum"
+    association_sim_threshold: float = 1.1
+    descriptor: Literal["seed", "running_mean"] = "running_mean"
     # Review-feedback gains. Both zero (the default) means the boosted similarity
     # is not merely equal to the raw one — it is never consulted at all. See
     # `_ranking_similarities`.
@@ -267,9 +274,9 @@ def cluster_detections_leader_canopy(
     """Greedy similarity-seeded spatial clustering (leader / canopy).
 
     With `semantic_gate_threshold` set, a detection joins the seed's cluster only if
-    it also passes a **cutout↔cutout cosine** gate against the seed — the two-gate
-    (geometric AND semantic) association ConceptGraphs uses, in place of production's
-    geometry-only rule. Off by default; `embeddings` must be supplied for it to apply.
+    it also passes a **cutout↔cutout cosine** gate against the seed. This legacy
+    conjunctive experiment is not ConceptGraphs' accumulated-descriptor, greedy-best,
+    sum association. Off by default; `embeddings` must be supplied for it to apply.
     """
     labels = np.full(len(positions_local), -1, dtype=np.int32)
     valid_indices = np.where(valid_mask)[0]
@@ -299,6 +306,163 @@ def cluster_detections_leader_canopy(
             assigned[j] = True
             labels[int(valid_indices[j])] = next_label
         next_label += 1
+
+    return filter_clusters_by_min_keyframes(
+        labels,
+        object_keyframe_ids,
+        min_keyframes=min_keyframes_per_cluster,
+    )
+
+
+def cluster_detections_incremental(
+    positions_local: np.ndarray,
+    valid_mask: np.ndarray,
+    object_keyframe_ids: np.ndarray,
+    query_similarities: np.ndarray,
+    detection_levels: np.ndarray | None,
+    *,
+    eps_meters: float,
+    min_keyframes_per_cluster: int,
+    embeddings: np.ndarray | None,
+    semantic_gate_threshold: float | None = None,
+    combination: Literal["conjunctive", "sum"] = "sum",
+    association_sim_threshold: float = 1.1,
+    descriptor: Literal["seed", "running_mean"] = "running_mean",
+) -> np.ndarray:
+    """Associate detections incrementally with greedy best-match assignment.
+
+    ConceptGraphs greedily selects the best object using the sum of semantic and
+    geometric association terms, and updates an accumulated object descriptor. Its
+    geometric term is based on nearest-neighbour ratios between point clouds. This
+    implementation keeps the sum and greedy-best ideas, but substitutes
+    ``max(0, 1 - d / eps)`` using the nearest of the cluster's individual
+    depth-projected points; that distance falloff is ours, not ConceptGraphs'. The
+    optional ``"conjunctive"`` mode is also ours: it isolates accumulated descriptors
+    and best-match assignment from the paper's sum rule.
+
+    Args:
+        positions_local: Detection positions in a local metric coordinate system.
+        valid_mask: Boolean mask selecting detections eligible for association.
+        object_keyframe_ids: Keyframe identifier for every detection.
+        query_similarities: Raw query similarities used for processing order.
+        detection_levels: Per-detection levels, or ``None`` to disable level vetoes.
+        eps_meters: Distance scale for the geometric association term.
+        min_keyframes_per_cluster: Minimum distinct-keyframe support after clustering.
+        embeddings: One semantic descriptor per detection. Required in this mode.
+        semantic_gate_threshold: Cosine gate used by ``"conjunctive"``. ``None``
+            leaves that mode geometry-gated only, while semantics still scores matches.
+        combination: Eligibility rule: ``"conjunctive"`` or ``"sum"``.
+        association_sim_threshold: Minimum semantic-plus-geometric score in sum mode.
+        descriptor: Keep each cluster's seed descriptor or update a running mean.
+
+    Returns:
+        Cluster labels aligned with the input detections; filtered detections are -1.
+
+    Raises:
+        ValueError: If embeddings are absent or malformed, parameters are invalid, or
+            input arrays do not align.
+    """
+    if embeddings is None:
+        raise ValueError("incremental association requires embeddings")
+    if combination not in {"conjunctive", "sum"}:
+        raise ValueError(f"Unknown association combination: {combination!r}")
+    if descriptor not in {"seed", "running_mean"}:
+        raise ValueError(f"Unknown cluster descriptor: {descriptor!r}")
+
+    positions = np.asarray(positions_local, dtype=np.float64)
+    valid = np.asarray(valid_mask, dtype=bool).reshape(-1)
+    similarities = np.asarray(query_similarities, dtype=np.float64).reshape(-1)
+    matrix = np.asarray(embeddings, dtype=np.float64)
+    detection_count = len(positions)
+    if (
+        len(valid) != detection_count
+        or len(similarities) != detection_count
+        or matrix.ndim != 2
+        or matrix.shape[0] != detection_count
+    ):
+        raise ValueError(
+            "incremental association inputs must have one row per detection"
+        )
+    eps = float(eps_meters)
+    if eps <= 0.0:
+        raise ValueError("eps_meters must be positive")
+
+    labels = np.full(detection_count, -1, dtype=np.int32)
+    valid_indices = np.where(valid)[0]
+    if valid_indices.size == 0:
+        return labels
+
+    valid_positions = positions[valid_indices]
+    valid_embeddings = matrix[valid_indices]
+    norms = np.linalg.norm(valid_embeddings, axis=1, keepdims=True)
+    if np.any(norms <= 0.0):
+        raise ValueError("incremental association requires non-zero embeddings")
+    valid_embeddings = valid_embeddings / norms
+    valid_levels = (
+        None
+        if detection_levels is None
+        else np.asarray(detection_levels).reshape(-1)[valid_indices]
+    )
+
+    cluster_members: list[list[int]] = []
+    cluster_descriptors: list[np.ndarray] = []
+    order = np.argsort(-similarities[valid_indices])
+
+    for detection_local_raw in order:
+        detection_local = int(detection_local_raw)
+        detection_embedding = valid_embeddings[detection_local]
+        best_cluster: int | None = None
+        best_score = -math.inf
+
+        for cluster_id, members in enumerate(cluster_members):
+            # Match the leader/canopy level rule: compatibility is measured against
+            # the cluster seed, while geometry uses every member as specified below.
+            if not _levels_compatible(valid_levels, detection_local, members[0]):
+                continue
+            member_positions = valid_positions[np.asarray(members, dtype=np.intp)]
+            distance = float(
+                np.min(
+                    np.linalg.norm(
+                        member_positions - valid_positions[detection_local], axis=1
+                    )
+                )
+            )
+            cosine = float(
+                np.clip(
+                    detection_embedding @ cluster_descriptors[cluster_id], -1.0, 1.0
+                )
+            )
+            phi_sem = (cosine + 1.0) / 2.0
+            phi_geo = max(0.0, 1.0 - distance / eps)
+            score = phi_sem + phi_geo
+            if combination == "conjunctive":
+                eligible = distance <= eps and (
+                    semantic_gate_threshold is None
+                    or cosine >= float(semantic_gate_threshold)
+                )
+            else:
+                eligible = score >= float(association_sim_threshold)
+            if eligible and score > best_score:
+                best_cluster = cluster_id
+                best_score = score
+
+        if best_cluster is None:
+            cluster_id = len(cluster_members)
+            cluster_members.append([detection_local])
+            cluster_descriptors.append(detection_embedding.copy())
+        else:
+            cluster_id = best_cluster
+            members = cluster_members[cluster_id]
+            if descriptor == "running_mean":
+                updated = (
+                    len(members) * cluster_descriptors[cluster_id] + detection_embedding
+                ) / (len(members) + 1)
+                updated_norm = float(np.linalg.norm(updated))
+                if updated_norm <= 0.0:
+                    raise ValueError("incremental descriptor update produced zero norm")
+                cluster_descriptors[cluster_id] = updated / updated_norm
+            members.append(detection_local)
+        labels[int(valid_indices[detection_local])] = cluster_id
 
     return filter_clusters_by_min_keyframes(
         labels,
@@ -612,17 +776,36 @@ def localize_from_enriched_candidates(
     )
     valid_mask = np.ones(len(selected), dtype=bool)
 
-    cluster_ids = cluster_detections_leader_canopy(
-        positions_eus,
-        valid_mask,
-        keyframe_ids,
-        similarities,
-        detection_levels,
-        eps_meters=params.clustering_eps_m,
-        min_keyframes_per_cluster=params.min_keyframes_per_cluster,
-        embeddings=_embedding_matrix(selected),
-        semantic_gate_threshold=params.semantic_gate_threshold,
-    )
+    embeddings = _embedding_matrix(selected)
+    if params.association == "leader_canopy":
+        cluster_ids = cluster_detections_leader_canopy(
+            positions_eus,
+            valid_mask,
+            keyframe_ids,
+            similarities,
+            detection_levels,
+            eps_meters=params.clustering_eps_m,
+            min_keyframes_per_cluster=params.min_keyframes_per_cluster,
+            embeddings=embeddings,
+            semantic_gate_threshold=params.semantic_gate_threshold,
+        )
+    elif params.association == "incremental":
+        cluster_ids = cluster_detections_incremental(
+            positions_eus,
+            valid_mask,
+            keyframe_ids,
+            similarities,
+            detection_levels,
+            eps_meters=params.clustering_eps_m,
+            min_keyframes_per_cluster=params.min_keyframes_per_cluster,
+            embeddings=embeddings,
+            semantic_gate_threshold=params.semantic_gate_threshold,
+            combination=params.combination,
+            association_sim_threshold=params.association_sim_threshold,
+            descriptor=params.descriptor,
+        )
+    else:
+        raise ValueError(f"Unknown association mode: {params.association!r}")
 
     stats = compute_cluster_statistics(
         positions_eus,
