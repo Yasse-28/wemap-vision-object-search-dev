@@ -122,14 +122,18 @@ Swept on `bbhotel-choisy`, acceptance threshold refit for every row:
 | + gate 0.90 | 0.630 | 0.579 | 0.556 | 0.559 | 0.457 |
 
 The optimum is a flat band at **0.80–0.85**; 0.70 does not bite (any two cutouts of one
-venue already sit near 0.7) and 0.90 over-splits. Per class it moves in **opposite
-directions**, exactly along the axis the geometry investigation identified:
+venue already sit near 0.7) and 0.90 over-splits.
 
-- extended / smooth / over-merged objects gain — `table` 0.400 → 0.702,
-  `lampe` 0.494 → 0.690, `chaise` 0.202 → 0.359 (0.793 at 0.90);
-- compact objects lose, because splitting a correct cluster manufactures duplicates —
-  `extincteur` 0.935 → 0.829, `ascenseur` 0.927 → 0.833, `detecteur de fumée`
-  0.845 → 0.767.
+Per class, read on **AP** — a per-class F1 table read at each column's own globally
+refit threshold is confounded, since that threshold maximises the macro and penalises
+any class whose optimum is elsewhere. At the 0.80 gate, versus no gate:
+
+- extended / over-merged objects gain a lot — `lampe` 0.552 → 0.748, `plante`
+  0.461 → 0.681, `table` 0.246 → 0.375 (0.799 at 0.90), `chaise` 0.138 → 0.221
+  (0.690 at 0.90);
+- compact objects are **near-untouched**, not degraded: `extincteur` 0.999 → 0.996,
+  `cctv` 0.908 → 0.909, and `ascenseur` improves (0.929 → 0.970). The only real losses
+  are `detecteur de fumée` (−0.054) and `TV` (−0.089).
 
 **Why it stays off by default:** the two ground-truth views disagree structurally. The
 strict view (one target per annotation) rewards splitting, the grouped view (single

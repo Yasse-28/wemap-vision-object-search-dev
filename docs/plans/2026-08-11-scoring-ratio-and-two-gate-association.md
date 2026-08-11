@@ -30,6 +30,15 @@ Embeddings chargés seulement quand la porte est active.
 
 ## 2. Le tableau par classe
 
+> **À lire avec le tableau en AP du volet suivant**
+> ([`2026-08-11-embedding-model-comparison.md`](2026-08-11-embedding-model-comparison.md),
+> §4). Le tableau ci-dessous est en F1 **au seuil global réoptimisé de chaque colonne**,
+> et ce seuil est choisi pour maximiser la macro : il pénalise mécaniquement toute classe
+> dont l'optimum est ailleurs. Recalculé en AP, le verdict d'ensemble tient mais une
+> conclusion par classe tombe — « les objets compacts perdent » était en grande partie un
+> artefact. À la porte 0.80 en AP, `extincteur` passe de 0.999 à 0.996, `cctv` de 0.908 à
+> 0.909, et `ascenseur` *gagne* (0.929 → 0.970).
+
 Vérité terrain stricte, seuil d'acceptation réoptimisé par colonne (pondéré 0.776,
 ratio 0.905, g0.80 0.888, g0.85 0.901, g0.90 0.884).
 
