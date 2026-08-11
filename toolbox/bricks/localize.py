@@ -15,7 +15,7 @@ import heapq
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, overload
 
 import numpy as np
 
@@ -1322,15 +1322,52 @@ def _observation_feedback_fields(
     return fields
 
 
+@overload
 def localize_from_enriched_candidates(
     candidates: list[EnrichedCandidate],
     geo_transform: GeoTransform,
     params: LocalizationParams | None = None,
-) -> list[dict]:
-    """Cluster enriched candidates and return livemap localization dicts."""
+    *,
+    return_cluster_labels: Literal[False] = False,
+) -> list[dict]: ...
+
+
+@overload
+def localize_from_enriched_candidates(
+    candidates: list[EnrichedCandidate],
+    geo_transform: GeoTransform,
+    params: LocalizationParams | None = None,
+    *,
+    return_cluster_labels: Literal[True],
+) -> tuple[list[dict], list[EnrichedCandidate], np.ndarray]: ...
+
+
+def localize_from_enriched_candidates(
+    candidates: list[EnrichedCandidate],
+    geo_transform: GeoTransform,
+    params: LocalizationParams | None = None,
+    *,
+    return_cluster_labels: bool = False,
+) -> list[dict] | tuple[list[dict], list[EnrichedCandidate], np.ndarray]:
+    """Cluster enriched candidates and return livemap localization dicts.
+
+    Args:
+        candidates: Enriched detections in retrieval order.
+        geo_transform: Transform from local EUS positions to map coordinates.
+        params: Selection, association, filtering, and ranking parameters.
+        return_cluster_labels: Also return the selected candidates and their aligned
+            association labels. A negative label means that association rejected the
+            detection; such detections do not form a shared cluster.
+
+    Returns:
+        Localization dictionaries. When ``return_cluster_labels`` is true, also
+        returns every selected candidate and its pre-ranking association label.
+    """
     params = params or LocalizationParams()
     selected = select_top_candidates(candidates, params.candidate_count)
     if not selected:
+        if return_cluster_labels:
+            return [], [], np.empty(0, dtype=np.int32)
         return []
 
     positions_eus = np.array([c.eus_xyz for c in selected], dtype=np.float64)
@@ -1563,6 +1600,8 @@ def localize_from_enriched_candidates(
             }
         )
 
+    if return_cluster_labels:
+        return localizations, selected, cluster_ids.copy()
     return localizations
 
 

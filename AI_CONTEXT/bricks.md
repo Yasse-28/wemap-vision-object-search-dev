@@ -339,6 +339,63 @@ bench still cannot say which granularity is right. **No association rule tested 
 moves that frontier; they only move along it.** The thing to fix is the ground truth, not
 the algorithm — see the annotation-grouping defect.
 
+### Scoring the partition instead of the cluster list — the metric that ranks
+
+Every number above had to be read against a granularity curve, because strict and
+grouped mAP move in opposite monotone directions. `association_sweep.py` now also scores
+the **partition of the detections** directly, which is free of that: label each detection
+with the annotation nearest its depth-projected point within `--near-m` (1.0 m), call two
+labelled detections a positive pair when they share an annotation, and measure the
+partition the association induces.
+
+    pair_precision — over-merging costs it       pair_recall — over-splitting costs it
+
+Neither is free, so unlike mAP this has an **interior optimum**:
+
+| configuration | median spread | pair P | pair R | **pair F1** | mAP strict | mAP groupé |
+|---|---|---|---|---|---|---|
+| leader/canopy `eps` 0.55 *(best strict mAP)* | 0.097 | 0.765 | 0.265 | 0.375 | **0.802** | 0.680 |
+| leader/canopy `eps` 3.0 *(best grouped mAP)* | 0.582 | 0.458 | 0.538 | 0.437 | 0.630 | **0.738** |
+| leader/canopy `eps` 2.0 *(today's default)* | 0.374 | 0.531 | 0.512 | 0.480 | 0.672 | 0.713 |
+| leader/canopy `eps` 1.25 | 0.231 | 0.629 | 0.484 | 0.512 | 0.712 | 0.692 |
+| incremental, sum δ 1.35 | 0.205 | 0.609 | 0.507 | 0.512 | 0.702 | 0.702 |
+| **multicut `geo_pivot` 1.5** | 0.270 | 0.596 | 0.533 | **0.523** | 0.702 | 0.710 |
+
+Three things follow.
+
+**The strict-mAP winner is shattering objects.** `eps` 0.55 scores 0.802 there and pair
+recall 0.265: it splits one annotation across many small clusters, and the strict view
+pays it for the fragment that lands closest. It is the worst configuration in the table
+on the metric that asks whether detections of one object ended up together.
+
+**The right granularity is `eps` ≈ 1.25–1.5, not 2.0 and not 0.55.** Stable under the
+proxy radius: the optimum sits in the same band at `--near-m` 0.5, 1.0 and 1.5, and both
+extremes lose in all three. It also lands where strict and grouped mAP **cross**, which
+is an independent check that the pairwise metric is measuring the thing the two views
+disagree about.
+
+**At fixed granularity the semantic rules do gain a little** — multicut `pivot` 1.5
++0.013, incremental sum δ 1.35–1.4 +0.015 to +0.021 against the `eps` curve interpolated
+at their own spread. Small, but it is the only consistently positive column produced
+today, and it qualifies the AUC result above: a cue with AUC 0.529 is nearly worthless on
+its own, yet still breaks ties usefully once geometry has narrowed the candidates to near
+neighbours. The same rules measured on strict mAP looked negative, because there they
+were only moving granularity.
+
+The control ablation says the gain is semantic and not the linkage: incremental with
+best-match assignment and nearest-member distance but **no** semantic term scores −0.003
+at `eps` 1.5, i.e. nothing.
+
+**Recommended, not applied:** `clustering_eps_m` 2.0 → 1.5 improves pair F1 (0.480 →
+0.510), strict mAP (0.672 → 0.702) and macro F1 (0.632 → 0.654, LOO 0.611 → 0.640), and
+costs 0.011 of grouped mAP. It is a production default, so it belongs in
+`wemap-vision-backend` first, and the grouped ground truth should be repaired before
+anyone leans on the last digit.
+
+Caveat on the proxy: only a few hundred detections per prompt fall within `--near-m` of
+an annotation, so this metric sees the well-covered objects, not the missed ones. It
+ranks associations; it does not measure recall of the map.
+
 ### Other divergences from production
 
 `localize.py` also differs in four import lines, one dev-only opt-in, and one bug fix.

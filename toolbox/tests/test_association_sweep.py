@@ -5,12 +5,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from toolbox.benchmark import association_sweep
 from toolbox.benchmark.association_sweep import (
     _params_from_grid_entry,
     fetch_prompt_candidates,
+    nearest_annotation_labels,
+    partition_metrics,
     shared_threshold_metrics,
 )
 from toolbox.benchmark.object_search_http_benchmark import Annotation, Prediction
@@ -122,3 +125,54 @@ def test_unknown_grid_parameter_fails_loudly() -> None:
         _params_from_grid_entry(
             {"label": "typo", "unknown_parameter": 3}, LocalizationParams()
         )
+
+
+def test_partition_metrics_penalize_over_merging_and_over_splitting() -> None:
+    annotation_labels = np.asarray([0, 0, 0, 1, 1, 1], dtype=np.int64)
+
+    over_merged = partition_metrics(
+        np.asarray([0, 0, 0, 0, 0, 0], dtype=np.int32), annotation_labels
+    )
+    over_split = partition_metrics(
+        np.asarray([0, 0, 1, 2, 2, 3], dtype=np.int32), annotation_labels
+    )
+
+    assert over_merged.pair_precision == pytest.approx(2.0 / 5.0)
+    assert over_merged.pair_recall == pytest.approx(1.0)
+    assert over_split.pair_precision == pytest.approx(1.0)
+    assert over_split.pair_recall == pytest.approx(1.0 / 3.0)
+    assert over_merged.pair_f1 == pytest.approx(4.0 / 7.0)
+    assert over_split.pair_f1 == pytest.approx(0.5)
+
+
+def test_partition_metrics_exclude_unlabelled_detections() -> None:
+    metrics = partition_metrics(
+        np.asarray([0, 0, 0, 1], dtype=np.int32),
+        np.asarray([0, 0, -1, -1], dtype=np.int64),
+    )
+
+    assert metrics.labelled_detections == 2
+    assert metrics.pair_precision == pytest.approx(1.0)
+    assert metrics.pair_recall == pytest.approx(1.0)
+    assert metrics.rand_index == pytest.approx(1.0)
+
+
+def test_no_nearby_annotations_yields_zero_pair_metrics() -> None:
+    detections = [
+        cast(EnrichedCandidate, SimpleNamespace(lat=48.0, lng=2.0)),
+        cast(EnrichedCandidate, SimpleNamespace(lat=48.0, lng=2.0001)),
+    ]
+    distant = Annotation(
+        id="far",
+        class_name="lamp",
+        prompt="lamp",
+        lat=49.0,
+        lng=2.0,
+        accuracy_m=5.0,
+    )
+
+    annotation_labels = nearest_annotation_labels(detections, [distant], near_m=1.0)
+    metrics = partition_metrics(np.asarray([0, 0], dtype=np.int32), annotation_labels)
+
+    assert annotation_labels.tolist() == [-1, -1]
+    assert metrics == association_sweep.PartitionMetrics(0.0, 0.0, 0.0, 0.0, 0)

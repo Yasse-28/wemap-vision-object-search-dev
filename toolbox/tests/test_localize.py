@@ -911,6 +911,45 @@ def test_explicit_leader_canopy_reproduces_default_fixture() -> None:
     assert explicit == baseline
 
 
+def test_returned_cluster_labels_match_localization_membership() -> None:
+    candidates = [
+        _candidate(1, (0.0, 0.5, 0.0), keyframe_id=10, similarity=0.9),
+        _candidate(2, (0.3, 0.5, 0.0), keyframe_id=11, similarity=0.85),
+        _candidate(3, (5.0, 0.5, 0.0), keyframe_id=12, similarity=0.8),
+    ]
+    params = LocalizationParams(
+        min_keyframes_per_cluster=1,
+        max_observations_per_cluster=len(candidates),
+        num_results=len(candidates),
+    )
+
+    localizations, selected, cluster_labels = localize_from_enriched_candidates(
+        candidates,
+        _geo_transform(),
+        params,
+        return_cluster_labels=True,
+    )
+    assert localizations == localize_from_enriched_candidates(
+        candidates, _geo_transform(), params
+    )
+    response_cluster_by_detection = {
+        int(observation["object_idx"]): response_cluster
+        for response_cluster, localization in enumerate(localizations)
+        for observation in localization["observations"]
+    }
+
+    assert [candidate.id for candidate in selected] == [1, 2, 3]
+    for left_index, left in enumerate(selected):
+        for right_index, right in enumerate(selected):
+            same_returned_cluster = (
+                response_cluster_by_detection[left.id]
+                == response_cluster_by_detection[right.id]
+            )
+            assert same_returned_cluster == (
+                int(cluster_labels[left_index]) == int(cluster_labels[right_index])
+            )
+
+
 def test_no_candidates_gives_no_localizations() -> None:
     response = build_localize_response([], _geo_transform())
     assert response["localizations"] == []

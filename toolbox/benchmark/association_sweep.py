@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, TypeAlias
 
+import numpy as np
+
 from toolbox.benchmark.object_search_http_benchmark import (
     Annotation,
     AnnotationGroup,
@@ -22,6 +24,7 @@ from toolbox.benchmark.object_search_http_benchmark import (
     evaluate_prompt,
     evaluate_prompt_grouped,
     group_annotations,
+    haversine_m,
     load_annotations,
     parse_predictions,
     post_json,
@@ -44,6 +47,7 @@ DEFAULT_TIMEOUT_S = 60.0
 VERIFY_TOLERANCE = 1e-9
 CSV_FILENAME = "association_sweep.csv"
 JSON_FILENAME = "association_sweep.json"
+DEFAULT_NEAR_M = 1.0
 
 PromptEvaluator: TypeAlias = Callable[[str, list[Prediction], float], float]
 
@@ -81,12 +85,133 @@ class ConfigMetrics:
     macro_f1_grouped: float
     best_threshold_grouped: float
     loo_macro_f1_grouped: float
+    pair_precision: float
+    pair_recall: float
+    pair_f1: float
+    rand_index: float
+    labelled_detections: float
     total_clusters: int
     median_observation_count: float
     median_spread_m: float
     median_clusters_per_prompt: float
     per_prompt: dict[str, PromptDetail]
     elapsed_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class PartitionMetrics:
+    """Pairwise agreement metrics for one prompt's labelled detections."""
+
+    pair_precision: float
+    pair_recall: float
+    pair_f1: float
+    rand_index: float
+    labelled_detections: int
+
+
+def nearest_annotation_labels(
+    detections: Sequence[EnrichedCandidate],
+    annotations: Sequence[Annotation],
+    near_m: float,
+) -> np.ndarray:
+    """Label detections by their nearest in-range annotation.
+
+    Args:
+        detections: Selected detections whose depth-projected coordinates are used.
+        annotations: Prompt annotations eligible to label the detections.
+        near_m: Maximum detection-to-annotation distance in metres.
+
+    Returns:
+        Annotation indices aligned with ``detections``; ``-1`` means unlabelled.
+    """
+    labels = np.full(len(detections), -1, dtype=np.int64)
+    for detection_index, detection in enumerate(detections):
+        distances = np.asarray(
+            [
+                haversine_m(
+                    detection.lat, detection.lng, annotation.lat, annotation.lng
+                )
+                for annotation in annotations
+            ],
+            dtype=np.float64,
+        )
+        if distances.size == 0:
+            continue
+        nearest_index = int(np.argmin(distances))
+        if float(distances[nearest_index]) <= near_m:
+            labels[detection_index] = nearest_index
+    return labels
+
+
+def partition_metrics(
+    cluster_labels: np.ndarray, annotation_labels: np.ndarray
+) -> PartitionMetrics:
+    """Score an induced detection partition using a contingency table.
+
+    Unlabelled detections (negative annotation labels) are excluded. Negative cluster
+    labels are treated as distinct singleton clusters, rather than one shared noise
+    cluster. Metrics with no applicable denominator are zero.
+
+    Args:
+        cluster_labels: Association labels aligned with the detections.
+        annotation_labels: Nearest-annotation labels, negative when out of range.
+
+    Returns:
+        Pair precision, recall, F1, Rand index, and proxy coverage count.
+
+    Raises:
+        ValueError: If the two label vectors have different shapes.
+    """
+    clusters = np.asarray(cluster_labels, dtype=np.int64)
+    annotations = np.asarray(annotation_labels, dtype=np.int64)
+    if clusters.shape != annotations.shape:
+        raise ValueError("Cluster and annotation labels must have the same shape")
+
+    labelled_mask = annotations >= 0
+    clusters = clusters[labelled_mask].copy()
+    annotations = annotations[labelled_mask]
+    labelled_count = int(annotations.size)
+    negative_indices = np.flatnonzero(clusters < 0)
+    if negative_indices.size:
+        next_label = int(np.max(clusters, initial=-1)) + 1
+        clusters[negative_indices] = next_label + np.arange(negative_indices.size)
+
+    _, cluster_inverse = np.unique(clusters, return_inverse=True)
+    _, annotation_inverse = np.unique(annotations, return_inverse=True)
+    contingency = np.zeros(
+        (
+            int(cluster_inverse.max(initial=-1)) + 1,
+            int(annotation_inverse.max(initial=-1)) + 1,
+        ),
+        dtype=np.int64,
+    )
+    np.add.at(contingency, (cluster_inverse, annotation_inverse), 1)
+
+    def choose_two(counts: np.ndarray) -> int:
+        """Sum C(n, 2) over a vector or matrix of counts."""
+        return int(np.sum(counts * (counts - 1) // 2, dtype=np.int64))
+
+    true_positive = choose_two(contingency)
+    predicted_positive = choose_two(np.sum(contingency, axis=1))
+    actual_positive = choose_two(np.sum(contingency, axis=0))
+    total_pairs = labelled_count * (labelled_count - 1) // 2
+    false_positive = predicted_positive - true_positive
+    false_negative = actual_positive - true_positive
+    true_negative = total_pairs - true_positive - false_positive - false_negative
+
+    precision = true_positive / predicted_positive if predicted_positive else 0.0
+    recall = true_positive / actual_positive if actual_positive else 0.0
+    pair_f1 = (
+        2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    )
+    rand_index = (true_positive + true_negative) / total_pairs if total_pairs else 0.0
+    return PartitionMetrics(
+        pair_precision=precision,
+        pair_recall=recall,
+        pair_f1=pair_f1,
+        rand_index=rand_index,
+        labelled_detections=labelled_count,
+    )
 
 
 def _prompt_annotations(
@@ -356,6 +481,7 @@ def evaluate_config(
     *,
     group_radius_m: float,
     num_results: int,
+    near_m: float = DEFAULT_NEAR_M,
 ) -> ConfigMetrics:
     """Evaluate one in-process localization configuration on all prompts.
 
@@ -366,6 +492,7 @@ def evaluate_config(
         params: Association, filtering, and ranking parameters.
         group_radius_m: Radius for the grouped ground-truth view.
         num_results: Maximum returned clusters, applied consistently to the params.
+        near_m: Maximum distance for assigning an annotation proxy to a detection.
 
     Returns:
         Strict/grouped metrics, shared-threshold estimates, and granularity controls.
@@ -382,11 +509,19 @@ def evaluate_config(
     clusters_per_prompt: list[int] = []
     strict_aps: list[float] = []
     grouped_aps: list[float] = []
+    partitions: list[PartitionMetrics] = []
 
     for prompt, prompt_annotations in annotations_by_prompt.items():
-        localizations = localize_from_enriched_candidates(
-            candidates_by_prompt[prompt], geo_transform, effective_params
+        localizations, selected, cluster_labels = localize_from_enriched_candidates(
+            candidates_by_prompt[prompt],
+            geo_transform,
+            effective_params,
+            return_cluster_labels=True,
         )
+        annotation_labels = nearest_annotation_labels(
+            selected, prompt_annotations, near_m
+        )
+        partitions.append(partition_metrics(cluster_labels, annotation_labels))
         predictions = parse_predictions({"localizations": localizations}, "match_score")
         predictions_by_prompt[prompt] = predictions
         groups = group_annotations(prompt_annotations, group_radius_m)
@@ -431,6 +566,29 @@ def evaluate_config(
         macro_f1_grouped=grouped_metrics.macro_f1,
         best_threshold_grouped=grouped_metrics.threshold,
         loo_macro_f1_grouped=grouped_metrics.loo_macro_f1,
+        pair_precision=(
+            statistics.fmean(item.pair_precision for item in partitions)
+            if partitions
+            else 0.0
+        ),
+        pair_recall=(
+            statistics.fmean(item.pair_recall for item in partitions)
+            if partitions
+            else 0.0
+        ),
+        pair_f1=(
+            statistics.fmean(item.pair_f1 for item in partitions) if partitions else 0.0
+        ),
+        rand_index=(
+            statistics.fmean(item.rand_index for item in partitions)
+            if partitions
+            else 0.0
+        ),
+        labelled_detections=(
+            statistics.fmean(item.labelled_detections for item in partitions)
+            if partitions
+            else 0.0
+        ),
         total_clusters=sum(clusters_per_prompt),
         median_observation_count=(
             float(statistics.median(observation_counts)) if observation_counts else 0.0
@@ -488,6 +646,7 @@ def sweep(
     num_results: int,
     out_dir: str | Path,
     base_params: LocalizationParams | None = None,
+    near_m: float = DEFAULT_NEAR_M,
 ) -> list[ConfigMetrics]:
     """Evaluate a parameter grid and write one summary CSV plus detailed JSON.
 
@@ -500,6 +659,7 @@ def sweep(
         num_results: Default result cap for every configuration.
         out_dir: Output directory for CSV and JSON artifacts.
         base_params: Base parameters before grid overrides.
+        near_m: Maximum distance for assigning an annotation proxy to a detection.
 
     Returns:
         Metrics in grid order.
@@ -516,6 +676,7 @@ def sweep(
             params,
             group_radius_m=group_radius_m,
             num_results=int(entry.get("num_results", num_results)),
+            near_m=near_m,
         )
         elapsed = time.perf_counter() - started
         metrics = replace(metrics, label=label, elapsed_s=elapsed)
@@ -640,6 +801,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--num-results", type=int, default=400)
     parser.add_argument("--min-similarity", type=float, default=0.15)
     parser.add_argument("--group-annotation-radius-m", type=float, default=2.0)
+    parser.add_argument("--near-m", type=float, default=DEFAULT_NEAR_M)
     parser.add_argument("--default-accuracy", type=float, default=DEFAULT_ACCURACY_M)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--refresh", action="store_true")
@@ -651,6 +813,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run candidate fetching, optional verification, and the requested sweep."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.near_m <= 0.0:
+        raise ValueError("--near-m must be positive")
     map_path = args.map_path.expanduser().resolve()
     annotations = load_annotations(
         map_path / "benchmark" / "annotations.geojson", args.default_accuracy
@@ -688,6 +852,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_results=args.num_results,
         out_dir=args.out_dir,
         base_params=base_params,
+        near_m=args.near_m,
     )
     return 0
 
