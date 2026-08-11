@@ -200,6 +200,75 @@ metric. `median_spread_m` is the confounder for every intervention that splits o
 merges, and `toolbox/benchmark/association_sweep.py` reports it on every row for that
 reason.
 
+### C-DOG ray association — opt-in experiment
+
+`association="cdog"` builds a sparse graph between detections from different
+keyframes. Candidate pairs are generated from depth-projected points within
+`cdog_pair_radius_m` (5 m by default), but an edge is decided from the normalized EUS
+rays: metric ray-to-ray distance at a positive closest approach within
+`cdog_range_m`, the usual level veto, and an optional cutout-cosine gate. This is a
+transfer, not a literal reproduction: C-DOG uses 2D epipolar distance in pixels; this
+implementation substitutes 3D metric ray distance. C-DOG also assumes one detection
+per object per view, while our class-agnostic proposals can contain several boxes for
+one object in one keyframe.
+
+Edges are filtered by normalized open-neighbourhood overlap (`cdog_delta`) before
+connected components are taken. This is the anti-chaining step; components are not
+taken on the raw graph. Because the pair-radius shortcut reads the projected points,
+association is not wholly depth-independent even though its edge criterion is.
+
+`centroid_from="rays"` is deliberately independent of `association`: it reports the
+least-squares intersection of each cluster's member rays, falling back to the existing
+depth centroid for ill-conditioned near-parallel systems and logging the fallback
+count. `spread_m`, levels, keyframe support, and all other statistics keep their depth
+definitions. Judge association sweeps against the strict-mAP/`median_spread_m`
+reference curve, not by raw mAP alone; ray centroiding can be evaluated separately
+because it moves positions without changing cluster membership.
+
+### C-DOG's ray consistency — negative, and we know why
+
+`association="cdog"` builds edges from **ray-to-ray distance** instead of point
+proximity (a detection's ray is `origin = keyframe position`, `direction =
+normalize(depth point − origin)`, so normalising divides the depth back out), then
+filters them by δ-neighbourhood overlap instead of taking connected components. It is
+the one association here that does not consume the noisy depth *magnitude*.
+
+Measured against the eps curve at equal spread: **−0.061** at δ = 0 (edges only) and
+worse with the overlap filter on (−0.13 to −0.175). δ > 0 hurts because our
+neighbourhoods are open sets, so a two-detection object has overlap 0 and is always cut.
+
+The diagnostic that explains it, and it outranks the sweep. Taking as proxy ground truth
+"two detections within 1 m of the *same* annotation" versus "of two different annotations
+of the same class", over 16 740 same-object and 719 375 different-object pairs on six
+prompts:
+
+| pairwise cue | AUC | unusable same-object pairs |
+|---|---|---|
+| distance between depth-projected points | **0.879** | 0 % |
+| ray-to-ray distance at closest approach | 0.768 | **21.9 %** (closest approach behind a camera) |
+| cutout↔cutout cosine | **0.529** | 0 % |
+
+Two conclusions, both load-bearing for anything that comes next:
+
+- **the ray criterion is worse than the depth point it was meant to replace.** Our
+  keyframes are 1.5 m apart, so pairs observing one object often have a tiny baseline;
+  the common perpendicular is then ill-conditioned and its parameters go negative. The
+  depth magnitude is noisy, but short-baseline ray geometry is noisier;
+- **the cutout cosine is a coin flip for association.** 0.529 within one prompt's
+  candidate set — which is the only setting association ever runs in. Two different
+  chairs look exactly as alike as two views of one chair. That single number explains
+  the semantic gate, ConceptGraphs' accumulated descriptor, and the sum rule all coming
+  back neutral-to-negative: they were adding a feature that carries no information about
+  the question being asked.
+
+What survives: `centroid_from="rays"` (default `"depth"`, unchanged). Least-squares
+triangulation of a cluster's member rays is well-conditioned even when individual pairs
+are not, and it is worth **+0.010 of strict mAP at eps 2 m** — small, but the only
+intervention measured today that moves the metric *without* moving the granularity,
+because it changes where a cluster is, not which detections are in it. It fades as `eps`
+tightens (+0.001 at 1 m, −0.002 at 0.5 m), which is consistent: it helps most where
+clusters are largest.
+
 ### Other divergences from production
 
 `localize.py` also differs in four import lines, one dev-only opt-in, and one bug fix.

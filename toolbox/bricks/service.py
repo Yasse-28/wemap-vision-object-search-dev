@@ -52,7 +52,7 @@ from typing import Literal
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from toolbox.bricks import db
 from toolbox.bricks.candidates import (
@@ -293,10 +293,16 @@ class LocalizeParams(BaseModel):
     # Optional seed-cosine gate for the legacy leader/canopy mode, or for the
     # incremental conjunctive experiment. Bounded to a cosine's range.
     semantic_gate_threshold: float | None = Field(default=None, ge=-1.0, le=1.0)
-    association: Literal["leader_canopy", "incremental"] = "leader_canopy"
+    association: Literal["leader_canopy", "incremental", "cdog"] = "leader_canopy"
     combination: Literal["conjunctive", "sum"] = "sum"
     association_sim_threshold: float = Field(default=1.1, ge=0.0, le=2.0)
     descriptor: Literal["seed", "running_mean"] = "running_mean"
+    cdog_epipolar_m: float = Field(default=0.25, ge=0.0)
+    cdog_pair_radius_m: float = Field(default=5.0, ge=0.0)
+    cdog_range_m: tuple[float, float] = (0.3, 30.0)
+    cdog_semantic_threshold: float | None = Field(default=None, ge=-1.0, le=1.0)
+    cdog_delta: float = Field(default=0.5, ge=0.0, le=1.0)
+    centroid_from: Literal["depth", "rays"] = "depth"
     # Accepted and ignored: the benchmark always sends it, the router that would
     # have consumed it was a stub and went to legacy/.
     search_type: str | None = None
@@ -315,6 +321,24 @@ class LocalizeParams(BaseModel):
     # `localize._cluster_level_from_detections`.
     level_strategy: Literal["seed", "median"] = "seed"
 
+    @field_validator("cdog_range_m", mode="before")
+    @classmethod
+    def parse_cdog_range(cls, value: object) -> object:
+        """Accept JSON arrays and the comma-separated form representation."""
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip().strip("[]()")
+        return tuple(part.strip() for part in stripped.split(","))
+
+    @field_validator("cdog_range_m")
+    @classmethod
+    def validate_cdog_range(cls, value: tuple[float, float]) -> tuple[float, float]:
+        """Require an ordered non-negative closest-approach interval."""
+        range_min, range_max = value
+        if range_min < 0.0 or range_max < range_min:
+            raise ValueError("cdog_range_m must be an ordered non-negative pair")
+        return value
+
     def to_params(self) -> LocalizationParams:
         return LocalizationParams(
             candidate_count=self.candidate_count,
@@ -330,6 +354,12 @@ class LocalizeParams(BaseModel):
             combination=self.combination,
             association_sim_threshold=self.association_sim_threshold,
             descriptor=self.descriptor,
+            cdog_epipolar_m=self.cdog_epipolar_m,
+            cdog_pair_radius_m=self.cdog_pair_radius_m,
+            cdog_range_m=self.cdog_range_m,
+            cdog_semantic_threshold=self.cdog_semantic_threshold,
+            cdog_delta=self.cdog_delta,
+            centroid_from=self.centroid_from,
             feedback_alpha=self.feedback_alpha,
             feedback_beta=self.feedback_beta,
             feedback_normalization=self.feedback_normalization,
@@ -543,6 +573,10 @@ def create_app() -> FastAPI:
                 with_embeddings=(
                     params.association == "incremental"
                     or params.semantic_gate_threshold is not None
+                    or (
+                        params.association == "cdog"
+                        and params.cdog_semantic_threshold is not None
+                    )
                 ),
             )
         response = build_localize_response(

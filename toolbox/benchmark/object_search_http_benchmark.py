@@ -968,14 +968,28 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         if args.semantic_gate_threshold is not None:
             payload["semantic_gate_threshold"] = args.semantic_gate_threshold
         if args.association != "leader_canopy":
+            payload["association"] = args.association
+        if args.association == "incremental":
             payload.update(
                 {
-                    "association": args.association,
                     "combination": args.combination,
                     "association_sim_threshold": args.association_sim_threshold,
                     "descriptor": args.descriptor,
                 }
             )
+        if args.association == "cdog":
+            payload.update(
+                {
+                    "cdog_epipolar_m": args.cdog_epipolar_m,
+                    "cdog_pair_radius_m": args.cdog_pair_radius_m,
+                    "cdog_range_m": args.cdog_range_m,
+                    "cdog_delta": args.cdog_delta,
+                }
+            )
+            if args.cdog_semantic_threshold is not None:
+                payload["cdog_semantic_threshold"] = args.cdog_semantic_threshold
+        if args.centroid_from != "depth":
+            payload["centroid_from"] = args.centroid_from
 
         started = time.perf_counter()
         try:
@@ -1176,6 +1190,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "combination": args.combination,
         "association_sim_threshold": args.association_sim_threshold,
         "descriptor": args.descriptor,
+        "cdog_epipolar_m": args.cdog_epipolar_m,
+        "cdog_pair_radius_m": args.cdog_pair_radius_m,
+        "cdog_range_m": args.cdog_range_m,
+        "cdog_semantic_threshold": args.cdog_semantic_threshold,
+        "cdog_delta": args.cdog_delta,
+        "centroid_from": args.centroid_from,
         "score_field": args.score_field,
         "group_annotation_radius_m": args.group_annotation_radius_m,
         "default_accuracy": args.default_accuracy,
@@ -1419,12 +1439,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--association",
-        choices=("leader_canopy", "incremental"),
+        choices=("leader_canopy", "incremental", "cdog"),
         default="leader_canopy",
         help=(
             "Detection association algorithm. 'leader_canopy' preserves the current "
             "production-compatible path; 'incremental' enables greedy best-match "
-            "association and requires cutout embeddings."
+            "association and requires cutout embeddings; 'cdog' builds a ray-"
+            "consistency graph and filters its edges by neighbourhood overlap."
         ),
     )
     parser.add_argument(
@@ -1444,6 +1465,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         choices=("seed", "running_mean"),
         default="running_mean",
         help="Incremental cluster descriptor update; ignored by leader_canopy.",
+    )
+    parser.add_argument("--cdog-epipolar-m", type=float, default=0.25)
+    parser.add_argument("--cdog-pair-radius-m", type=float, default=5.0)
+    parser.add_argument(
+        "--cdog-range-m",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=(0.3, 30.0),
+        help="Inclusive closest-approach range along both C-DOG rays, in metres.",
+    )
+    parser.add_argument(
+        "--cdog-semantic-threshold",
+        type=float,
+        default=None,
+        help="Optional cutout cosine gate for C-DOG edges.",
+    )
+    parser.add_argument("--cdog-delta", type=float, default=0.5)
+    parser.add_argument(
+        "--centroid-from",
+        choices=("depth", "rays"),
+        default="depth",
+        help="Report depth centroids or least-squares intersections of member rays.",
     )
     parser.add_argument(
         "--max-cluster-spread-m",

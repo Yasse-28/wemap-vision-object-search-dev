@@ -28,7 +28,9 @@ from toolbox.bricks.candidates import EnrichedCandidate
 from toolbox.bricks.localize import (
     UNRESOLVED_LEVEL,
     LocalizationParams,
+    _filter_edges_by_delta_overlap,
     build_localize_response,
+    cluster_detections_cdog,
     cluster_detections_incremental,
     cluster_detections_leader_canopy,
     compute_cluster_statistics,
@@ -36,6 +38,7 @@ from toolbox.bricks.localize import (
     filter_clusters_by_min_keyframes,
     localize_from_enriched_candidates,
     rank_localization_clusters,
+    ray_closest_approach,
 )
 from toolbox.bricks.vendored.geo_transform import Coordinates, GeoTransform, Level, Pose
 from toolbox.bricks.vendored.maths import quaternion, vector3
@@ -170,6 +173,137 @@ def test_filter_clusters_by_min_keyframes_is_a_noop_below_two() -> None:
 def test_empty_input_returns_no_labels() -> None:
     labels = _cluster(np.empty((0, 3)), [], [], eps=2.0)
     assert labels.shape == (0,)
+
+
+def _cdog_cluster(
+    positions: list[list[float]],
+    origins: list[list[float]],
+    directions: list[list[float]],
+    *,
+    epipolar_m: float = 0.25,
+    delta: float = 0.0,
+) -> NDArray[np.int32]:
+    """Run C-DOG on small explicit ray fixtures without semantic gating."""
+    count = len(positions)
+    return cluster_detections_cdog(
+        np.asarray(positions, dtype=np.float64),
+        np.asarray(origins, dtype=np.float64),
+        np.asarray(directions, dtype=np.float64),
+        np.ones(count, dtype=bool),
+        np.arange(count, dtype=np.int64),
+        None,
+        epipolar_m=epipolar_m,
+        pair_radius_m=5.0,
+        range_m=(0.3, 30.0),
+        delta=delta,
+        min_keyframes_per_cluster=1,
+    )
+
+
+def test_cdog_crossing_rays_ignore_wrong_projected_depths() -> None:
+    """Normalizing point-minus-origin removes 0.5x/2x depth scale errors."""
+    target = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    origins = np.array([[0.0, 0.0, 0.0], [1.0, -1.0, 0.0]])
+    positions = np.array([[0.5, 0.0, 0.0], [1.0, 1.0, 0.0]])
+    vectors = positions - origins
+    directions = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
+
+    distance, t_i, t_j = ray_closest_approach(
+        origins[0], directions[0], origins[1], directions[1]
+    )
+    assert distance == pytest.approx(0.0, abs=1e-12)
+    assert t_i == pytest.approx(1.0)
+    assert t_j == pytest.approx(1.0)
+
+    labels = _cdog_cluster(
+        positions.tolist(), origins.tolist(), directions.tolist(), delta=0.0
+    )
+    assert labels.tolist() == [0, 0]
+
+    stats = compute_cluster_statistics(
+        positions,
+        labels,
+        np.ones(2, dtype=np.float64),
+        None,
+        np.array([0, 1], dtype=np.int64),
+        _geo_transform(),
+        centroid_from="rays",
+        ray_origins=origins,
+        ray_directions=directions,
+    )
+    np.testing.assert_allclose(stats.centroids_eus[0], target, atol=1e-6)
+
+
+def test_cdog_rejects_a_crossing_behind_one_camera() -> None:
+    labels = _cdog_cluster(
+        positions=[[1.0, 0.0, 0.0], [1.0, 2.0, 0.0]],
+        origins=[[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+        directions=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+    )
+    assert labels[0] != labels[1]
+
+
+def test_cdog_metric_ray_distance_is_sweepable() -> None:
+    positions = [[1.0, 0.0, 0.0], [1.0, 0.0, 1.0]]
+    origins = [[0.0, 0.0, 0.0], [1.0, -1.0, 1.0]]
+    directions = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+    strict = _cdog_cluster(positions, origins, directions, epipolar_m=0.25, delta=0.0)
+    permissive = _cdog_cluster(
+        positions, origins, directions, epipolar_m=1.5, delta=0.0
+    )
+    assert strict[0] != strict[1]
+    assert permissive[0] == permissive[1]
+
+
+def test_cdog_delta_overlap_cuts_a_dumbbell_bridge() -> None:
+    left = set(range(4))
+    right = set(range(4, 8))
+    adjacency = {
+        node: (left - {node}) if node in left else (right - {node}) for node in range(8)
+    }
+    adjacency[3].add(4)
+    adjacency[4].add(3)
+
+    cut = _filter_edges_by_delta_overlap(adjacency, 0.5)
+    joined = _filter_edges_by_delta_overlap(adjacency, 0.0)
+    assert 4 not in cut[3]
+    assert 4 in joined[3]
+
+    def component_count(graph: dict[int, set[int]]) -> int:
+        remaining = set(graph)
+        count = 0
+        while remaining:
+            count += 1
+            stack = [remaining.pop()]
+            while stack:
+                for neighbor in graph[stack.pop()] & remaining:
+                    remaining.remove(neighbor)
+                    stack.append(neighbor)
+        return count
+
+    assert component_count(cut) == 2
+    assert component_count(joined) == 1
+
+
+def test_ray_centroid_parallel_rays_fall_back_to_depth(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    positions = np.array([[2.0, 0.0, 0.0], [4.0, 1.0, 0.0]])
+    similarities = np.array([0.75, 0.25])
+    stats = compute_cluster_statistics(
+        positions,
+        np.zeros(2, dtype=np.int32),
+        similarities,
+        None,
+        np.array([0, 1], dtype=np.int64),
+        _geo_transform(),
+        centroid_from="rays",
+        ray_origins=np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        ray_directions=np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+    )
+    expected = np.average(positions, axis=0, weights=similarities)
+    np.testing.assert_allclose(stats.centroids_eus[0], expected)
+    assert "fell back to the depth centroid for 1/1 cluster(s)" in caplog.text
 
 
 # ---------------------------------------------------------------------- ranking
@@ -546,9 +680,10 @@ def _candidate(
     keyframe_id: int,
     similarity: float,
     level: int | None = 0,
+    keyframe_origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> EnrichedCandidate:
     pose = Pose.from_position_orientation(
-        vector3.from_xyz(0.0, 0.0, 0.0), quaternion.identity()
+        vector3.from_xyz(*keyframe_origin), quaternion.identity()
     )
     return EnrichedCandidate(
         id=candidate_id,
@@ -607,6 +742,45 @@ def test_response_has_the_shape_the_benchmark_parses() -> None:
     assert observation["bbox"] == [0.0, 0.0, 1.0, 1.0]
     assert len(observation["quaternion"]) == 4
     assert 0.0 <= observation["heading"] < 360.0
+
+
+def test_cdog_and_ray_centroid_are_wired_from_candidate_poses() -> None:
+    target = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    candidates = [
+        _candidate(
+            1,
+            (0.5, 0.0, 0.0),
+            keyframe_id=10,
+            similarity=0.9,
+            keyframe_origin=(0.0, 0.0, 0.0),
+        ),
+        _candidate(
+            2,
+            (1.0, 1.0, 0.0),
+            keyframe_id=11,
+            similarity=0.85,
+            keyframe_origin=(1.0, -1.0, 0.0),
+        ),
+    ]
+    geo_transform = _geo_transform()
+    (localization,) = localize_from_enriched_candidates(
+        candidates,
+        geo_transform,
+        LocalizationParams(
+            association="cdog",
+            cdog_delta=0.0,
+            centroid_from="rays",
+            min_keyframes_per_cluster=2,
+        ),
+    )
+    expected = geo_transform.local_position_to_wgs84(
+        vector3.from_xyz(float(target[0]), float(target[1]), float(target[2]))
+    )
+    np.testing.assert_allclose(
+        localization["coordinates"],
+        [expected.lat, expected.lng, expected.alt],
+        atol=1e-6,
+    )
 
 
 def test_explicit_leader_canopy_reproduces_default_fixture() -> None:

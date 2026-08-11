@@ -22,6 +22,7 @@ from toolbox.bricks.candidates import EnrichedCandidate, FeedbackNormalization
 from toolbox.bricks.vendored.candidate_orientation import candidate_orientation
 from toolbox.bricks.vendored.geo_transform import GeoTransform, Pose
 from toolbox.bricks.vendored.maths import quaternion
+from toolbox.logging import logger
 
 # A level value no georef will ever declare. It was -1, which collides with the real
 # basement level on every map that has one — see gotcha 5 in AI_CONTEXT/bricks.md.
@@ -52,10 +53,18 @@ class LocalizationParams:
     # Association experiments are opt-in. The default remains the ported production
     # leader/canopy path above, byte-for-byte; incremental association always uses
     # embeddings and greedily chooses the highest-scoring live cluster.
-    association: Literal["leader_canopy", "incremental"] = "leader_canopy"
+    association: Literal["leader_canopy", "incremental", "cdog"] = "leader_canopy"
     combination: Literal["conjunctive", "sum"] = "sum"
     association_sim_threshold: float = 1.1
     descriptor: Literal["seed", "running_mean"] = "running_mean"
+    cdog_epipolar_m: float = 0.25
+    cdog_pair_radius_m: float = 5.0
+    cdog_range_m: tuple[float, float] = (0.3, 30.0)
+    cdog_semantic_threshold: float | None = None
+    cdog_delta: float = 0.5
+    # Independent of association so ray triangulation can be measured without
+    # changing which detections belong to each cluster.
+    centroid_from: Literal["depth", "rays"] = "depth"
     # Review-feedback gains. Both zero (the default) means the boosted similarity
     # is not merely equal to the raw one — it is never consulted at all. See
     # `_ranking_similarities`.
@@ -471,6 +480,235 @@ def cluster_detections_incremental(
     )
 
 
+def ray_closest_approach(
+    origin_i: np.ndarray,
+    direction_i: np.ndarray,
+    origin_j: np.ndarray,
+    direction_j: np.ndarray,
+    *,
+    parallel_epsilon: float = 1e-8,
+) -> tuple[float, float, float]:
+    """Return metric line distance and closest parameters for two unit rays.
+
+    For non-parallel directions this is the common perpendicular between the two
+    infinite supporting lines. Callers must separately require both parameters to be
+    positive to turn the line result into a ray-consistency test. Near parallelism
+    has no unique parameter pair; in that case the distance is the point-to-ray
+    distance from ``origin_j`` to ray i and the minimum-norm parameter pair is
+    returned.
+
+    Args:
+        origin_i: First ray origin in EUS metres.
+        direction_i: First unit ray direction.
+        origin_j: Second ray origin in EUS metres.
+        direction_j: Second unit ray direction.
+        parallel_epsilon: Cross-product norm below which rays count as parallel.
+
+    Returns:
+        ``(distance_m, t_i, t_j)`` for points ``origin + t * direction``.
+    """
+    oi = np.asarray(origin_i, dtype=np.float64)
+    oj = np.asarray(origin_j, dtype=np.float64)
+    di = np.asarray(direction_i, dtype=np.float64)
+    dj = np.asarray(direction_j, dtype=np.float64)
+    cross = np.cross(di, dj)
+    cross_norm = float(np.linalg.norm(cross))
+    offset = oj - oi
+    if cross_norm < float(parallel_epsilon):
+        projection = max(0.0, float(offset @ di))
+        distance = float(np.linalg.norm(oj - (oi + projection * di)))
+        parameters = np.linalg.lstsq(np.column_stack((di, -dj)), offset, rcond=None)[0]
+        return distance, float(parameters[0]), float(parameters[1])
+
+    dot = float(di @ dj)
+    relative = oi - oj
+    projection_i = float(di @ relative)
+    projection_j = float(dj @ relative)
+    denominator = 1.0 - dot * dot
+    t_i = (dot * projection_j - projection_i) / denominator
+    t_j = (projection_j - dot * projection_i) / denominator
+    point_i = oi + t_i * di
+    point_j = oj + t_j * dj
+    return float(np.linalg.norm(point_i - point_j)), t_i, t_j
+
+
+def _filter_edges_by_delta_overlap(
+    adjacency: dict[int, set[int]], delta: float
+) -> dict[int, set[int]]:
+    """Retain undirected edges whose open neighbourhoods overlap by ``delta``."""
+    filtered: dict[int, set[int]] = {node: set() for node in adjacency}
+    for node, neighbors in adjacency.items():
+        for other in neighbors:
+            if other <= node:
+                continue
+            other_neighbors = adjacency[other]
+            denominator = min(len(neighbors), len(other_neighbors))
+            overlap = (
+                len(neighbors & other_neighbors) / denominator
+                if denominator > 0
+                else 0.0
+            )
+            if overlap >= float(delta):
+                filtered[node].add(other)
+                filtered[other].add(node)
+    return filtered
+
+
+def cluster_detections_cdog(
+    positions_local: np.ndarray,
+    ray_origins: np.ndarray,
+    ray_directions: np.ndarray,
+    valid_mask: np.ndarray,
+    object_keyframe_ids: np.ndarray,
+    detection_levels: np.ndarray | None,
+    *,
+    epipolar_m: float = 0.25,
+    pair_radius_m: float = 5.0,
+    range_m: tuple[float, float] = (0.3, 30.0),
+    delta: float = 0.5,
+    min_keyframes_per_cluster: int = 2,
+    embeddings: np.ndarray | None = None,
+    semantic_threshold: float | None = None,
+) -> np.ndarray:
+    """Associate detections by ray consistency and neighbourhood overlap.
+
+    C-DOG constructs edges from 2D epipolar distance in pixels and filters its graph
+    using delta-neighbourhood overlap. Here the graph filtering is C-DOG's, while the
+    edge geometry is our substitution: metric ray-to-ray distance in 3D. C-DOG assumes
+    one detection per object per view; we do not, because class-agnostic proposals can
+    put several boxes over one object in a keyframe. Direct edges are nevertheless
+    restricted to different keyframes.
+
+    The depth-projected points are used only to generate sparse candidate pairs within
+    ``pair_radius_m``. This is not part of the ray-consistency criterion, but it does
+    make the result depend on depth through candidate generation. An edge then requires
+    compatible levels, a forward in-range closest approach, the ray distance cutoff,
+    and, when available and requested, cutout cosine compatibility.
+
+    Neighbourhoods are the graph's open adjacency sets. Therefore either empty set
+    gives zero overlap, exactly as in the stated delta-overlap rule. Components are
+    taken only after edges below ``delta`` are removed; isolated detections remain
+    singleton components until the usual distinct-keyframe filter runs.
+
+    Args:
+        positions_local: Depth-projected EUS points, used only for candidate pairs.
+        ray_origins: Camera origins in EUS metres.
+        ray_directions: Unit ray directions in EUS.
+        valid_mask: Boolean mask selecting usable detections.
+        object_keyframe_ids: Keyframe identifier for every detection.
+        detection_levels: Per-detection levels, or ``None`` to disable the veto.
+        epipolar_m: Maximum metric ray-to-ray distance.
+        pair_radius_m: Depth-point radius used only for candidate generation.
+        range_m: Inclusive minimum and maximum closest-approach parameters.
+        delta: Minimum normalized neighbourhood overlap for retaining an edge.
+        min_keyframes_per_cluster: Minimum distinct-keyframe support after clustering.
+        embeddings: Optional cutout embedding matrix.
+        semantic_threshold: Optional cosine cutoff, applied only with embeddings.
+
+    Returns:
+        Compact cluster labels aligned with the inputs, with removed rows labelled -1.
+    """
+    positions = np.asarray(positions_local, dtype=np.float64)
+    origins = np.asarray(ray_origins, dtype=np.float64)
+    directions = np.asarray(ray_directions, dtype=np.float64)
+    valid = np.asarray(valid_mask, dtype=bool).reshape(-1)
+    keyframes = np.asarray(object_keyframe_ids).reshape(-1)
+    detection_count = len(positions)
+    if any(
+        len(array) != detection_count
+        for array in (origins, directions, valid, keyframes)
+    ):
+        raise ValueError("C-DOG inputs must have one row per detection")
+    if positions.shape != (detection_count, 3) or origins.shape != positions.shape:
+        raise ValueError("C-DOG positions and ray origins must have shape (n, 3)")
+    if directions.shape != positions.shape:
+        raise ValueError("C-DOG ray directions must have shape (n, 3)")
+    range_min, range_max = (float(value) for value in range_m)
+    if epipolar_m < 0.0 or pair_radius_m < 0.0:
+        raise ValueError("C-DOG distance thresholds must be non-negative")
+    if range_min < 0.0 or range_max < range_min:
+        raise ValueError("C-DOG range_m must be an ordered non-negative pair")
+
+    labels = np.full(detection_count, -1, dtype=np.int32)
+    valid_indices = np.flatnonzero(valid)
+    if valid_indices.size == 0:
+        return labels
+    subset_positions = positions[valid_indices]
+    pair_distances = np.linalg.norm(
+        subset_positions[:, None, :] - subset_positions[None, :, :], axis=2
+    )
+    candidate_i, candidate_j = np.where(
+        np.triu(pair_distances <= float(pair_radius_m), k=1)
+    )
+
+    normalized_embeddings: np.ndarray | None = None
+    if semantic_threshold is not None and embeddings is not None:
+        matrix = np.asarray(embeddings, dtype=np.float64)
+        if matrix.ndim == 2 and matrix.shape[0] == detection_count:
+            normalized_embeddings = matrix[valid_indices]
+            norms = np.linalg.norm(normalized_embeddings, axis=1, keepdims=True)
+            normalized_embeddings = normalized_embeddings / np.where(
+                norms > 0.0, norms, 1.0
+            )
+
+    adjacency: dict[int, set[int]] = {
+        local_index: set() for local_index in range(valid_indices.size)
+    }
+    for local_i_raw, local_j_raw in zip(candidate_i, candidate_j, strict=True):
+        local_i = int(local_i_raw)
+        local_j = int(local_j_raw)
+        global_i = int(valid_indices[local_i])
+        global_j = int(valid_indices[local_j])
+        if keyframes[global_i] == keyframes[global_j]:
+            continue
+        if not _levels_compatible(detection_levels, global_i, global_j):
+            continue
+        distance, t_i, t_j = ray_closest_approach(
+            origins[global_i],
+            directions[global_i],
+            origins[global_j],
+            directions[global_j],
+        )
+        if not (
+            t_i > 0.0
+            and t_j > 0.0
+            and range_min <= t_i <= range_max
+            and range_min <= t_j <= range_max
+            and distance <= float(epipolar_m)
+        ):
+            continue
+        if normalized_embeddings is not None and float(
+            normalized_embeddings[local_i] @ normalized_embeddings[local_j]
+        ) < float(semantic_threshold):
+            continue
+        adjacency[local_i].add(local_j)
+        adjacency[local_j].add(local_i)
+
+    filtered = _filter_edges_by_delta_overlap(adjacency, delta)
+
+    next_label = 0
+    visited: set[int] = set()
+    for start in range(valid_indices.size):
+        if start in visited:
+            continue
+        stack = [start]
+        visited.add(start)
+        while stack:
+            current = stack.pop()
+            labels[int(valid_indices[current])] = next_label
+            for neighbor in filtered[current]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+        next_label += 1
+
+    return filter_clusters_by_min_keyframes(
+        labels,
+        keyframes,
+        min_keyframes=min_keyframes_per_cluster,
+    )
+
+
 def _cluster_level_from_detections(
     levels: np.ndarray,
     similarities: np.ndarray,
@@ -515,7 +753,27 @@ def compute_cluster_statistics(
     detection_keyframe_ids: np.ndarray,
     geo_transform: GeoTransform,
     level_strategy: str = "seed",
+    *,
+    centroid_from: Literal["depth", "rays"] = "depth",
+    ray_origins: np.ndarray | None = None,
+    ray_directions: np.ndarray | None = None,
 ) -> ClusterStatistics:
+    """Compute unchanged cluster support statistics and selectable centroids.
+
+    ``centroid_from="depth"`` preserves the similarity-weighted depth centroid.
+    ``"rays"`` minimizes ``sum ||(I - d d^T)(x - o)||^2`` with an unweighted 3x3
+    solve. Ill-conditioned ray systems fall back to that same depth centroid and are
+    counted in one log message per call. Spread, levels, observations, and confidence
+    retain their depth-point definitions in either mode.
+    """
+    if centroid_from not in {"depth", "rays"}:
+        raise ValueError(f"Unknown centroid source: {centroid_from!r}")
+    origins = None if ray_origins is None else np.asarray(ray_origins, dtype=np.float64)
+    directions = (
+        None if ray_directions is None else np.asarray(ray_directions, dtype=np.float64)
+    )
+    if centroid_from == "rays" and (origins is None or directions is None):
+        raise ValueError("ray centroiding requires ray origins and directions")
     unique_labels = np.unique(cluster_ids)
     unique_labels = unique_labels[unique_labels >= 0]
     n_clusters = len(unique_labels)
@@ -530,13 +788,37 @@ def compute_cluster_statistics(
     cluster_levels = np.full(n_clusters, UNRESOLVED_LEVEL, dtype=np.int32)
 
     level_by_value = {int(lv.value): lv for lv in geo_transform.levels}
+    ray_fallback_count = 0
 
     for i, label in enumerate(unique_labels):
         mask = cluster_ids == label
         cluster_positions = positions_eus[mask]
         weights = similarities[mask]
         weights = weights / weights.sum()
-        centroid = np.average(cluster_positions, axis=0, weights=weights)
+        depth_centroid = np.average(cluster_positions, axis=0, weights=weights)
+        centroid = depth_centroid
+        if centroid_from == "rays":
+            assert origins is not None and directions is not None
+            cluster_origins = origins[mask]
+            cluster_directions = directions[mask]
+            usable_rays = np.linalg.norm(cluster_directions, axis=1) > 1e-12
+            cluster_origins = cluster_origins[usable_rays]
+            cluster_directions = cluster_directions[usable_rays]
+            projectors = (
+                np.eye(3, dtype=np.float64)[None, :, :]
+                - cluster_directions[:, :, None] * cluster_directions[:, None, :]
+            )
+            system = projectors.sum(axis=0)
+            right_hand_side = np.einsum("nij,nj->i", projectors, cluster_origins)
+            condition = float(np.linalg.cond(system))
+            if not np.isfinite(condition) or condition > 1e12:
+                ray_fallback_count += 1
+            else:
+                try:
+                    centroid = np.linalg.solve(system, right_hand_side)
+                except np.linalg.LinAlgError:
+                    ray_fallback_count += 1
+                    centroid = depth_centroid
         centroids_eus[i] = centroid
         observation_counts[i] = int(mask.sum())
 
@@ -591,6 +873,14 @@ def compute_cluster_statistics(
             )[0]
             if np.isfinite(level_val):
                 cluster_levels[i] = int(level_val)
+
+    if ray_fallback_count:
+        logger.info(
+            "Ray centroiding fell back to the depth centroid for %d/%d cluster(s) "
+            "because the 3x3 system was ill-conditioned.",
+            ray_fallback_count,
+            n_clusters,
+        )
 
     return ClusterStatistics(
         centroids_eus=centroids_eus,
@@ -732,6 +1022,12 @@ def localize_from_enriched_candidates(
         return []
 
     positions_eus = np.array([c.eus_xyz for c in selected], dtype=np.float64)
+    ray_origins = np.array(
+        [c.geokeyframe_pose.position for c in selected], dtype=np.float64
+    )
+    ray_vectors = positions_eus - ray_origins
+    ray_norms = np.linalg.norm(ray_vectors, axis=1, keepdims=True)
+    ray_directions = ray_vectors / np.where(ray_norms > 0.0, ray_norms, 1.0)
     # RAW similarity, everywhere below except `cluster_best_sim`.
     #
     # `similarities` drives three things that are *geometry*, not ranking, and
@@ -775,6 +1071,7 @@ def localize_from_enriched_candidates(
         dtype=np.int32,
     )
     valid_mask = np.ones(len(selected), dtype=bool)
+    ray_valid_mask = ray_norms[:, 0] > 0.0
 
     embeddings = _embedding_matrix(selected)
     if params.association == "leader_canopy":
@@ -804,6 +1101,22 @@ def localize_from_enriched_candidates(
             association_sim_threshold=params.association_sim_threshold,
             descriptor=params.descriptor,
         )
+    elif params.association == "cdog":
+        cluster_ids = cluster_detections_cdog(
+            positions_eus,
+            ray_origins,
+            ray_directions,
+            ray_valid_mask,
+            keyframe_ids,
+            detection_levels,
+            epipolar_m=params.cdog_epipolar_m,
+            pair_radius_m=params.cdog_pair_radius_m,
+            range_m=params.cdog_range_m,
+            delta=params.cdog_delta,
+            min_keyframes_per_cluster=params.min_keyframes_per_cluster,
+            embeddings=embeddings,
+            semantic_threshold=params.cdog_semantic_threshold,
+        )
     else:
         raise ValueError(f"Unknown association mode: {params.association!r}")
 
@@ -815,6 +1128,9 @@ def localize_from_enriched_candidates(
         keyframe_ids,
         geo_transform,
         level_strategy=params.level_strategy,
+        centroid_from=params.centroid_from,
+        ray_origins=ray_origins,
+        ray_directions=ray_directions,
     )
 
     cluster_best_sim: dict[int, float] = {}

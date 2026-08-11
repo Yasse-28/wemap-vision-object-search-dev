@@ -28,6 +28,12 @@ _IMAGE_FORM = {
     "combination": "conjunctive",
     "association_sim_threshold": "1.25",
     "descriptor": "seed",
+    "cdog_epipolar_m": "0.4",
+    "cdog_pair_radius_m": "6.0",
+    "cdog_range_m": "0.5,25.0",
+    "cdog_semantic_threshold": "0.8",
+    "cdog_delta": "0.6",
+    "centroid_from": "rays",
 }
 
 
@@ -44,6 +50,12 @@ def test_form_strings_reach_the_localization_params() -> None:
     assert params.combination == "conjunctive"
     assert params.association_sim_threshold == 1.25
     assert params.descriptor == "seed"
+    assert params.cdog_epipolar_m == 0.4
+    assert params.cdog_pair_radius_m == 6.0
+    assert params.cdog_range_m == (0.5, 25.0)
+    assert params.cdog_semantic_threshold == 0.8
+    assert params.cdog_delta == 0.6
+    assert params.centroid_from == "rays"
 
 
 def test_both_branches_share_one_set_of_defaults() -> None:
