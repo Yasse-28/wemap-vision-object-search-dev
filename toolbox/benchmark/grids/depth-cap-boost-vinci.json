@@ -1,0 +1,36 @@
+[
+  {"label": "ref-eps1.25", "clustering_eps_m": 1.25},
+  {"label": "ref-eps1.5", "clustering_eps_m": 1.5},
+  {"label": "ref-eps2.0-default", "clustering_eps_m": 2.0},
+  {"label": "ref-eps2.5", "clustering_eps_m": 2.5},
+  {"label": "ref-eps3.0", "clustering_eps_m": 3.0},
+  {"label": "ref-eps4.0", "clustering_eps_m": 4.0},
+
+  {"label": "eps2.0-cap30", "clustering_eps_m": 2.0, "max_depth_m": 30.0},
+  {"label": "eps2.0-cap20", "clustering_eps_m": 2.0, "max_depth_m": 20.0},
+  {"label": "eps2.0-cap15", "clustering_eps_m": 2.0, "max_depth_m": 15.0},
+  {"label": "eps3.0-cap30", "clustering_eps_m": 3.0, "max_depth_m": 30.0},
+  {"label": "eps3.0-cap20", "clustering_eps_m": 3.0, "max_depth_m": 20.0},
+  {"label": "eps3.0-cap15", "clustering_eps_m": 3.0, "max_depth_m": 15.0},
+
+  {"label": "mc-pivot1.5", "association": "multicut", "multicut_geo_pivot": 1.5},
+  {"label": "mc-pivot2.5", "association": "multicut", "multicut_geo_pivot": 2.5},
+  {"label": "mc-pivot3.5", "association": "multicut", "multicut_geo_pivot": 3.5},
+  {"label": "mc-pivot2.5-cap20", "association": "multicut", "multicut_geo_pivot": 2.5, "max_depth_m": 20.0},
+  {"label": "mc-pivot2.5-cap15", "association": "multicut", "multicut_geo_pivot": 2.5, "max_depth_m": 15.0},
+  {"label": "mc-pivot2.5-sem0.5", "association": "multicut", "multicut_geo_pivot": 2.5, "multicut_sem_weight": 0.5},
+
+  {"label": "inc-sum1.2", "association": "incremental", "combination": "sum", "association_sim_threshold": 1.2},
+  {"label": "inc-sum1.35", "association": "incremental", "combination": "sum", "association_sim_threshold": 1.35},
+  {"label": "inc-sum1.2-cap20", "association": "incremental", "combination": "sum", "association_sim_threshold": 1.2, "max_depth_m": 20.0},
+  {"label": "inc-sum1.2-cap15", "association": "incremental", "combination": "sum", "association_sim_threshold": 1.2, "max_depth_m": 15.0},
+
+  {"label": "eps3.0-boost0.05", "clustering_eps_m": 3.0, "feedback_alpha": 0.05, "feedback_beta": 0.05},
+  {"label": "eps3.0-boost0.1", "clustering_eps_m": 3.0, "feedback_alpha": 0.1, "feedback_beta": 0.1},
+  {"label": "eps3.0-boost0.2", "clustering_eps_m": 3.0, "feedback_alpha": 0.2, "feedback_beta": 0.2},
+  {"label": "eps3.0-boost0.1-center", "clustering_eps_m": 3.0, "feedback_alpha": 0.1, "feedback_beta": 0.1, "feedback_normalization": "center"},
+  {"label": "eps3.0-boost0.1-standardize", "clustering_eps_m": 3.0, "feedback_alpha": 0.1, "feedback_beta": 0.1, "feedback_normalization": "standardize"},
+  {"label": "mc-pivot2.5-boost0.1-center", "association": "multicut", "multicut_geo_pivot": 2.5, "feedback_alpha": 0.1, "feedback_beta": 0.1, "feedback_normalization": "center"},
+  {"label": "inc-sum1.2-boost0.1-center", "association": "incremental", "combination": "sum", "association_sim_threshold": 1.2, "feedback_alpha": 0.1, "feedback_beta": 0.1, "feedback_normalization": "center"},
+  {"label": "eps3.0-cap15-boost0.1-center", "clustering_eps_m": 3.0, "max_depth_m": 15.0, "feedback_alpha": 0.1, "feedback_beta": 0.1, "feedback_normalization": "center"}
+]

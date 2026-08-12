@@ -33,8 +33,21 @@ from toolbox.benchmark.object_search_http_benchmark import (
     targets_from_groups,
     write_csv,
 )
-from toolbox.bricks import candidates, db, georef_source, map_manifest, service
-from toolbox.bricks.candidates import EnrichedCandidate
+from toolbox.bricks import (
+    candidates,
+    db,
+    georef_source,
+    map_manifest,
+    service,
+)
+from toolbox.bricks import (
+    feedback as feedback_module,
+)
+from toolbox.bricks.candidates import (
+    EnrichedCandidate,
+    apply_feedback_boost,
+    normalize_prototype_similarities,
+)
 from toolbox.bricks.localize import (
     LocalizationParams,
     localize_from_enriched_candidates,
@@ -234,16 +247,106 @@ def _class_name(annotations: Sequence[Annotation]) -> str:
     )
 
 
+def apply_feedback(
+    prompt_candidates: Sequence[EnrichedCandidate], params: LocalizationParams
+) -> list[EnrichedCandidate]:
+    """Recompute the review boost on cached candidates, for one configuration.
+
+    The cached candidates carry the *raw* prototype columns (`pos_sim`/`neg_sim`),
+    because `fetch_prompt_candidates` fetches them with both gains at zero. Since
+    the boost is affine in those columns and `normalize_prototype_similarities` is a
+    pure function of the retrieved set, `feedback_alpha`, `feedback_beta` and the
+    normalization can all be swept from that single cache — reproducing exactly what
+    `candidates.load_enriched_candidates` would have written, without a second
+    ANN + database round trip per configuration.
+
+    Args:
+        prompt_candidates: One prompt's cached candidates, in retrieval order.
+        params: Configuration whose feedback gains and normalization apply.
+
+    Returns:
+        The candidates with `similarity_boosted` and the applied columns set, or the
+        input unchanged when the configuration has feedback off.
+    """
+    if not params.feedback_enabled or not prompt_candidates:
+        return list(prompt_candidates)
+    # Normalisation spans the whole retrieved set, exactly as at load time — not the
+    # `candidate_count` truncation, and not the depth-capped subset.
+    applied_pos = normalize_prototype_similarities(
+        [candidate.pos_sim for candidate in prompt_candidates],
+        params.feedback_normalization,
+    )
+    applied_neg = normalize_prototype_similarities(
+        [candidate.neg_sim for candidate in prompt_candidates],
+        params.feedback_normalization,
+    )
+    return [
+        replace(
+            candidate,
+            similarity_boosted=apply_feedback_boost(
+                candidate.similarity,
+                pos_value,
+                neg_value,
+                params.feedback_alpha,
+                params.feedback_beta,
+            ),
+            pos_sim_applied=pos_value,
+            neg_sim_applied=neg_value,
+        )
+        for candidate, pos_value, neg_value in zip(
+            prompt_candidates, applied_pos, applied_neg
+        )
+    ]
+
+
+def _log_feedback_coverage(prompt: str, enriched: Sequence[EnrichedCandidate]) -> None:
+    """Report how many candidates carry prototype evidence for this prompt.
+
+    An inert boost and an unhelpful one produce the same sweep row, so the count is
+    logged before any configuration runs. Zero here means the reviewed ids resolved
+    to nothing — `object_search_candidate.id` is a BIGSERIAL that no reingest
+    preserves — and every feedback row in the grid will be a copy of the baseline.
+    """
+    positives = sum(1 for candidate in enriched if candidate.pos_sim)
+    negatives = sum(1 for candidate in enriched if candidate.neg_sim)
+    if positives or negatives:
+        logger.info(
+            "Prompt %r: %d candidate(s) with positive and %d with negative prototype "
+            "evidence, out of %d",
+            prompt,
+            positives,
+            negatives,
+            len(enriched),
+        )
+    else:
+        logger.warning(
+            "Prompt %r: no prototype evidence on any of %d candidates — every "
+            "feedback configuration will reproduce the baseline exactly",
+            prompt,
+            len(enriched),
+        )
+
+
 def _cache_path(
-    cache_dir: Path, map_id: str, prompt: str, candidate_count: int
+    cache_dir: Path,
+    map_id: str,
+    prompt: str,
+    candidate_count: int,
+    *,
+    with_feedback: bool,
 ) -> Path:
+    payload: dict[str, Any] = {
+        "map_id": map_id,
+        "prompt": prompt,
+        "candidate_count": candidate_count,
+        "with_embeddings": True,
+    }
+    # Added only when set, so caches written before the prototype columns existed
+    # stay addressable by the no-feedback path instead of silently going cold.
+    if with_feedback:
+        payload["with_feedback"] = True
     key = json.dumps(
-        {
-            "map_id": map_id,
-            "prompt": prompt,
-            "candidate_count": candidate_count,
-            "with_embeddings": True,
-        },
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -261,6 +364,7 @@ def fetch_prompt_candidates(
     *,
     refresh: bool = False,
     timeout_s: float = DEFAULT_TIMEOUT_S,
+    with_feedback: bool = False,
 ) -> dict[str, list[EnrichedCandidate]]:
     """Fetch and cache the enriched ANN candidate set once per benchmark prompt.
 
@@ -272,6 +376,9 @@ def fetch_prompt_candidates(
         prompts: Optional exact prompt subset. Annotation insertion order is retained.
         refresh: Replace matching cache entries when true.
         timeout_s: ANN request timeout in seconds.
+        with_feedback: Also resolve the map's review prototypes, with both gains at
+            zero, so a grid can sweep them offline through `apply_feedback`. The
+            retrieved set, its order and every raw similarity are unaffected.
 
     Returns:
         Prompt strings mapped to enriched candidates in retrieval order.
@@ -302,7 +409,13 @@ def fetch_prompt_candidates(
     result: dict[str, list[EnrichedCandidate]] = {}
     missing: list[tuple[str, Path]] = []
     for prompt in prompt_order:
-        path = _cache_path(resolved_cache_dir, manifest.map_id, prompt, candidate_count)
+        path = _cache_path(
+            resolved_cache_dir,
+            manifest.map_id,
+            prompt,
+            candidate_count,
+            with_feedback=with_feedback,
+        )
         logger.info("Candidate cache for prompt %r: %s", prompt, path)
         if path.is_file() and not refresh:
             with path.open("rb") as stream:
@@ -323,16 +436,33 @@ def fetch_prompt_candidates(
                     candidate_count,
                     timeout_s,
                 )
+                review_feedback = (
+                    feedback_module.load_review_feedback(
+                        manifest.map_id, prompt, resolved_map_path
+                    )
+                    if with_feedback
+                    else None
+                )
                 enriched = candidates.load_enriched_candidates(
                     conn,
                     geo_ref_id,
                     hits,
                     geo_transform,
+                    # Both gains stay at zero and the normalization at "none": the
+                    # cache holds the raw prototype columns and `apply_feedback`
+                    # rescales and weights them per configuration.
+                    feedback=review_feedback,
                     with_embeddings=True,
                 )
                 with path.open("wb") as stream:
                     pickle.dump(enriched, stream, protocol=pickle.HIGHEST_PROTOCOL)
                 result[prompt] = enriched
+
+    if with_feedback:
+        # Logged for cache hits too: a cache written against a since-rebuilt index is
+        # exactly the case where the boost is inert and the rows look merely flat.
+        for prompt in prompt_order:
+            _log_feedback_coverage(prompt, result[prompt])
 
     return {prompt: result[prompt] for prompt in prompt_order}
 
@@ -513,7 +643,7 @@ def evaluate_config(
 
     for prompt, prompt_annotations in annotations_by_prompt.items():
         localizations, selected, cluster_labels = localize_from_enriched_candidates(
-            candidates_by_prompt[prompt],
+            apply_feedback(candidates_by_prompt[prompt], effective_params),
             geo_transform,
             effective_params,
             return_cluster_labels=True,
@@ -720,7 +850,7 @@ def verify_against_http(
     params_payload = asdict(params)
     for prompt, prompt_candidates in candidates_by_prompt.items():
         offline = localize_from_enriched_candidates(
-            prompt_candidates, geo_transform, params
+            apply_feedback(prompt_candidates, params), geo_transform, params
         )
         response = post_json(
             f"{bricks_base_url.rstrip('/')}/{map_id}/object-search/localize",
@@ -805,6 +935,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--default-accuracy", type=float, default=DEFAULT_ACCURACY_M)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument(
+        "--with-feedback",
+        action="store_true",
+        help=(
+            "Resolve the map's review prototypes so a grid can sweep feedback_alpha, "
+            "feedback_beta and feedback_normalization. Uses its own cache entries."
+        ),
+    )
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--bricks-base-url", default="http://127.0.0.1:45679")
     return parser.parse_args(argv)
@@ -826,6 +964,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.cache_dir,
         refresh=args.refresh,
         timeout_s=args.timeout,
+        with_feedback=args.with_feedback,
     )
     pose_source = georef_source.load_pose_source(map_path)
     base_params = replace(

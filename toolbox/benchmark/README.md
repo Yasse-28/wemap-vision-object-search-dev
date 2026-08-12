@@ -118,3 +118,15 @@ grouped, each with its own fitted shared threshold and leave-one-prompt-out esti
 plus granularity controls — cluster counts, median observation count, median spread.
 Those controls are not decoration: the bench cannot rank two granularities, so a change
 in split/merge behaviour has to be read off them rather than off the metric.
+
+Ready-made grids live in `grids/`; `depth-cap-boost-{vinci,bbhotel}.json` are the
+12/08 depth-cap and review-boost runs, each centred on its own map's granularity
+optimum (they differ, see `AI_CONTEXT/bricks.md`).
+
+`--with-feedback` additionally resolves the map's review prototypes, which is what makes
+`feedback_alpha`, `feedback_beta` and `feedback_normalization` do anything offline —
+without it those keys are accepted and silently inert. It fetches the raw prototype
+columns once (both gains at zero) into its own cache entries, and the gains are then
+applied per configuration. Each prompt's prototype coverage is logged before the sweep
+starts: a prompt with none reproduces the baseline bit for bit, which is the failure
+mode to rule out before concluding the boost did not help.

@@ -1,0 +1,31 @@
+[
+  {"label": "ref-eps0.75", "clustering_eps_m": 0.75},
+  {"label": "ref-eps1.0", "clustering_eps_m": 1.0},
+  {"label": "ref-eps1.25", "clustering_eps_m": 1.25},
+  {"label": "ref-eps1.5", "clustering_eps_m": 1.5},
+  {"label": "ref-eps2.0-default", "clustering_eps_m": 2.0},
+  {"label": "ref-eps3.0", "clustering_eps_m": 3.0},
+
+  {"label": "eps2.0-cap30", "clustering_eps_m": 2.0, "max_depth_m": 30.0},
+  {"label": "eps2.0-cap20", "clustering_eps_m": 2.0, "max_depth_m": 20.0},
+  {"label": "eps2.0-cap15", "clustering_eps_m": 2.0, "max_depth_m": 15.0},
+  {"label": "eps1.5-cap20", "clustering_eps_m": 1.5, "max_depth_m": 20.0},
+  {"label": "eps1.5-cap15", "clustering_eps_m": 1.5, "max_depth_m": 15.0},
+
+  {"label": "mc-pivot1.0", "association": "multicut", "multicut_geo_pivot": 1.0},
+  {"label": "mc-pivot1.5", "association": "multicut", "multicut_geo_pivot": 1.5},
+  {"label": "mc-pivot1.5-cap20", "association": "multicut", "multicut_geo_pivot": 1.5, "max_depth_m": 20.0},
+  {"label": "mc-pivot1.5-cap15", "association": "multicut", "multicut_geo_pivot": 1.5, "max_depth_m": 15.0},
+
+  {"label": "inc-sum1.35", "association": "incremental", "combination": "sum", "association_sim_threshold": 1.35},
+  {"label": "inc-sum1.4", "association": "incremental", "combination": "sum", "association_sim_threshold": 1.4},
+  {"label": "inc-sum1.35-cap15", "association": "incremental", "combination": "sum", "association_sim_threshold": 1.35, "max_depth_m": 15.0},
+
+  {"label": "eps1.5-boost0.05", "clustering_eps_m": 1.5, "feedback_alpha": 0.05, "feedback_beta": 0.05},
+  {"label": "eps1.5-boost0.1", "clustering_eps_m": 1.5, "feedback_alpha": 0.1, "feedback_beta": 0.1},
+  {"label": "eps1.5-boost0.2", "clustering_eps_m": 1.5, "feedback_alpha": 0.2, "feedback_beta": 0.2},
+  {"label": "eps1.5-boost0.1-center", "clustering_eps_m": 1.5, "feedback_alpha": 0.1, "feedback_beta": 0.1, "feedback_normalization": "center"},
+  {"label": "eps1.5-boost0.1-standardize", "clustering_eps_m": 1.5, "feedback_alpha": 0.1, "feedback_beta": 0.1, "feedback_normalization": "standardize"},
+  {"label": "mc-pivot1.5-boost0.1-center", "association": "multicut", "multicut_geo_pivot": 1.5, "feedback_alpha": 0.1, "feedback_beta": 0.1, "feedback_normalization": "center"},
+  {"label": "inc-sum1.35-boost0.1-center", "association": "incremental", "combination": "sum", "association_sim_threshold": 1.35, "feedback_alpha": 0.1, "feedback_beta": 0.1, "feedback_normalization": "center"}
+]

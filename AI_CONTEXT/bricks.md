@@ -397,6 +397,61 @@ Caveat on the proxy: only a few hundred detections per prompt fall within `--nea
 an annotation, so this metric sees the well-covered objects, not the missed ones. It
 ranks associations; it does not measure recall of the map.
 
+### A depth cap on the detections — small, and free in granularity
+
+`max_depth_m` (`None` = off = production) drops a detection whose own depth exceeds the
+cap, on the already-truncated `candidate_count` set and **before** association, so the
+comparison against `None` ablates those detections alone. Depth is recovered as
+`‖object_position − keyframe_position‖` (`detection_depths`) rather than carried through
+enrichment: ingest lifts with a unit ray, so the two are the same number, and the
+enrichment SQL and the sweep's caches stay untouched.
+
+Measured 12/08 on both maps (`toolbox/benchmark/grids/depth-cap-boost-*.json`):
+
+| | detections cut at 15 m | LOO macro F1, cap 20 m | cap 15 m |
+|---|---|---|---|
+| vinci, leader/canopy 2 m | 12 % | +0.006 | +0.013 |
+| vinci, leader/canopy 3 m | 12 % | +0.011 | **−0.019** |
+| vinci, multicut 2.5 | 12 % | +0.006 | **+0.017** |
+| vinci, incremental sum 1.2 | 12 % | +0.008 | +0.005 |
+| bbhotel, leader/canopy 2 m | 2 % | 0.000 | −0.003 |
+
+Three things. **30 m is a no-op** — bit-identical rows on both maps, do not put it in a
+grid. **The cap does not move granularity**: median spread changes by less than 0.01 m,
+which makes this the only intervention besides `centroid_from="rays"` that is readable
+without the eps curve. And **the optimum is per map and per association** — 20 m helps
+all four families on vinci, 15 m helps two of them and costs `eps` 3 m 0.019; on a
+hotel there is nothing to cut. Same shape as `clustering_eps_m`: a venue parameter, not
+a global default.
+
+Caveat that bounds all of it: **no annotation on either map sits beyond 14.8 m**, so
+this ground truth cannot see what a tight cap costs in recall. It may be an annotation
+bias (one annotates what one can resolve) rather than an absence of far objects.
+
+### The review boost, measured offline
+
+`association_sweep.py --with-feedback` resolves the map's review prototypes at cache
+time with both gains at **zero**, so the cache holds the raw `pos_sim`/`neg_sim`
+columns; `apply_feedback` then rescales and weights them per grid entry. The boost is
+affine in those columns and `normalize_prototype_similarities` is a pure function of the
+retrieved set, so `feedback_alpha`, `feedback_beta` and `feedback_normalization` are all
+sweepable from **one** cache, reproducing `load_enriched_candidates` exactly. Cache
+entries carry `with_feedback` in their key only when set, so pre-existing caches stay
+addressable.
+
+On both maps the boost only moves prompts that have reviews, and it moves them a lot —
+`e gates` 0.046 → 0.242 strict AP, `poubelle` 0.393 → 0.700 — while prompts without
+reviews are bit-identical. **This is in-sample by construction**: the reviews and the
+ground truth are the same map and the same query, and no split of the current data
+separates them. The one number that is not in-sample says the opposite of the AP:
+leave-one-prompt-out macro F1 *falls* (0.313 → 0.233 at α=β=0.1 on vinci), because
+shifting the scores of some prompts only makes one shared acceptance threshold harder to
+fit. Read `_log_feedback_coverage` before reading any of it: 8 of 12 prompts on bbhotel
+and 2 of 6 on vinci resolve **no** prototype at all — ids are BIGSERIAL and no reingest
+preserves them — and an inert boost is otherwise indistinguishable from a useless one.
+
+Full write-up, with figures: `docs/plans/2026-08-12-plafond-de-profondeur-et-boost.md`.
+
 ### Other divergences from production
 
 `localize.py` also differs in four import lines, one dev-only opt-in, and one bug fix.
