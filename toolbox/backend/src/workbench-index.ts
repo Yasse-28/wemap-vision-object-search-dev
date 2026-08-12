@@ -312,50 +312,25 @@ async function manifestKeyframeIds(map: MapEntry): Promise<string[]> {
   }
 }
 
-/**
- * What the explorer needs to render itself, whether or not a parquet exists.
- *
- * `markers` covers **every** keyframe in the manifest, not just the indexed ones:
- * the photosphere, the depth preview, the depth pin, the view cone and the keyframe
- * graph all work off poses alone, and gating them on the index is what used to blank
- * the whole panel on a v2 map. `summary` is null when there is no metadata; the panel
- * narrows the warning to the row table.
- */
+/** What the explorer needs before its optional marker table and keyframe page. */
 export async function objectSearchMetadataStatusPayload(
   map: MapEntry,
   pythonApiBaseUrl: string | null = null,
 ): Promise<Record<string, unknown>> {
-  return objectSearchMetadataStatusPayloadWithFormat(map, "columnar", pythonApiBaseUrl);
-}
-
-/** Legacy object-per-keyframe payload, retained only for the size/equivalence checks. */
-export async function legacyObjectSearchMetadataStatusPayloadForComparison(
-  map: MapEntry,
-  pythonApiBaseUrl: string | null = null,
-): Promise<Record<string, unknown>> {
-  return objectSearchMetadataStatusPayloadWithFormat(map, "legacy", pythonApiBaseUrl);
-}
-
-async function objectSearchMetadataStatusPayloadWithFormat(
-  map: MapEntry,
-  format: "columnar" | "legacy",
-  pythonApiBaseUrl: string | null,
-): Promise<Record<string, unknown>> {
   const { metadataPath, checkedPaths, captureCount } = await resolveMetadataPath(map);
   const keyframeIds = await manifestKeyframeIds(map);
-  const markerRecords = await keyframeMarkerRecords(map, keyframeIds);
-  const markers =
-    format === "columnar"
-      ? columnarKeyframeMarkers(markerRecords)
-      : legacyMarkers(markerRecords);
   const base = {
     metadata_path: metadataPath,
     map_path: map.path,
     checked_paths: checkedPaths,
     capture_count: captureCount,
     manifest_keyframe_count: keyframeIds.length,
-    markers,
-    resolved_marker_count: markerRecords.length,
+    marker_count: keyframeIds.length,
+    first_keyframe_id:
+      keyframeIds.reduce<number | null>((smallest, id) => {
+        const numericId = Number(id);
+        return smallest === null || numericId < smallest ? numericId : smallest;
+      }, null)?.toString() ?? null,
   };
 
   let metadata: LoadedMetadata;
@@ -375,23 +350,6 @@ async function objectSearchMetadataStatusPayloadWithFormat(
   }
 
   const coverage = await fetchIndexCoverage(map, pythonApiBaseUrl);
-  const keyframeRecords = metadata.keyframeIds.map((keyframeId) => {
-    const range = metadata.rangeByKeyframe.get(keyframeId)!;
-    const covered = coverage?.byKeyframe.get(keyframeId);
-    return {
-      id: String(keyframeId),
-      row_count: range.rowEnd - range.rowStart,
-      row_start: range.rowStart,
-      row_end: range.rowEnd,
-      with_depth: range.withDepth,
-      // null = unknown (no coverage answer), 0 = pruned at ingest, >0 = indexed.
-      ingested: coverage ? (covered?.ingested ?? 0) : null,
-      no_position: coverage ? (covered?.noPosition ?? 0) : null,
-    };
-  });
-  const keyframes =
-    format === "columnar" ? columnarKeyframeSummaries(keyframeRecords) : keyframeRecords;
-
   return {
     ...base,
     available: true,
@@ -401,7 +359,6 @@ async function objectSearchMetadataStatusPayloadWithFormat(
       metadata_path: metadata.metadataPath,
       row_count: metadata.rowCount,
       postprocessed: metadata.postprocessed,
-      keyframes,
       detector_source_counts: metadata.detectorSourceCounts,
       with_depth_count: metadata.withDepthCount,
       coverage: coverage
@@ -412,6 +369,69 @@ async function objectSearchMetadataStatusPayloadWithFormat(
           }
         : null,
     },
+  };
+}
+
+/** Every manifest keyframe pose, fetched only when a panel actually needs it. */
+export async function objectSearchMetadataMarkersPayload(
+  map: MapEntry,
+): Promise<Record<string, unknown>> {
+  const records = await keyframeMarkerRecords(map, await manifestKeyframeIds(map));
+  return columnarKeyframeMarkers(records);
+}
+
+export type MetadataKeyframesSort = "parquet" | "objects-desc" | "objects-asc";
+
+export type MetadataKeyframesQuery = {
+  offset: number;
+  limit: number;
+  sort: MetadataKeyframesSort;
+  includeEmpty: boolean;
+  keyframeId: string | null;
+};
+
+/** Per-keyframe parquet ranges, filtered and paged in the legacy panel order. */
+export async function metadataKeyframesPayload(
+  map: MapEntry,
+  query: MetadataKeyframesQuery,
+  pythonApiBaseUrl: string | null = null,
+): Promise<Record<string, unknown>> {
+  const metadata = await requireMetadata(map).catch(asRouteError);
+  const coverage = await fetchIndexCoverage(map, pythonApiBaseUrl);
+  let records: KeyframeSummaryRecord[] = metadata.keyframeIds.map((keyframeId) => {
+    const range = metadata.rangeByKeyframe.get(keyframeId)!;
+    const covered = coverage?.byKeyframe.get(keyframeId);
+    return {
+      id: String(keyframeId),
+      row_count: range.rowEnd - range.rowStart,
+      row_start: range.rowStart,
+      row_end: range.rowEnd,
+      with_depth: range.withDepth,
+      ingested: coverage ? (covered?.ingested ?? 0) : null,
+      no_position: coverage ? (covered?.noPosition ?? 0) : null,
+    };
+  });
+  if (query.keyframeId !== null) {
+    records = records.filter((record) => record.id === query.keyframeId);
+  }
+  if (!query.includeEmpty) {
+    records = records.filter((record) => record.row_count > 0);
+  }
+  if (query.sort === "objects-desc") {
+    records.sort(
+      (a, b) => b.row_count - a.row_count || a.id.localeCompare(b.id),
+    );
+  } else if (query.sort === "objects-asc") {
+    records.sort(
+      (a, b) => a.row_count - b.row_count || a.id.localeCompare(b.id),
+    );
+  }
+  const total = records.length;
+  const offset = Math.max(0, Math.round(query.offset));
+  const limit = Math.max(1, Math.min(20_000, Math.round(query.limit)));
+  return {
+    total,
+    ...columnarKeyframeSummaries(records.slice(offset, offset + limit)),
   };
 }
 
@@ -881,11 +901,13 @@ type KeyframeSummaryRecord = {
   no_position: number | null;
 };
 
-type ColumnarKeyframeMarkers = {
-  ids: string[];
+export type ColumnarKeyframeMarkers = {
+  ids_are_dense: boolean;
+  ids?: string[];
   latitude: number[];
   longitude: number[];
-  level: Array<string | null>;
+  levels: string[];
+  level_codes: number[];
   heading_deg: Array<number | null>;
 };
 
@@ -909,29 +931,45 @@ function roundWire(value: number, decimals: number): number {
   return Number(value.toFixed(decimals));
 }
 
-function columnarKeyframeMarkers(
+export function columnarKeyframeMarkers(
   records: KeyframeMarkerRecord[],
 ): ColumnarKeyframeMarkers {
+  const idsAreDense = records.every((record, index) => record.id === String(index));
+  const levels: string[] = [];
+  const levelCodeByValue = new Map<string, number>();
+  const levelCodes = records.map((record) => {
+    if (record.level === null) {
+      return -1;
+    }
+    const existing = levelCodeByValue.get(record.level);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const code = levels.length;
+    levels.push(record.level);
+    levelCodeByValue.set(record.level, code);
+    return code;
+  });
   const columns: ColumnarKeyframeMarkers = {
-    ids: records.map((record) => record.id),
+    ids_are_dense: idsAreDense,
+    ...(idsAreDense ? {} : { ids: records.map((record) => record.id) }),
     // Wire precision only: the manifest-derived values remain full precision.
     latitude: records.map((record) => roundWire(record.latitude, 7)),
     longitude: records.map((record) => roundWire(record.longitude, 7)),
-    level: records.map((record) => record.level),
+    levels,
+    level_codes: levelCodes,
     heading_deg: records.map((record) =>
       record.heading_deg === null ? null : roundWire(record.heading_deg, 2),
     ),
   };
-  assertParallelLengths("markers", Object.values(columns));
+  assertParallelLengths("markers", [
+    columns.latitude,
+    columns.longitude,
+    columns.level_codes,
+    columns.heading_deg,
+    ...(columns.ids ? [columns.ids] : []),
+  ]);
   return columns;
-}
-
-function legacyMarkers(records: KeyframeMarkerRecord[]): Array<Record<string, unknown>> {
-  return records.map((record) => ({
-    ...record,
-    color: "#9ca3af",
-    radius: 6,
-  }));
 }
 
 function columnarKeyframeSummaries(

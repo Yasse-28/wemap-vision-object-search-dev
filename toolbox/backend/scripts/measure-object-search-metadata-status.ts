@@ -1,8 +1,9 @@
-/** Measure legacy and columnar metadata status JSON without starting a server. */
+/** Measure the split metadata payloads without starting a server. */
 
 import { loadMapEntries } from "../src/config.js";
 import {
-  legacyObjectSearchMetadataStatusPayloadForComparison,
+  metadataKeyframesPayload,
+  objectSearchMetadataMarkersPayload,
   objectSearchMetadataStatusPayload,
 } from "../src/workbench-index.js";
 
@@ -23,20 +24,25 @@ async function main(): Promise<void> {
     throw new Error(`Map '${mapId}' is not present in ${configPath}.`);
   }
 
-  const [before, after] = await Promise.all([
-    legacyObjectSearchMetadataStatusPayloadForComparison(map),
+  const [status, markers, keyframePage] = await Promise.all([
     objectSearchMetadataStatusPayload(map),
+    objectSearchMetadataMarkersPayload(map),
+    metadataKeyframesPayload(map, {
+      offset: 0,
+      limit: 1,
+      sort: "parquet",
+      includeEmpty: true,
+      keyframeId: null,
+    }),
   ]);
-  const beforeBytes = Buffer.byteLength(JSON.stringify(before));
-  const afterBytes = Buffer.byteLength(JSON.stringify(after));
-  const reduction = beforeBytes === 0 ? 0 : (1 - afterBytes / beforeBytes) * 100;
+  const statusBytes = Buffer.byteLength(JSON.stringify(status));
+  const markerBytes = Buffer.byteLength(JSON.stringify(markers));
+  const keyframePageBytes = Buffer.byteLength(JSON.stringify(keyframePage));
 
   console.log(`Map: ${map.id}`);
-  console.log(`Before (object arrays): ${formatBytes(beforeBytes)}`);
-  console.log(`After (columnar arrays): ${formatBytes(afterBytes)}`);
-  console.log(
-    `Reduction: ${reduction.toFixed(1)}% (${(beforeBytes / afterBytes).toFixed(2)}x smaller)`,
-  );
+  console.log(`Status: ${formatBytes(statusBytes)}`);
+  console.log(`Markers: ${formatBytes(markerBytes)}`);
+  console.log(`Keyframe page (limit 1): ${formatBytes(keyframePageBytes)}`);
 }
 
 await main();

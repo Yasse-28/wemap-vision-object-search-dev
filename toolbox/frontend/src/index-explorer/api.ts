@@ -11,11 +11,14 @@ import { bboxPostProcessQueryParams } from "../object-search-explorer/bboxPostPr
 import type {
   DepthPinResponse,
   KeyframeGraphResponse,
+  KeyframeMarker,
+  MetadataKeyframesResponse,
+  MetadataKeyframesWireResponse,
+  MetadataMarkersWireResponse,
   MetadataRowDetail,
   MetadataRowRecord,
   MetadataRowsResponse,
   MetadataStatusResponse,
-  MetadataStatusWireResponse,
   ProjectWorldPointResponse,
   ViewConeResponse,
 } from "./types";
@@ -88,48 +91,81 @@ function assertAlignedColumns(
   }
 }
 
-function materializeMetadataStatus(
-  payload: MetadataStatusWireResponse,
-): MetadataStatusResponse {
-  const markerColumns = payload.markers;
-  const markers = markerColumns
-    ? (() => {
-        assertAlignedColumns("markers", Object.values(markerColumns));
-        return markerColumns.ids.map((id, index) => ({
-          id,
-          latitude: markerColumns.latitude[index],
-          longitude: markerColumns.longitude[index],
-          level: markerColumns.level[index],
-          heading_deg: markerColumns.heading_deg[index],
-        }));
-      })()
-    : undefined;
-  const summary = payload.summary
-    ? (() => {
-        const { keyframes: columns, ...rest } = payload.summary;
-        assertAlignedColumns("summary.keyframes", Object.values(columns));
-        return {
-          ...rest,
-          keyframes: columns.ids.map((id, index) => ({
-            id,
-            row_start: columns.row_start[index],
-            row_count: columns.row_count[index],
-            row_end: columns.row_start[index] + columns.row_count[index],
-            with_depth: columns.with_depth[index],
-            ingested: columns.ingested[index],
-            no_position: columns.no_position[index],
-          })),
-        };
-      })()
-    : null;
-  return { ...payload, markers, summary };
+export async function fetchMetadataStatus(mapId: string): Promise<MetadataStatusResponse> {
+  return readJson(await fetch(metadataUrl(mapId, "")));
 }
 
-export async function fetchMetadataStatus(mapId: string): Promise<MetadataStatusResponse> {
-  const payload = await readJson<MetadataStatusWireResponse>(
-    await fetch(metadataUrl(mapId, "")),
+/** Materialize the optional marker table, including its dense ids and level dictionary. */
+export async function fetchMetadataMarkers(mapId: string): Promise<KeyframeMarker[]> {
+  const columns = await readJson<MetadataMarkersWireResponse>(
+    await fetch(metadataUrl(mapId, "/markers")),
   );
-  return materializeMetadataStatus(payload);
+  const ids = columns.ids_are_dense
+    ? columns.latitude.map((_value, index) => String(index))
+    : columns.ids;
+  if (!ids) {
+    throw new Error("markers.ids is required when ids_are_dense is false.");
+  }
+  assertAlignedColumns("markers", [
+    ids,
+    columns.latitude,
+    columns.longitude,
+    columns.level_codes,
+    columns.heading_deg,
+  ]);
+  return ids.map((id, index) => {
+    const levelCode = columns.level_codes[index];
+    const level = levelCode === -1 ? null : columns.levels[levelCode];
+    if (levelCode < -1 || (levelCode >= 0 && level === undefined)) {
+      throw new Error(`markers.level_codes[${index}] is outside the level dictionary.`);
+    }
+    return {
+      id,
+      latitude: columns.latitude[index],
+      longitude: columns.longitude[index],
+      level,
+      heading_deg: columns.heading_deg[index],
+    };
+  });
+}
+
+export type MetadataKeyframesOptions = {
+  offset?: number;
+  limit?: number;
+  sort?: "parquet" | "objects-desc" | "objects-asc";
+  includeEmpty?: boolean;
+  keyframeId?: string | null;
+};
+
+export async function fetchMetadataKeyframes(
+  mapId: string,
+  options: MetadataKeyframesOptions = {},
+): Promise<MetadataKeyframesResponse> {
+  const params = new URLSearchParams();
+  if (options.offset != null) params.set("offset", String(options.offset));
+  if (options.limit != null) params.set("limit", String(options.limit));
+  if (options.sort) params.set("sort", options.sort);
+  if (options.includeEmpty != null) {
+    params.set("include_empty", String(options.includeEmpty));
+  }
+  if (options.keyframeId) params.set("keyframe_id", options.keyframeId);
+  const payload = await readJson<MetadataKeyframesWireResponse>(
+    await fetch(metadataUrl(mapId, "/keyframes", params)),
+  );
+  const { total, ...columns } = payload;
+  assertAlignedColumns("keyframes", Object.values(columns));
+  return {
+    total,
+    keyframes: columns.ids.map((id, index) => ({
+      id,
+      row_start: columns.row_start[index],
+      row_count: columns.row_count[index],
+      row_end: columns.row_start[index] + columns.row_count[index],
+      with_depth: columns.with_depth[index],
+      ingested: columns.ingested[index],
+      no_position: columns.no_position[index],
+    })),
+  };
 }
 
 /**

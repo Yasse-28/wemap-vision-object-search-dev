@@ -24,6 +24,8 @@ import type { LivemapMarker, LivemapPolygon, LivemapSegment } from "../annotatio
 import DismissibleAlert from "../DismissibleAlert";
 import {
   fetchKeyframeGraph,
+  fetchMetadataKeyframes,
+  fetchMetadataMarkers,
   fetchMetadataRow,
   fetchMetadataRows,
   fetchMetadataStatus,
@@ -37,7 +39,9 @@ import {
 import type {
   DepthPinResponse,
   KeyframeGraphResponse,
+  KeyframeMarker,
   KeyframeSummary,
+  MetadataKeyframesResponse,
   MetadataRowDetail,
   MetadataRowRecord,
   MetadataStatusResponse,
@@ -95,6 +99,8 @@ const KEYFRAME_MARKER_RADIUS = 6;
 const KEYFRAME_MARKER_SELECTED_RADIUS = 8;
 /** Keyframes with rows in the parquet but pruned from pgvector at ingest time. */
 const KEYFRAME_MARKER_PRUNED_COLOR = "#f97316";
+/** No summary is available for this marker on the server-paged current page. */
+const KEYFRAME_MARKER_UNKNOWN_COLOR = "#8b5cf6";
 const EquirectPhotoSphereViewer = lazy(() => import("./EquirectPhotoSphereViewer"));
 const DEPTH_PIN_MIN_DEPTH_M = 0.25;
 const VIEW_CONE_HALF_ANGLE_DEG = 25;
@@ -201,6 +207,9 @@ function keyframeIndexState(summary: KeyframeSummary | undefined): KeyframeIndex
 
 function ObjectSearchExplorerPanel(props: Props) {
   const [status, setStatus] = useState<MetadataStatusResponse | null>(null);
+  const [markers, setMarkers] = useState<KeyframeMarker[] | null>(null);
+  const [keyframePage, setKeyframePage] =
+    useState<MetadataKeyframesResponse | null>(null);
   const [keyframeGraph, setKeyframeGraph] = useState<KeyframeGraphResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -246,6 +255,10 @@ function ObjectSearchExplorerPanel(props: Props) {
   } | null>(null);
   const preservedCompassBearingDegRef = useRef<number | null>(null);
   const preservedTextureYRatioRef = useRef(0.5);
+  const markerRequestRef = useRef<{
+    mapId: string;
+    promise: Promise<KeyframeMarker[]>;
+  } | null>(null);
   const visualSplitRef = useRef<HTMLDivElement | null>(null);
   const detectionRowRefs = useRef(new Map<number, HTMLTableRowElement>());
   const shouldFocusSelectedDetectionRef = useRef(false);
@@ -255,6 +268,7 @@ function ObjectSearchExplorerPanel(props: Props) {
   const annotation = useExplorerAnnotationWorkspace(props.mapId);
 
   const summary: MetadataSummary | null = status?.summary ?? null;
+  const keyframeSummaries = keyframePage?.keyframes ?? [];
   const polygonForPhotosphereDetection = useCallback(
     (row: MetadataRowRecord) => bboxPolygonRatios(row),
     [],
@@ -265,22 +279,25 @@ function ObjectSearchExplorerPanel(props: Props) {
    */
   const keyframeSummaryById = useMemo(() => {
     const byId = new Map<string, KeyframeSummary>();
-    for (const item of summary?.keyframes ?? []) {
+    for (const item of keyframeSummaries) {
       byId.set(item.id, item);
     }
     return byId;
-  }, [summary?.keyframes]);
-  const preparedKeyframeIds = useMemo(
-    () => (summary?.keyframes ?? []).map((item) => item.id),
-    [summary?.keyframes],
-  );
+  }, [keyframeSummaries]);
 
   useEffect(() => {
     if (!props.isMapKnown) {
+      setStatus(null);
+      setMarkers(null);
+      setKeyframePage(null);
+      markerRequestRef.current = null;
       setIsLoading(false);
       return;
     }
     setDepthPin(null);
+    setMarkers(null);
+    setKeyframePage(null);
+    markerRequestRef.current = null;
     setDepthPinPopoverOpen(false);
     setPhotosphereYawRad(null);
     setPhotosphereViewKeyframeId(null);
@@ -412,47 +429,59 @@ function ObjectSearchExplorerPanel(props: Props) {
     return out;
   }, [metadataRows, bboxPostProcess]);
 
-  /** Keyframes that have proposals, in parquet order — the browsable unit. */
-  const visibleKeyframes = useMemo(() => {
-    const keyframes = (summary?.keyframes ?? [])
-      .filter((item) => keyframeFilter === "all" || item.id === keyframeFilter)
-      .filter((item) => includeEmpty || item.row_count > 0);
-    const sorted = [...keyframes];
-    if (sortMode === "objects-desc") {
-      sorted.sort((a, b) => b.row_count - a.row_count || a.id.localeCompare(b.id));
-    } else if (sortMode === "objects-asc") {
-      sorted.sort((a, b) => a.row_count - b.row_count || a.id.localeCompare(b.id));
-    }
-    return sorted;
-  }, [summary?.keyframes, includeEmpty, keyframeFilter, sortMode]);
-
   const emmid = props.map?.emmid ?? null;
   const { height: livemapFrameHeight, isDragging: isResizingLivemap, startResize: startLivemapResize } =
     useLivemapFrameHeight();
   const { height: equirectFrameHeight, isDragging: isResizingEquirect, startResize: startEquirectResize } =
     useEquirectFrameHeight();
 
-  const firstNavigableKeyframeId = useMemo(() => {
-    let best: string | null = null;
-    for (const marker of status?.markers ?? []) {
-      if (best === null || Number(marker.id) < Number(best)) {
-        best = marker.id;
-      }
-    }
-    return best;
-  }, [status?.markers]);
+  const firstNavigableKeyframeId = status?.first_keyframe_id ?? null;
 
   const selectedKeyframeForMap = keyframeFilter !== "all" ? keyframeFilter : null;
   // Pagination is keyframe-major: one ERP and its proposals is how the panel is
   // actually used, and it keeps the row fetch to one request per page.
-  const totalPages = Math.max(1, Math.ceil(visibleKeyframes.length / pageSize));
+  const totalKeyframes = keyframePage?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalKeyframes / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const pageKeyframes = visibleKeyframes.slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize,
-  );
+  const pageKeyframes = keyframeSummaries;
   const pageKeyframeIds = pageKeyframes.map((item) => item.id);
   const pageKeyframeIdsKey = pageKeyframeIds.join("|");
+
+  useEffect(() => {
+    if (!props.isMapKnown || !status?.available) {
+      setKeyframePage(null);
+      return;
+    }
+    let cancelled = false;
+    fetchMetadataKeyframes(props.mapId, {
+      offset: (currentPage - 1) * pageSize,
+      limit: pageSize,
+      sort: sortMode === "keyframe" ? "parquet" : sortMode,
+      includeEmpty,
+      keyframeId: keyframeFilter === "all" ? null : keyframeFilter,
+    })
+      .then((payload) => {
+        if (!cancelled) setKeyframePage(payload);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) {
+          setKeyframePage(null);
+          setError(err.message);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    props.mapId,
+    props.isMapKnown,
+    status?.available,
+    currentPage,
+    pageSize,
+    sortMode,
+    includeEmpty,
+    keyframeFilter,
+  ]);
   const pageRows = pageKeyframeIds.flatMap(
     (keyframeId) => filteredRowsByKeyframe.get(keyframeId) ?? [],
   );
@@ -469,15 +498,51 @@ function ObjectSearchExplorerPanel(props: Props) {
       ? keyframeFilter
       : activeRow?.keyframe_id ?? pageKeyframeIds[0] ?? firstNavigableKeyframeId;
   const activeKeyframeMarker =
-    status?.markers?.find((marker) => marker.id === activeKeyframeId) ?? null;
+    markers?.find((marker) => marker.id === activeKeyframeId) ?? null;
+
+  useEffect(() => {
+    const needsMarkerTable =
+      showKeyframeGraph || activeKeyframeId !== null || keyframeLink !== null;
+    if (!props.isMapKnown || !needsMarkerTable || markers !== null) {
+      return;
+    }
+    // A single active-keyframe lookup intentionally loads and caches the full table;
+    // the same table also serves navigation cones and the optional full overlay.
+    let cancelled = false;
+    const request =
+      markerRequestRef.current?.mapId === props.mapId
+        ? markerRequestRef.current.promise
+        : fetchMetadataMarkers(props.mapId);
+    markerRequestRef.current = { mapId: props.mapId, promise: request };
+    request
+      .then((payload) => {
+        if (!cancelled) setMarkers(payload);
+      })
+      .catch((err: Error) => {
+        if (markerRequestRef.current?.promise === request) {
+          markerRequestRef.current = null;
+        }
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    props.mapId,
+    props.isMapKnown,
+    showKeyframeGraph,
+    activeKeyframeId,
+    keyframeLink,
+    markers,
+  ]);
 
   const livemapMarkers: LivemapMarker[] = useMemo(() => {
-    const markers: LivemapMarker[] = [];
+    const output: LivemapMarker[] = [];
     const activeMarker = activeKeyframeId
-      ? status?.markers?.find((marker) => marker.id === activeKeyframeId)
+      ? markers?.find((marker) => marker.id === activeKeyframeId)
       : null;
     if (activeMarker) {
-      markers.push({
+      output.push({
         id: activeMarker.id,
         latitude: activeMarker.latitude,
         longitude: activeMarker.longitude,
@@ -492,7 +557,7 @@ function ObjectSearchExplorerPanel(props: Props) {
       depthPin.latitude !== null &&
       depthPin.longitude !== null
     ) {
-      markers.push({
+      output.push({
         id: "__depth_pin",
         latitude: depthPin.latitude,
         longitude: depthPin.longitude,
@@ -501,30 +566,26 @@ function ObjectSearchExplorerPanel(props: Props) {
         radius: 9,
       });
     }
-    markers.push(...annotation.markers);
-    return markers;
+    output.push(...annotation.markers);
+    return output;
   }, [
     activeKeyframeId,
-    status?.markers,
+    markers,
     depthPin,
     annotation.markers,
   ]);
 
   const graphHoverMarkers: LivemapMarker[] = useMemo(() => {
-    if (!showKeyframeGraph || !status?.markers?.length) {
+    if (!showKeyframeGraph || !markers?.length) {
       return [];
     }
-    // Keyframes with no proposals at all are dropped; those that have proposals but
-    // were pruned at ingest are shown in a third colour rather than passed off as
-    // indexed, which is the distinction the pgvector coverage exists to expose.
-    return status.markers.flatMap((marker) => {
+    // Only the current server page has summaries. Every other pose remains visible
+    // in a distinct unknown colour instead of being passed off as indexed or pruned.
+    return markers.map((marker) => {
       const keyframe = keyframeSummaryById.get(marker.id);
-      if (!keyframe) {
-        return [];
-      }
       const isSelected = marker.id === selectedKeyframeForMap;
-      const state = keyframeIndexState(keyframe);
-      return [{
+      const state = keyframe ? keyframeIndexState(keyframe) : "unknown";
+      return {
         id: marker.id,
         latitude: marker.latitude,
         longitude: marker.longitude,
@@ -533,14 +594,16 @@ function ObjectSearchExplorerPanel(props: Props) {
           ? KEYFRAME_MARKER_SELECTED_COLOR
           : state === "pruned"
             ? KEYFRAME_MARKER_PRUNED_COLOR
-            : KEYFRAME_MARKER_COLOR,
+            : state === "unknown"
+              ? KEYFRAME_MARKER_UNKNOWN_COLOR
+              : KEYFRAME_MARKER_COLOR,
         radius: isSelected ? KEYFRAME_MARKER_SELECTED_RADIUS : KEYFRAME_MARKER_RADIUS,
         scaleWithZoom: true,
-      }];
+      };
     });
   }, [
     showKeyframeGraph,
-    status?.markers,
+    markers,
     keyframeSummaryById,
     selectedKeyframeForMap,
   ]);
@@ -550,7 +613,7 @@ function ObjectSearchExplorerPanel(props: Props) {
   }, [depthPin?.requestId]);
 
   const showLivemapResizer =
-    emmid !== null && (status?.markers?.length ?? 0) > 0;
+    emmid !== null && (markers?.length ?? 0) > 0;
   const initialPhotosphereView = useMemo(() => {
     const headingDeg = activeKeyframeMarker?.heading_deg;
     const bearingDeg = preservedCompassBearingDegRef.current;
@@ -575,11 +638,11 @@ function ObjectSearchExplorerPanel(props: Props) {
       !activeKeyframeId ||
       !activeKeyframeMarker ||
       activeKeyframeMarker.heading_deg === null ||
-      !status?.markers
+      !markers
     ) {
       return [];
     }
-    return status.markers.flatMap((marker) => {
+    return markers.flatMap((marker) => {
       // Any keyframe with a pose is navigable: walking the panorama does not need
       // the map to have been prepared, let alone ingested.
       if (
@@ -608,7 +671,7 @@ function ObjectSearchExplorerPanel(props: Props) {
   }, [
     activeKeyframeId,
     activeKeyframeMarker,
-    status?.markers,
+    markers,
   ]);
 
   const cone = useMemo<LivemapCone | null>(() => {
@@ -641,14 +704,6 @@ function ObjectSearchExplorerPanel(props: Props) {
       return [];
     }
     return keyframeGraph.edges.flatMap((edge) => {
-      if (
-        preparedKeyframeIds.length &&
-        edge.keyframe_id_1 &&
-        edge.keyframe_id_2 &&
-        (!keyframeSummaryById.has(edge.keyframe_id_1) || !keyframeSummaryById.has(edge.keyframe_id_2))
-      ) {
-        return [];
-      }
       const levels = edge.levels.length ? edge.levels : [null];
       return levels.map((level, levelIndex) => ({
         id: `${edge.id}-${levelIndex}`,
@@ -663,7 +718,7 @@ function ObjectSearchExplorerPanel(props: Props) {
         interactive: true,
       }));
     });
-  }, [keyframeGraph, showKeyframeGraph, keyframeSummaryById, preparedKeyframeIds]);
+  }, [keyframeGraph, showKeyframeGraph]);
   const keyframeLinkSegments: LivemapSegment[] = useMemo(() => {
     if (!keyframeLink) {
       return [];
@@ -672,7 +727,7 @@ function ObjectSearchExplorerPanel(props: Props) {
       (item) =>
         item.id === keyframeLink.annotationId && item.annotationType === "point",
     );
-    const keyframeMarker = status?.markers?.find(
+    const keyframeMarker = markers?.find(
       (marker) => marker.id === keyframeLink.keyframeId,
     );
     if (!ann || !keyframeMarker) {
@@ -693,7 +748,7 @@ function ObjectSearchExplorerPanel(props: Props) {
         interactive: false,
       },
     ];
-  }, [keyframeLink, annotation.annotations, status?.markers]);
+  }, [keyframeLink, annotation.annotations, markers]);
   const livemapSegments: LivemapSegment[] = useMemo(
     () => [...keyframeGraphSegments, ...keyframeLinkSegments],
     [keyframeGraphSegments, keyframeLinkSegments],
@@ -701,7 +756,7 @@ function ObjectSearchExplorerPanel(props: Props) {
 
   const selectGraphKeyframe = useCallback(
     (keyframeId: string) => {
-      if (!status?.markers?.some((marker) => marker.id === keyframeId)) {
+      if (!markers?.some((marker) => marker.id === keyframeId)) {
         return;
       }
       setKeyframeFilter(keyframeId);
@@ -709,7 +764,7 @@ function ObjectSearchExplorerPanel(props: Props) {
       setDepthPin(null);
       setDepthPinPopoverOpen(false);
     },
-    [status?.markers],
+    [markers],
   );
 
   const handlePhotosphereViewChange = useCallback(
@@ -720,13 +775,13 @@ function ObjectSearchExplorerPanel(props: Props) {
       setPhotosphereViewKeyframeId(keyframeId);
       setPhotosphereYawRad(yawRad);
       preservedTextureYRatioRef.current = textureYRatio;
-      const headingDeg = status?.markers?.find((marker) => marker.id === keyframeId)?.heading_deg;
+      const headingDeg = markers?.find((marker) => marker.id === keyframeId)?.heading_deg;
       if (headingDeg !== null && headingDeg !== undefined) {
         preservedCompassBearingDegRef.current =
           ((headingDeg + yawRad * 180 / Math.PI) % 360 + 360) % 360;
       }
     },
-    [activeKeyframeId, status?.markers],
+    [activeKeyframeId, markers],
   );
 
   useEffect(() => {
@@ -847,10 +902,10 @@ function ObjectSearchExplorerPanel(props: Props) {
    */
   const navigableKeyframeIds = useMemo(
     () =>
-      (status?.markers ?? [])
+      (markers ?? [])
         .map((marker) => marker.id)
         .sort((a, b) => Number(a) - Number(b)),
-    [status?.markers],
+    [markers],
   );
 
   const keyframeEquirectPreviewUrl = activeKeyframeId
@@ -1053,7 +1108,7 @@ function ObjectSearchExplorerPanel(props: Props) {
     if (!activeKeyframeId) {
       return null;
     }
-    const marker = status?.markers?.find((item) => item.id === activeKeyframeId);
+    const marker = markers?.find((item) => item.id === activeKeyframeId);
     if (!marker) {
       return null;
     }
@@ -1062,7 +1117,7 @@ function ObjectSearchExplorerPanel(props: Props) {
       longitude: marker.longitude,
       level: marker.level,
     };
-  }, [activeKeyframeId, status?.markers, annotation.focusTarget]);
+  }, [activeKeyframeId, markers, annotation.focusTarget]);
 
   useEffect(() => {
     setPage(1);
@@ -1212,7 +1267,7 @@ function ObjectSearchExplorerPanel(props: Props) {
     }
     // Orient the panorama toward the localization: convert the keyframe→annotation
     // compass bearing into a viewer yaw relative to the keyframe heading.
-    const keyframeMarker = status?.markers?.find(
+    const keyframeMarker = markers?.find(
       (marker) => marker.id === keyframeId,
     );
     const coordinates = ann.coordinates as number[];
@@ -1486,7 +1541,7 @@ function ObjectSearchExplorerPanel(props: Props) {
       */}
       <div className="metrics-row">
         <span>Keyframes with a pose {status?.manifest_keyframe_count ?? 0}</span>
-        <span>Keyframes with proposals {summary?.keyframes.length ?? 0}</span>
+        <span>Matching keyframes {totalKeyframes}</span>
         <span>Proposals {totalRows}</span>
         <span>With depth {summary?.with_depth_count ?? 0}</span>
         {summary?.coverage ? (
@@ -1560,7 +1615,7 @@ function ObjectSearchExplorerPanel(props: Props) {
               <p className="info-box">
                 Map preview unavailable: no <code>emmid</code> configured for this map.
               </p>
-            ) : !(status?.markers?.length ?? 0) ? (
+            ) : status === null || status.marker_count === 0 ? (
               <p className="muted">
                 No keyframe coordinates could be resolved from local map metadata.
               </p>
@@ -1654,8 +1709,8 @@ function ObjectSearchExplorerPanel(props: Props) {
                   />
                 </div>
                 <p className="map-caption">
-                  {status?.markers?.length ?? 0} keyframes have a resolvable pose;{" "}
-                  {summary?.keyframes.length ?? 0} of them carry proposals.
+                  {status?.marker_count ?? 0} keyframes have a resolvable pose;{" "}
+                  {totalKeyframes} match the proposal filters.
                   {showKeyframeGraph
                     ? " Hover the graph to reveal the closest keyframe; click the graph or revealed point to filter cutouts."
                     : " Enable the graph to reveal nearby keyframes on hover."}
@@ -1887,7 +1942,7 @@ function ObjectSearchExplorerPanel(props: Props) {
 
       <CollapsibleSection
         title="Proposal explorer"
-        summary={`${pageRows.length} shown | ${visibleKeyframes.length} keyframes`}
+        summary={`${pageRows.length} shown | ${totalKeyframes} keyframes`}
         sectionClassName="object-search-explorer-browser"
         defaultOpen
       >
@@ -1914,7 +1969,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                     return (
                       <option key={keyframeId} value={keyframeId}>
                         {keyframeId} |{" "}
-                        {keyframe ? `${keyframe.row_count} proposals` : "not prepared"}
+                        {keyframe ? `${keyframe.row_count} proposals` : "summary not loaded"}
                         {keyframe?.ingested === 0 ? " | pruned" : ""}
                       </option>
                     );

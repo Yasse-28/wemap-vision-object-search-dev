@@ -69,10 +69,12 @@ export type KeyframeMarker = {
 };
 
 export type ColumnarKeyframeMarkers = {
-  ids: string[];
+  ids_are_dense: boolean;
+  ids?: string[];
   latitude: number[];
   longitude: number[];
-  level: Array<string | null>;
+  levels: string[];
+  level_codes: number[];
   heading_deg: Array<number | null>;
 };
 
@@ -80,7 +82,6 @@ export type MetadataSummary = {
   metadata_path: string;
   row_count: number;
   postprocessed: boolean;
-  keyframes: KeyframeSummary[];
   detector_source_counts: Record<string, number>;
   with_depth_count: number;
   coverage: {
@@ -101,19 +102,19 @@ export type MetadataStatusResponse = {
   manifest_keyframe_count: number;
   error: string | null;
   summary: MetadataSummary | null;
-  /**
-   * Every keyframe in the manifest, not only the indexed ones: the photosphere,
-   * depth preview, depth pin, view cone and keyframe graph need poses alone.
-   */
-  markers?: KeyframeMarker[];
-  resolved_marker_count?: number;
+  marker_count: number;
+  first_keyframe_id: string | null;
 };
 
-export type MetadataStatusWireResponse = Omit<MetadataStatusResponse, "markers" | "summary"> & {
-  markers?: ColumnarKeyframeMarkers;
-  summary: (Omit<MetadataSummary, "keyframes"> & {
-    keyframes: ColumnarKeyframeSummaries;
-  }) | null;
+export type MetadataMarkersWireResponse = ColumnarKeyframeMarkers;
+
+export type MetadataKeyframesResponse = {
+  total: number;
+  keyframes: KeyframeSummary[];
+};
+
+export type MetadataKeyframesWireResponse = ColumnarKeyframeSummaries & {
+  total: number;
 };
 
 export type MetadataRowsResponse = {

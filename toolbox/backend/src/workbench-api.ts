@@ -32,7 +32,9 @@ import {
   keyframeMetadataPayload,
   metadataRowPayload,
   metadataRowRenderPng,
+  metadataKeyframesPayload,
   metadataRowsPayload,
+  objectSearchMetadataMarkersPayload,
   objectSearchMetadataStatusPayload,
   previewFromPathPng,
   rowFilterParamsFromQuery,
@@ -234,6 +236,34 @@ export async function handleWorkbenchUiMapRoute(
         200,
         await objectSearchMetadataStatusPayload(
           map,
+          options.pythonApiBaseUrl,
+        ),
+      );
+      return true;
+    }
+    if (method === "GET" && suffix === "/object-search-metadata/markers") {
+      sendJson(response, 200, await objectSearchMetadataMarkersPayload(map));
+      return true;
+    }
+    if (method === "GET" && suffix === "/object-search-metadata/keyframes") {
+      const sort = queryString(url, "sort") ?? "parquet";
+      if (!(["parquet", "objects-desc", "objects-asc"] as const).includes(
+        sort as "parquet" | "objects-desc" | "objects-asc",
+      )) {
+        throw new WorkbenchRouteError(400, `Unknown keyframe sort '${sort}'.`);
+      }
+      sendJson(
+        response,
+        200,
+        await metadataKeyframesPayload(
+          map,
+          {
+            offset: queryNumber(url, "offset", 0),
+            limit: queryNumber(url, "limit", 100),
+            sort: sort as "parquet" | "objects-desc" | "objects-asc",
+            includeEmpty: url.searchParams.get("include_empty") !== "false",
+            keyframeId: queryString(url, "keyframe_id"),
+          },
           options.pythonApiBaseUrl,
         ),
       );

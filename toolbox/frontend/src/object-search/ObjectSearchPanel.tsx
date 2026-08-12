@@ -25,10 +25,13 @@ import { DEFAULT_MATCH_ACCURACY_M, FEEDBACK_NORMALIZATIONS } from "../benchmark/
 import { configSummary as scoreConfigSummary } from "../benchmark/config-summary";
 import {
   fetchKeyframeGraph,
-  fetchMetadataStatus,
+  fetchMetadataMarkers,
   indexKeyframeEquirectPreviewUrl,
 } from "../index-explorer/api";
-import type { KeyframeGraphResponse, MetadataStatusResponse } from "../index-explorer/types";
+import type {
+  KeyframeGraphResponse,
+  KeyframeMarker,
+} from "../index-explorer/types";
 import { runObjectSearch } from "./api";
 import type {
   EnrichedResult,
@@ -312,7 +315,7 @@ function ObjectSearchPanel(props: Props) {
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   // ── New: keyframe / map state ──────────────────────────────────────────────
-  const [indexStatus, setIndexStatus] = useState<MetadataStatusResponse | null>(null);
+  const [keyframeMarkers, setKeyframeMarkers] = useState<KeyframeMarker[] | null>(null);
   const [keyframeGraph, setKeyframeGraph] = useState<KeyframeGraphResponse | null>(null);
   const [showKeyframeMarkers, setShowKeyframeMarkers] = useState(true);
   const [showKeyframeGraph, setShowKeyframeGraph] = useState(true);
@@ -327,6 +330,10 @@ function ObjectSearchPanel(props: Props) {
   const [panoramaViewRequestId, setPanoramaViewRequestId] = useState(0);
   const preservedCompassBearingDegRef = useRef<number | null>(null);
   const preservedTextureYRatioRef = useRef(0.5);
+  const markerRequestRef = useRef<{
+    mapId: string;
+    promise: Promise<KeyframeMarker[]>;
+  } | null>(null);
 
   // ── New: layout split state ────────────────────────────────────────────────
   const [colWidthPct, setColWidthPct] = useState(55);
@@ -345,19 +352,42 @@ function ObjectSearchPanel(props: Props) {
 
   // ── Fetch keyframe data ────────────────────────────────────────────────────
   useEffect(() => {
-    if (!props.isMapKnown) return;
+    setKeyframeMarkers(null);
+    markerRequestRef.current = null;
+  }, [props.mapId]);
+
+  useEffect(() => {
+    const needsMarkerTable =
+      showKeyframeMarkers || activeKeyframeId !== null || result !== null;
+    if (!props.isMapKnown || !needsMarkerTable || keyframeMarkers !== null) return;
+    // A single coordinate or heading lookup deliberately fills the same cached table
+    // used by the overlay, avoiding a second single-marker API shape.
     let cancelled = false;
-    // Only `markers` is used here — every keyframe with a pose, which is now the
-    // case whether or not the map has object-search metadata.
-    fetchMetadataStatus(props.mapId)
-      .then((s) => {
-        if (!cancelled) setIndexStatus(s);
+    const request =
+      markerRequestRef.current?.mapId === props.mapId
+        ? markerRequestRef.current.promise
+        : fetchMetadataMarkers(props.mapId);
+    markerRequestRef.current = { mapId: props.mapId, promise: request };
+    request
+      .then((payload) => {
+        if (!cancelled) setKeyframeMarkers(payload);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (markerRequestRef.current?.promise === request) {
+          markerRequestRef.current = null;
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, [props.mapId, props.isMapKnown]);
+  }, [
+    props.mapId,
+    props.isMapKnown,
+    showKeyframeMarkers,
+    activeKeyframeId,
+    result,
+    keyframeMarkers,
+  ]);
 
   useEffect(() => {
     if (!props.isMapKnown) return;
@@ -517,7 +547,7 @@ function ObjectSearchPanel(props: Props) {
   const keyframeCoords = result && result.mode !== "text" ? result.keyframes : {};
   const keyframeMapPositions = useMemo(() => {
     const positions = { ...keyframeCoords };
-    for (const marker of indexStatus?.markers ?? []) {
+    for (const marker of keyframeMarkers ?? []) {
       if (positions[marker.id]) {
         continue;
       }
@@ -529,7 +559,7 @@ function ObjectSearchPanel(props: Props) {
       };
     }
     return positions;
-  }, [indexStatus?.markers, keyframeCoords]);
+  }, [keyframeMarkers, keyframeCoords]);
   const selectedLoc = localizations[selectedLocIdx] ?? null;
   const selectedObservation = selectedLoc?.observations[selectedObsIdx] ?? null;
   const selectedObservationCamera =
@@ -549,7 +579,7 @@ function ObjectSearchPanel(props: Props) {
 
   // ── Derived: keyframe marker for active KF ─────────────────────────────────
   const activeKeyframeMarker =
-    indexStatus?.markers?.find((m) => m.id === activeKeyframeId) ?? null;
+    keyframeMarkers?.find((m) => m.id === activeKeyframeId) ?? null;
   const initialPhotosphereView = useMemo(() => {
     const headingDeg = activeKeyframeMarker?.heading_deg;
     const bearingDeg = preservedCompassBearingDegRef.current;
@@ -646,8 +676,8 @@ function ObjectSearchPanel(props: Props) {
 
   const allMapMarkers: LivemapMarker[] = useMemo(() => {
     const markers: LivemapMarker[] = [];
-    if (showKeyframeMarkers && indexStatus?.markers) {
-      for (const m of indexStatus.markers) {
+    if (showKeyframeMarkers && keyframeMarkers) {
+      for (const m of keyframeMarkers) {
         const isActive = m.id === activeKeyframeId;
         markers.push({
           id: `kf_${m.id}`,
@@ -664,7 +694,7 @@ function ObjectSearchPanel(props: Props) {
       markers.push(m);
     }
     return markers;
-  }, [indexStatus?.markers, showKeyframeMarkers, activeKeyframeId, resultMarkers]);
+  }, [keyframeMarkers, showKeyframeMarkers, activeKeyframeId, resultMarkers]);
 
   // ── Segments ───────────────────────────────────────────────────────────────
   const localizeSegments: LivemapSegment[] = useMemo(() => {
@@ -761,8 +791,8 @@ function ObjectSearchPanel(props: Props) {
 
   // ── Keyframe navigation ────────────────────────────────────────────────────
   const keyframeIds = useMemo(
-    () => indexStatus?.markers?.map((m) => m.id) ?? [],
-    [indexStatus],
+    () => keyframeMarkers?.map((m) => m.id) ?? [],
+    [keyframeMarkers],
   );
 
   const activeKeyframeIndex = activeKeyframeId ? keyframeIds.indexOf(activeKeyframeId) : -1;
@@ -770,10 +800,10 @@ function ObjectSearchPanel(props: Props) {
   const hasNextKeyframe = activeKeyframeIndex >= 0 && activeKeyframeIndex < keyframeIds.length - 1;
 
   const photosphereNavigationCandidates = useMemo<NavigationCandidate[]>(() => {
-    if (!activeKeyframeId || !activeKeyframeMarker || activeKeyframeMarker.heading_deg == null || !indexStatus?.markers) {
+    if (!activeKeyframeId || !activeKeyframeMarker || activeKeyframeMarker.heading_deg == null || !keyframeMarkers) {
       return [];
     }
-    return indexStatus.markers.flatMap((marker) => {
+    return keyframeMarkers.flatMap((marker) => {
       if (marker.id === activeKeyframeId || marker.level !== activeKeyframeMarker.level) return [];
       return [{
         id: marker.id,
@@ -787,7 +817,7 @@ function ObjectSearchPanel(props: Props) {
         ),
       }];
     });
-  }, [activeKeyframeId, activeKeyframeMarker, indexStatus?.markers]);
+  }, [activeKeyframeId, activeKeyframeMarker, keyframeMarkers]);
 
   const navigateToKeyframe = useCallback(
     (keyframeId: string, compassBearingDeg?: number) => {
@@ -983,13 +1013,13 @@ function ObjectSearchPanel(props: Props) {
       setPhotosphereViewKeyframeId(kfId);
       setPhotosphereYawRad(yawRad);
       preservedTextureYRatioRef.current = textureYRatio;
-      const headingDeg = indexStatus?.markers?.find((marker) => marker.id === kfId)?.heading_deg;
+      const headingDeg = keyframeMarkers?.find((marker) => marker.id === kfId)?.heading_deg;
       if (headingDeg !== null && headingDeg !== undefined) {
         preservedCompassBearingDegRef.current =
           ((headingDeg + (yawRad * 180) / Math.PI) % 360 + 360) % 360;
       }
     },
-    [activeKeyframeId, indexStatus?.markers],
+    [activeKeyframeId, keyframeMarkers],
   );
 
   // ── Layout resize ──────────────────────────────────────────────────────────

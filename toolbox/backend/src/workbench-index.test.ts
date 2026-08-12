@@ -6,9 +6,11 @@ import test from "node:test";
 
 import type { MapEntry } from "./config.js";
 import {
+  columnarKeyframeMarkers,
   indexProjectWorldPointPayload,
   keyframeHeadingDegreesFromPose,
-  legacyObjectSearchMetadataStatusPayloadForComparison,
+  metadataKeyframesPayload,
+  objectSearchMetadataMarkersPayload,
   objectSearchMetadataStatusPayload,
   WorkbenchRouteError,
 } from "./workbench-index.js";
@@ -108,91 +110,84 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function alignedColumnLength(value: unknown): number {
-  const columns = asRecord(value);
-  const lengths = Object.values(columns).map((column) => {
-    assert.ok(Array.isArray(column));
-    return column.length;
-  });
-  assert.ok(lengths.length > 0);
-  assert.ok(lengths.every((length) => length === lengths[0]));
-  return lengths[0];
-}
-
-test("status payload uses index-aligned columns without marker styles", async () => {
+test("status leaves marker and keyframe tables on their own routes", async () => {
   const fixture = await createMetadataMap();
   try {
     const payload = await objectSearchMetadataStatusPayload(fixture.map);
     const summary = asRecord(payload.summary);
-    assert.deepEqual(Object.keys(asRecord(payload.markers)), [
-      "ids",
-      "latitude",
-      "longitude",
-      "level",
-      "heading_deg",
-    ]);
-    assert.deepEqual(Object.keys(asRecord(summary.keyframes)), [
-      "ids",
-      "row_start",
-      "row_count",
-      "with_depth",
-      "ingested",
-      "no_position",
-    ]);
-    assert.equal(alignedColumnLength(payload.markers), payload.resolved_marker_count);
-    assert.equal(alignedColumnLength(summary.keyframes), 3);
-    assert.doesNotMatch(JSON.stringify(payload.markers), /\"(?:color|radius)\"/);
+    assert.equal("markers" in payload, false);
+    assert.equal("keyframes" in summary, false);
+    assert.equal(payload.marker_count, 3);
+    assert.equal(payload.first_keyframe_id, "0");
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("columnar status is semantically equivalent to the object fixture payload", async () => {
+test("marker payload omits dense ids and dictionary-encodes levels", async () => {
   const fixture = await createMetadataMap();
   try {
-    const legacy = await legacyObjectSearchMetadataStatusPayloadForComparison(fixture.map);
-    const columnar = await objectSearchMetadataStatusPayload(fixture.map);
-    const markerColumns = asRecord(columnar.markers);
-    const summary = asRecord(columnar.summary);
-    const summaryColumns = asRecord(summary.keyframes);
+    const columns = await objectSearchMetadataMarkersPayload(fixture.map);
+    assert.equal(columns.ids_are_dense, true);
+    assert.equal("ids" in columns, false);
+    assert.deepEqual(columns.levels, ["0"]);
+    assert.deepEqual(columns.level_codes, [0, 0, 0]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
-    const reconstructedMarkers = (markerColumns.ids as string[]).map((id, index) => ({
-      id,
-      latitude: (markerColumns.latitude as number[])[index],
-      longitude: (markerColumns.longitude as number[])[index],
-      level: (markerColumns.level as Array<string | null>)[index],
-      heading_deg: (markerColumns.heading_deg as Array<number | null>)[index],
-    }));
-    const reconstructedKeyframes = (summaryColumns.ids as string[]).map((id, index) => ({
-      id,
-      row_start: (summaryColumns.row_start as number[])[index],
-      row_count: (summaryColumns.row_count as number[])[index],
-      with_depth: (summaryColumns.with_depth as number[])[index],
-      ingested: (summaryColumns.ingested as Array<number | null>)[index],
-      no_position: (summaryColumns.no_position as Array<number | null>)[index],
-    }));
+test("marker payload sends non-dense ids and reserves -1 for null levels", () => {
+  const columns = columnarKeyframeMarkers([
+    { id: "2", latitude: 1, longitude: 2, level: "L1", heading_deg: 90 },
+    { id: "7", latitude: 3, longitude: 4, level: null, heading_deg: null },
+    { id: "9", latitude: 5, longitude: 6, level: "L1", heading_deg: 180 },
+  ]);
+  assert.equal(columns.ids_are_dense, false);
+  assert.deepEqual(columns.ids, ["2", "7", "9"]);
+  assert.deepEqual(columns.levels, ["L1"]);
+  assert.deepEqual(columns.level_codes, [0, -1, 0]);
+});
 
-    const normalizedLegacy = structuredClone(legacy);
-    normalizedLegacy.markers = (normalizedLegacy.markers as Array<Record<string, unknown>>).map(
-      ({ color: _color, radius: _radius, ...marker }) => ({
-        ...marker,
-        latitude: Number(Number(marker.latitude).toFixed(7)),
-        longitude: Number(Number(marker.longitude).toFixed(7)),
-        heading_deg:
-          marker.heading_deg === null
-            ? null
-            : Number(Number(marker.heading_deg).toFixed(2)),
-      }),
-    );
-    const normalizedSummary = asRecord(normalizedLegacy.summary);
-    normalizedSummary.keyframes = (
-      normalizedSummary.keyframes as Array<Record<string, unknown>>
-    ).map(({ row_end: _rowEnd, ...keyframe }) => keyframe);
-
-    const reconstructed = structuredClone(columnar);
-    reconstructed.markers = reconstructedMarkers;
-    asRecord(reconstructed.summary).keyframes = reconstructedKeyframes;
-    assert.deepEqual(reconstructed, normalizedLegacy);
+test("keyframe pages match the former client-side sort and filters", async () => {
+  const fixture = await createMetadataMap();
+  const parquetOrder = [
+    { id: "0", row_count: 3 },
+    { id: "3", row_count: 2 },
+    { id: "7", row_count: 2 },
+  ];
+  try {
+    for (const sort of ["parquet", "objects-desc", "objects-asc"] as const) {
+      for (const includeEmpty of [true, false]) {
+        for (const keyframeId of [null, "3", "missing"]) {
+          let expected = parquetOrder
+            .filter((item) => keyframeId === null || item.id === keyframeId)
+            .filter((item) => includeEmpty || item.row_count > 0);
+          if (sort === "objects-desc") {
+            expected = [...expected].sort(
+              (a, b) => b.row_count - a.row_count || a.id.localeCompare(b.id),
+            );
+          } else if (sort === "objects-asc") {
+            expected = [...expected].sort(
+              (a, b) => a.row_count - b.row_count || a.id.localeCompare(b.id),
+            );
+          }
+          const payload = await metadataKeyframesPayload(fixture.map, {
+            offset: 0,
+            limit: 2,
+            sort,
+            includeEmpty,
+            keyframeId,
+          });
+          assert.equal(payload.total, expected.length);
+          assert.deepEqual(payload.ids, expected.slice(0, 2).map((item) => item.id));
+          assert.deepEqual(
+            payload.row_count,
+            expected.slice(0, 2).map((item) => item.row_count),
+          );
+        }
+      }
+    }
   } finally {
     await fixture.cleanup();
   }

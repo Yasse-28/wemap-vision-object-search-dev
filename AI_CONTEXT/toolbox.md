@@ -35,7 +35,9 @@ The annotation ownership boundary is recorded in
 
 | Route | Notes |
 |---|---|
-| `GET /object-search-metadata` | Status + index-aligned columnar `summary.keyframes` and `markers` (`ids` plus parallel value arrays). Markers cover every manifest keyframe with a resolved pose. `summary` is null with no parquet; `coverage` is null when the bricks service does not answer. Never fails on either. |
+| `GET /object-search-metadata` | Eager status and aggregate counters only, plus `marker_count` and the numerically smallest `first_keyframe_id`. `summary` is null with no parquet; `coverage` is null when the bricks service does not answer. Never fails on either. |
+| `GET /object-search-metadata/markers` | On-demand columnar manifest poses. Dense ids are omitted with `ids_are_dense: true`; levels use `levels` + `level_codes` (`-1` = null). |
+| `GET /object-search-metadata/keyframes` | Server-paged columnar keyframe summaries with `offset`, `limit`, `sort`, `include_empty`, optional `keyframe_id`, and post-filter `total`. |
 | `GET /object-search-metadata/rows` | Flat row table: `keyframe_ids`, `offset`, `limit`, `detector_source`, `label`, `with_depth`. One request per explorer page. |
 | `GET /object-search-metadata/rows/{row_index}` | One row + `preview_path` (its `thumbnail_key`) + `preview_debug`. |
 | `GET /object-search-metadata/rows/{row_index}/render.png` | Re-render from the ERP (`size`, `fov_scale`). **Not** the default preview — 422 for a proposal spanning ≥180°. |
@@ -141,7 +143,7 @@ created **once per `emmid`** in a detached `<div>` and cached:
 - **"Has a pose", "has proposals" and "is in pgvector" are three different sets.**
   The manifest has 3674 keyframes; the parquet lists the ones prepare ran on; ingest
   prunes keyframes closer than 1.5 m. The panel reports all three separately and
-  colours markers tri-state (indexed / pruned / unknown) — conflating them is the
+  colours markers by indexed / pruned / not-prepared / unknown state — conflating them is the
   mistake this panel exists to prevent.
 - **Area thresholds are square degrees, not ERP pixels.** A v2 proposal has an angular
   extent and no fixed raster. `bboxPostProcess.ts` bumped its `localStorage` key for
