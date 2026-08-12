@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,8 +8,12 @@ import type { MapEntry } from "./config.js";
 import {
   indexProjectWorldPointPayload,
   keyframeHeadingDegreesFromPose,
+  legacyObjectSearchMetadataStatusPayloadForComparison,
+  objectSearchMetadataStatusPayload,
   WorkbenchRouteError,
 } from "./workbench-index.js";
+
+const FIXTURES = path.resolve(import.meta.dirname, "..", "test-fixtures");
 
 test("derives compass heading from world-to-camera extrinsics", () => {
   const identity = [
@@ -84,6 +88,115 @@ async function createMap(
     cleanup: () => rm(mapPath, { recursive: true, force: true }),
   };
 }
+
+async function createMetadataMap(): Promise<{
+  map: MapEntry;
+  cleanup: () => Promise<void>;
+}> {
+  const fixture = await createMap([1.23456789, 2.34567891, 3.45678912]);
+  const metadataDirectory = path.join(fixture.map.path, "object-search");
+  await mkdir(metadataDirectory, { recursive: true });
+  await copyFile(
+    path.join(FIXTURES, "metadata-postprocessed.parquet"),
+    path.join(metadataDirectory, "metadata.parquet"),
+  );
+  return fixture;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value));
+  return value as Record<string, unknown>;
+}
+
+function alignedColumnLength(value: unknown): number {
+  const columns = asRecord(value);
+  const lengths = Object.values(columns).map((column) => {
+    assert.ok(Array.isArray(column));
+    return column.length;
+  });
+  assert.ok(lengths.length > 0);
+  assert.ok(lengths.every((length) => length === lengths[0]));
+  return lengths[0];
+}
+
+test("status payload uses index-aligned columns without marker styles", async () => {
+  const fixture = await createMetadataMap();
+  try {
+    const payload = await objectSearchMetadataStatusPayload(fixture.map);
+    const summary = asRecord(payload.summary);
+    assert.deepEqual(Object.keys(asRecord(payload.markers)), [
+      "ids",
+      "latitude",
+      "longitude",
+      "level",
+      "heading_deg",
+    ]);
+    assert.deepEqual(Object.keys(asRecord(summary.keyframes)), [
+      "ids",
+      "row_start",
+      "row_count",
+      "with_depth",
+      "ingested",
+      "no_position",
+    ]);
+    assert.equal(alignedColumnLength(payload.markers), payload.resolved_marker_count);
+    assert.equal(alignedColumnLength(summary.keyframes), 3);
+    assert.doesNotMatch(JSON.stringify(payload.markers), /\"(?:color|radius)\"/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("columnar status is semantically equivalent to the object fixture payload", async () => {
+  const fixture = await createMetadataMap();
+  try {
+    const legacy = await legacyObjectSearchMetadataStatusPayloadForComparison(fixture.map);
+    const columnar = await objectSearchMetadataStatusPayload(fixture.map);
+    const markerColumns = asRecord(columnar.markers);
+    const summary = asRecord(columnar.summary);
+    const summaryColumns = asRecord(summary.keyframes);
+
+    const reconstructedMarkers = (markerColumns.ids as string[]).map((id, index) => ({
+      id,
+      latitude: (markerColumns.latitude as number[])[index],
+      longitude: (markerColumns.longitude as number[])[index],
+      level: (markerColumns.level as Array<string | null>)[index],
+      heading_deg: (markerColumns.heading_deg as Array<number | null>)[index],
+    }));
+    const reconstructedKeyframes = (summaryColumns.ids as string[]).map((id, index) => ({
+      id,
+      row_start: (summaryColumns.row_start as number[])[index],
+      row_count: (summaryColumns.row_count as number[])[index],
+      with_depth: (summaryColumns.with_depth as number[])[index],
+      ingested: (summaryColumns.ingested as Array<number | null>)[index],
+      no_position: (summaryColumns.no_position as Array<number | null>)[index],
+    }));
+
+    const normalizedLegacy = structuredClone(legacy);
+    normalizedLegacy.markers = (normalizedLegacy.markers as Array<Record<string, unknown>>).map(
+      ({ color: _color, radius: _radius, ...marker }) => ({
+        ...marker,
+        latitude: Number(Number(marker.latitude).toFixed(7)),
+        longitude: Number(Number(marker.longitude).toFixed(7)),
+        heading_deg:
+          marker.heading_deg === null
+            ? null
+            : Number(Number(marker.heading_deg).toFixed(2)),
+      }),
+    );
+    const normalizedSummary = asRecord(normalizedLegacy.summary);
+    normalizedSummary.keyframes = (
+      normalizedSummary.keyframes as Array<Record<string, unknown>>
+    ).map(({ row_end: _rowEnd, ...keyframe }) => keyframe);
+
+    const reconstructed = structuredClone(columnar);
+    reconstructed.markers = reconstructedMarkers;
+    asRecord(reconstructed.summary).keyframes = reconstructedKeyframes;
+    assert.deepEqual(reconstructed, normalizedLegacy);
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
 test("projects a WDS point into an identity keyframe ERP", async () => {
   const fixture = await createMap([0, 0, 0]);

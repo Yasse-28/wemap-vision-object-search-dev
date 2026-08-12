@@ -234,7 +234,6 @@ export async function handleWorkbenchUiMapRoute(
         200,
         await objectSearchMetadataStatusPayload(
           map,
-          queryString(url, "selected_keyframe_id"),
           options.pythonApiBaseUrl,
         ),
       );

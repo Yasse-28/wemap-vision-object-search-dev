@@ -349,7 +349,7 @@ function ObjectSearchPanel(props: Props) {
     let cancelled = false;
     // Only `markers` is used here — every keyframe with a pose, which is now the
     // case whether or not the map has object-search metadata.
-    fetchMetadataStatus(props.mapId, null)
+    fetchMetadataStatus(props.mapId)
       .then((s) => {
         if (!cancelled) setIndexStatus(s);
       })

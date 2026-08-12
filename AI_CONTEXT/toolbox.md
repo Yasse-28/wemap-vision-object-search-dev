@@ -35,7 +35,7 @@ The annotation ownership boundary is recorded in
 
 | Route | Notes |
 |---|---|
-| `GET /object-search-metadata` | Status + `summary.keyframes[]` + markers for **every** manifest keyframe. `summary` is null with no parquet; `coverage` is null when the bricks service does not answer. Never fails on either. |
+| `GET /object-search-metadata` | Status + index-aligned columnar `summary.keyframes` and `markers` (`ids` plus parallel value arrays). Markers cover every manifest keyframe with a resolved pose. `summary` is null with no parquet; `coverage` is null when the bricks service does not answer. Never fails on either. |
 | `GET /object-search-metadata/rows` | Flat row table: `keyframe_ids`, `offset`, `limit`, `detector_source`, `label`, `with_depth`. One request per explorer page. |
 | `GET /object-search-metadata/rows/{row_index}` | One row + `preview_path` (its `thumbnail_key`) + `preview_debug`. |
 | `GET /object-search-metadata/rows/{row_index}/render.png` | Re-render from the ERP (`size`, `fov_scale`). **Not** the default preview — 422 for a proposal spanning ≥180°. |

@@ -15,6 +15,7 @@ import type {
   MetadataRowRecord,
   MetadataRowsResponse,
   MetadataStatusResponse,
+  MetadataStatusWireResponse,
   ProjectWorldPointResponse,
   ViewConeResponse,
 } from "./types";
@@ -77,15 +78,58 @@ function normalizeRow(item: unknown): MetadataRowRecord | null {
   };
 }
 
-export async function fetchMetadataStatus(
-  mapId: string,
-  selectedKeyframeId: string | null,
-): Promise<MetadataStatusResponse> {
-  const params = new URLSearchParams();
-  if (selectedKeyframeId) {
-    params.set("selected_keyframe_id", selectedKeyframeId);
+function assertAlignedColumns(
+  label: string,
+  columns: ReadonlyArray<readonly unknown[]>,
+): void {
+  const expected = columns[0]?.length ?? 0;
+  if (!columns.every((column) => column.length === expected)) {
+    throw new Error(`${label} column lengths are not aligned.`);
   }
-  return readJson(await fetch(metadataUrl(mapId, "", params)));
+}
+
+function materializeMetadataStatus(
+  payload: MetadataStatusWireResponse,
+): MetadataStatusResponse {
+  const markerColumns = payload.markers;
+  const markers = markerColumns
+    ? (() => {
+        assertAlignedColumns("markers", Object.values(markerColumns));
+        return markerColumns.ids.map((id, index) => ({
+          id,
+          latitude: markerColumns.latitude[index],
+          longitude: markerColumns.longitude[index],
+          level: markerColumns.level[index],
+          heading_deg: markerColumns.heading_deg[index],
+        }));
+      })()
+    : undefined;
+  const summary = payload.summary
+    ? (() => {
+        const { keyframes: columns, ...rest } = payload.summary;
+        assertAlignedColumns("summary.keyframes", Object.values(columns));
+        return {
+          ...rest,
+          keyframes: columns.ids.map((id, index) => ({
+            id,
+            row_start: columns.row_start[index],
+            row_count: columns.row_count[index],
+            row_end: columns.row_start[index] + columns.row_count[index],
+            with_depth: columns.with_depth[index],
+            ingested: columns.ingested[index],
+            no_position: columns.no_position[index],
+          })),
+        };
+      })()
+    : null;
+  return { ...payload, markers, summary };
+}
+
+export async function fetchMetadataStatus(mapId: string): Promise<MetadataStatusResponse> {
+  const payload = await readJson<MetadataStatusWireResponse>(
+    await fetch(metadataUrl(mapId, "")),
+  );
+  return materializeMetadataStatus(payload);
 }
 
 /**

@@ -38,7 +38,7 @@ export type MetadataRowRecord = {
   erp_bbox_ratios: [number, number, number, number];
 };
 
-/** One keyframe's slice of the parquet, plus its pgvector state. */
+/** Materialized in-memory view of one keyframe's parquet slice and pgvector state. */
 export type KeyframeSummary = {
   id: string;
   row_count: number;
@@ -49,6 +49,31 @@ export type KeyframeSummary = {
   ingested: number | null;
   /** Rows ingested but with a NULL `object_position` — invisible to `localize`. */
   no_position: number | null;
+};
+
+export type ColumnarKeyframeSummaries = {
+  ids: string[];
+  row_start: number[];
+  row_count: number[];
+  with_depth: number[];
+  ingested: Array<number | null>;
+  no_position: Array<number | null>;
+};
+
+export type KeyframeMarker = {
+  id: string;
+  latitude: number;
+  longitude: number;
+  level: string | null;
+  heading_deg: number | null;
+};
+
+export type ColumnarKeyframeMarkers = {
+  ids: string[];
+  latitude: number[];
+  longitude: number[];
+  level: Array<string | null>;
+  heading_deg: Array<number | null>;
 };
 
 export type MetadataSummary = {
@@ -80,16 +105,15 @@ export type MetadataStatusResponse = {
    * Every keyframe in the manifest, not only the indexed ones: the photosphere,
    * depth preview, depth pin, view cone and keyframe graph need poses alone.
    */
-  markers?: Array<{
-    id: string;
-    latitude: number;
-    longitude: number;
-    level: string | null;
-    heading_deg: number | null;
-    color: string;
-    radius: number;
-  }>;
+  markers?: KeyframeMarker[];
   resolved_marker_count?: number;
+};
+
+export type MetadataStatusWireResponse = Omit<MetadataStatusResponse, "markers" | "summary"> & {
+  markers?: ColumnarKeyframeMarkers;
+  summary: (Omit<MetadataSummary, "keyframes"> & {
+    keyframes: ColumnarKeyframeSummaries;
+  }) | null;
 };
 
 export type MetadataRowsResponse = {

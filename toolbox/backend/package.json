@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "type-check": "tsc --noEmit -p tsconfig.json",
     "test": "tsx --test src/*.test.ts",
+    "measure:metadata-status": "node --import tsx scripts/measure-object-search-metadata-status.ts",
     "start": "node dist/main.js"
   },
   "dependencies": {

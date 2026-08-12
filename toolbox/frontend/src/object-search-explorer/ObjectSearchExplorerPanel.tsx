@@ -293,7 +293,7 @@ function ObjectSearchExplorerPanel(props: Props) {
     let cancelled = false;
     setIsLoading(true);
     setError(null);
-    fetchMetadataStatus(props.mapId, null)
+    fetchMetadataStatus(props.mapId)
       .then((payload) => {
         if (cancelled) {
           return;

@@ -323,12 +323,31 @@ async function manifestKeyframeIds(map: MapEntry): Promise<string[]> {
  */
 export async function objectSearchMetadataStatusPayload(
   map: MapEntry,
-  selectedKeyframeId: string | null,
   pythonApiBaseUrl: string | null = null,
+): Promise<Record<string, unknown>> {
+  return objectSearchMetadataStatusPayloadWithFormat(map, "columnar", pythonApiBaseUrl);
+}
+
+/** Legacy object-per-keyframe payload, retained only for the size/equivalence checks. */
+export async function legacyObjectSearchMetadataStatusPayloadForComparison(
+  map: MapEntry,
+  pythonApiBaseUrl: string | null = null,
+): Promise<Record<string, unknown>> {
+  return objectSearchMetadataStatusPayloadWithFormat(map, "legacy", pythonApiBaseUrl);
+}
+
+async function objectSearchMetadataStatusPayloadWithFormat(
+  map: MapEntry,
+  format: "columnar" | "legacy",
+  pythonApiBaseUrl: string | null,
 ): Promise<Record<string, unknown>> {
   const { metadataPath, checkedPaths, captureCount } = await resolveMetadataPath(map);
   const keyframeIds = await manifestKeyframeIds(map);
-  const markers = await keyframeMarkers(map, keyframeIds, selectedKeyframeId);
+  const markerRecords = await keyframeMarkerRecords(map, keyframeIds);
+  const markers =
+    format === "columnar"
+      ? columnarKeyframeMarkers(markerRecords)
+      : legacyMarkers(markerRecords);
   const base = {
     metadata_path: metadataPath,
     map_path: map.path,
@@ -336,7 +355,7 @@ export async function objectSearchMetadataStatusPayload(
     capture_count: captureCount,
     manifest_keyframe_count: keyframeIds.length,
     markers,
-    resolved_marker_count: markers.length,
+    resolved_marker_count: markerRecords.length,
   };
 
   let metadata: LoadedMetadata;
@@ -348,12 +367,15 @@ export async function objectSearchMetadataStatusPayload(
       available: false,
       postprocessed: false,
       summary: null,
-      error: error instanceof MetadataError || error instanceof Error ? error.message : String(error),
+      error:
+        error instanceof MetadataError || error instanceof Error
+          ? error.message
+          : String(error),
     };
   }
 
   const coverage = await fetchIndexCoverage(map, pythonApiBaseUrl);
-  const keyframes = metadata.keyframeIds.map((keyframeId) => {
+  const keyframeRecords = metadata.keyframeIds.map((keyframeId) => {
     const range = metadata.rangeByKeyframe.get(keyframeId)!;
     const covered = coverage?.byKeyframe.get(keyframeId);
     return {
@@ -367,6 +389,8 @@ export async function objectSearchMetadataStatusPayload(
       no_position: coverage ? (covered?.noPosition ?? 0) : null,
     };
   });
+  const keyframes =
+    format === "columnar" ? columnarKeyframeSummaries(keyframeRecords) : keyframeRecords;
 
   return {
     ...base,
@@ -839,11 +863,96 @@ async function lookupKeyframePose(
   };
 }
 
-async function keyframeMarkers(
+type KeyframeMarkerRecord = {
+  id: string;
+  latitude: number;
+  longitude: number;
+  level: string | null;
+  heading_deg: number | null;
+};
+
+type KeyframeSummaryRecord = {
+  id: string;
+  row_count: number;
+  row_start: number;
+  row_end: number;
+  with_depth: number;
+  ingested: number | null;
+  no_position: number | null;
+};
+
+type ColumnarKeyframeMarkers = {
+  ids: string[];
+  latitude: number[];
+  longitude: number[];
+  level: Array<string | null>;
+  heading_deg: Array<number | null>;
+};
+
+type ColumnarKeyframeSummaries = {
+  ids: string[];
+  row_start: number[];
+  row_count: number[];
+  with_depth: number[];
+  ingested: Array<number | null>;
+  no_position: Array<number | null>;
+};
+
+function assertParallelLengths(label: string, arrays: readonly unknown[][]): void {
+  const expected = arrays[0]?.length ?? 0;
+  if (!arrays.every((values) => values.length === expected)) {
+    throw new Error(`${label} column lengths are not aligned.`);
+  }
+}
+
+function roundWire(value: number, decimals: number): number {
+  return Number(value.toFixed(decimals));
+}
+
+function columnarKeyframeMarkers(
+  records: KeyframeMarkerRecord[],
+): ColumnarKeyframeMarkers {
+  const columns: ColumnarKeyframeMarkers = {
+    ids: records.map((record) => record.id),
+    // Wire precision only: the manifest-derived values remain full precision.
+    latitude: records.map((record) => roundWire(record.latitude, 7)),
+    longitude: records.map((record) => roundWire(record.longitude, 7)),
+    level: records.map((record) => record.level),
+    heading_deg: records.map((record) =>
+      record.heading_deg === null ? null : roundWire(record.heading_deg, 2),
+    ),
+  };
+  assertParallelLengths("markers", Object.values(columns));
+  return columns;
+}
+
+function legacyMarkers(records: KeyframeMarkerRecord[]): Array<Record<string, unknown>> {
+  return records.map((record) => ({
+    ...record,
+    color: "#9ca3af",
+    radius: 6,
+  }));
+}
+
+function columnarKeyframeSummaries(
+  records: KeyframeSummaryRecord[],
+): ColumnarKeyframeSummaries {
+  const columns: ColumnarKeyframeSummaries = {
+    ids: records.map((record) => record.id),
+    row_start: records.map((record) => record.row_start),
+    row_count: records.map((record) => record.row_count),
+    with_depth: records.map((record) => record.with_depth),
+    ingested: records.map((record) => record.ingested),
+    no_position: records.map((record) => record.no_position),
+  };
+  assertParallelLengths("summary.keyframes", Object.values(columns));
+  return columns;
+}
+
+async function keyframeMarkerRecords(
   map: MapEntry,
   keyframeIds: string[],
-  selectedKeyframeId: string | null,
-): Promise<Array<Record<string, unknown>>> {
+): Promise<KeyframeMarkerRecord[]> {
   const meta = await lookupFlatKeyframes(map, keyframeIds);
   const headings = await lookupKeyframeHeadings(map, [...meta.keys()]);
   return [...meta.entries()].map(([id, item]) => ({
@@ -852,8 +961,6 @@ async function keyframeMarkers(
     longitude: item.lon,
     level: item.level,
     heading_deg: headings.get(id) ?? null,
-    color: id === selectedKeyframeId ? "#16a34a" : "#9ca3af",
-    radius: id === selectedKeyframeId ? 8 : 6,
   }));
 }
 
