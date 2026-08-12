@@ -95,6 +95,45 @@ _ENRICH_EMBEDDING_SQL = ",\n    c.embedding::text AS embedding"
 # a property of the code rather than a hope.
 _ENRICH_FROM_ANCHOR = "\nFROM object_search_candidate AS c"
 
+# The reviewed cutouts' own embeddings, by id. The SQL boost only ever needs the
+# *maximum* cosine to that set, which Postgres computes without shipping any vector;
+# a rescorer that clusters, fits or propagates needs the vectors themselves.
+_PROTOTYPE_EMBEDDINGS_SQL = """
+SELECT id, embedding::text AS embedding
+FROM object_search_candidate
+WHERE geo_ref_id = %s AND id = ANY(%s)
+"""
+
+
+def load_prototype_embeddings(
+    conn, geo_ref_id: int, ids: list[int]
+) -> dict[int, np.ndarray]:
+    """Fetch reviewed cutout embeddings, keyed by candidate id.
+
+    Ids that resolve to nothing are simply absent from the result — the caller is
+    expected to compare the count with what it asked for, because a review whose
+    `target_id` did not survive a reingest is silently missing, not an error.
+
+    Args:
+        conn: Open psycopg2 connection.
+        geo_ref_id: Georef partition the ids belong to.
+        ids: Candidate ids to fetch.
+
+    Returns:
+        Candidate id mapped to its unit-norm embedding.
+    """
+    if not ids:
+        return {}
+    with conn.cursor() as cursor:
+        cursor.execute(_PROTOTYPE_EMBEDDINGS_SQL, [geo_ref_id, list(ids)])
+        rows = cursor.fetchall()
+    resolved: dict[int, np.ndarray] = {}
+    for candidate_id, raw in rows:
+        embedding = _parse_embedding(raw)
+        if embedding is not None:
+            resolved[int(candidate_id)] = embedding
+    return resolved
+
 
 def _parse_embedding(raw: object) -> np.ndarray | None:
     """`"[0.1,0.2,...]"` → unit-norm float32 array. None when the column is absent."""

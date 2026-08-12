@@ -1,0 +1,30 @@
+[
+  {"label": "baseline", "clustering_eps_m": 1.5},
+  {"label": "identity", "clustering_eps_m": 1.5, "rescorer": "identity"},
+
+  {"label": "sql-boost-0.1", "clustering_eps_m": 1.5, "feedback_alpha": 0.1, "feedback_beta": 0.1},
+  {"label": "max_prototype-0.1", "clustering_eps_m": 1.5, "rescorer": "max_prototype", "rescorer_params": {"alpha": 0.1, "beta": 0.1}},
+  {"label": "max_prototype-ui-defaults", "clustering_eps_m": 1.5, "rescorer": "max_prototype", "rescorer_params": {"alpha": 0.2, "beta": 0.5}},
+
+  {"label": "multi_prototype-k4", "clustering_eps_m": 1.5, "rescorer": "multi_prototype", "rescorer_params": {"alpha": 0.1, "beta": 0.1}},
+  {"label": "multi_prototype-k2", "clustering_eps_m": 1.5, "rescorer": "multi_prototype", "rescorer_params": {"alpha": 0.1, "beta": 0.1, "k_positive": 2, "k_negative": 2}},
+  {"label": "multi_prototype-ui-defaults", "clustering_eps_m": 1.5, "rescorer": "multi_prototype", "rescorer_params": {"alpha": 0.2, "beta": 0.5}},
+
+  {"label": "knn_cache-k5", "clustering_eps_m": 1.5, "rescorer": "knn_cache"},
+  {"label": "knn_cache-k15-g0.2", "clustering_eps_m": 1.5, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}},
+  {"label": "knn_cache-k5-g0.05", "clustering_eps_m": 1.5, "rescorer": "knn_cache", "rescorer_params": {"gamma": 0.05}},
+
+  {"label": "linear_probe-w0.5", "clustering_eps_m": 1.5, "rescorer": "linear_probe"},
+  {"label": "linear_probe-w1.0", "clustering_eps_m": 1.5, "rescorer": "linear_probe", "rescorer_params": {"w_probe": 1.0}},
+  {"label": "linear_probe-std-w0.5", "clustering_eps_m": 1.5, "rescorer": "linear_probe", "rescorer_params": {"mix": "standardized"}},
+  {"label": "linear_probe-std-w0.2", "clustering_eps_m": 1.5, "rescorer": "linear_probe", "rescorer_params": {"mix": "standardized", "w_probe": 0.2}},
+
+  {"label": "graph_propagation-g0.1", "clustering_eps_m": 1.5, "rescorer": "graph_propagation"},
+  {"label": "graph_propagation-g0.2", "clustering_eps_m": 1.5, "rescorer": "graph_propagation", "rescorer_params": {"gamma": 0.2}},
+  {"label": "graph_propagation-k5", "clustering_eps_m": 1.5, "rescorer": "graph_propagation", "rescorer_params": {"k": 5}},
+
+  {"label": "mc1.5-baseline", "association": "multicut", "multicut_geo_pivot": 1.5},
+  {"label": "mc1.5-max_prototype-0.1", "association": "multicut", "multicut_geo_pivot": 1.5, "rescorer": "max_prototype", "rescorer_params": {"alpha": 0.1, "beta": 0.1}},
+  {"label": "mc1.5-knn_cache-k15-g0.2", "association": "multicut", "multicut_geo_pivot": 1.5, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}},
+  {"label": "mc1.5-cap15-knn_cache-k15-g0.2", "association": "multicut", "multicut_geo_pivot": 1.5, "max_depth_m": 15.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}}
+]

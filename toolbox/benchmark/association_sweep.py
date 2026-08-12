@@ -48,10 +48,12 @@ from toolbox.bricks.candidates import (
     apply_feedback_boost,
     normalize_prototype_similarities,
 )
+from toolbox.bricks.ingest_cli import EMBEDDING_DIM
 from toolbox.bricks.localize import (
     LocalizationParams,
     localize_from_enriched_candidates,
 )
+from toolbox.bricks.rescoring import RescoreInput, build_rescorer
 from toolbox.bricks.vendored.geo_transform import GeoTransform
 from toolbox.logging import logger
 
@@ -247,8 +249,91 @@ def _class_name(annotations: Sequence[Annotation]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class PromptPrototypes:
+    """Reviewed cutout embeddings for one prompt, plus what was asked for.
+
+    `*_requested` is the number of review rows; the arrays hold only the ids that
+    still resolve to a candidate in this georef. The two differ after a reingest,
+    and that difference is the whole reason both are carried.
+    """
+
+    positive: np.ndarray
+    negative: np.ndarray
+    positive_requested: int
+    negative_requested: int
+
+    @property
+    def resolved(self) -> int:
+        return int(self.positive.shape[0] + self.negative.shape[0])
+
+
+def _rescore(
+    prompt_candidates: Sequence[EnrichedCandidate],
+    params: LocalizationParams,
+    prototypes: PromptPrototypes | None,
+) -> list[EnrichedCandidate]:
+    """Run a registered rescorer over the retrieved set and write its scores.
+
+    The rescorer replaces the max-prototype boost entirely: it sees every candidate
+    embedding and every reviewed embedding, and returns one score per candidate,
+    which lands in `similarity_boosted`. `LocalizationParams.rescorer` makes
+    `feedback_enabled` true, so ranking reads that column — nothing else in
+    localization changes, and cluster geometry is untouched exactly as with the
+    boost.
+
+    Args:
+        prompt_candidates: One prompt's cached candidates, in retrieval order.
+        params: Configuration naming the rescorer and its parameters.
+        prototypes: Reviewed embeddings for this prompt.
+
+    Returns:
+        The candidates carrying the rescorer's scores.
+
+    Raises:
+        ValueError: If prototypes or candidate embeddings are missing, which would
+            otherwise degrade silently into "this method does nothing".
+    """
+    if prototypes is None:
+        raise ValueError(
+            f"Rescorer {params.rescorer!r} needs review prototypes; "
+            "run the sweep with --with-feedback"
+        )
+    embeddings = [candidate.embedding for candidate in prompt_candidates]
+    if any(embedding is None for embedding in embeddings):
+        raise ValueError("Rescoring needs candidates cached with embeddings")
+    rescorer = build_rescorer(params.rescorer, dict(params.rescorer_params or {}))
+    assert rescorer is not None  # noqa: S101 - `params.rescorer` is not None here
+    result = rescorer.score(
+        RescoreInput(
+            candidate_ids=np.asarray(
+                [candidate.id for candidate in prompt_candidates], dtype=np.int64
+            ),
+            embeddings=np.asarray(embeddings, dtype=np.float32),
+            base_similarity=np.asarray(
+                [candidate.similarity for candidate in prompt_candidates],
+                dtype=np.float32,
+            ),
+            positive_embeddings=prototypes.positive,
+            negative_embeddings=prototypes.negative,
+        )
+    )
+    scores = np.asarray(result.scores, dtype=np.float64)
+    if scores.shape != (len(prompt_candidates),):
+        raise ValueError(
+            f"Rescorer {params.rescorer!r} returned {scores.shape} scores for "
+            f"{len(prompt_candidates)} candidates"
+        )
+    return [
+        replace(candidate, similarity_boosted=float(score))
+        for candidate, score in zip(prompt_candidates, scores.tolist())
+    ]
+
+
 def apply_feedback(
-    prompt_candidates: Sequence[EnrichedCandidate], params: LocalizationParams
+    prompt_candidates: Sequence[EnrichedCandidate],
+    params: LocalizationParams,
+    prototypes: PromptPrototypes | None = None,
 ) -> list[EnrichedCandidate]:
     """Recompute the review boost on cached candidates, for one configuration.
 
@@ -260,9 +345,12 @@ def apply_feedback(
     `candidates.load_enriched_candidates` would have written, without a second
     ANN + database round trip per configuration.
 
+    A named `rescorer` takes over instead: see `_rescore`.
+
     Args:
         prompt_candidates: One prompt's cached candidates, in retrieval order.
         params: Configuration whose feedback gains and normalization apply.
+        prototypes: Reviewed embeddings, required only by the rescorer branch.
 
     Returns:
         The candidates with `similarity_boosted` and the applied columns set, or the
@@ -270,6 +358,8 @@ def apply_feedback(
     """
     if not params.feedback_enabled or not prompt_candidates:
         return list(prompt_candidates)
+    if params.rescorer is not None:
+        return _rescore(prompt_candidates, params, prototypes)
     # Normalisation spans the whole retrieved set, exactly as at load time — not the
     # `candidate_count` truncation, and not the depth-capped subset.
     applied_pos = normalize_prototype_similarities(
@@ -467,6 +557,82 @@ def fetch_prompt_candidates(
     return {prompt: result[prompt] for prompt in prompt_order}
 
 
+def fetch_prompt_prototypes(
+    map_path: str | Path,
+    prompts: Sequence[str],
+    *,
+    geo_ref_id: int,
+    map_id: str,
+) -> dict[str, PromptPrototypes]:
+    """Load each prompt's reviewed cutout embeddings from the annotation DB.
+
+    Not cached: it is one indexed query per prompt against ids the reviews already
+    name, which is nothing next to the ANN round trip the candidate cache exists for.
+
+    Args:
+        map_path: Map directory holding `object-search-annotations.db`.
+        prompts: Prompts to resolve, in any order.
+        geo_ref_id: Georef partition the reviews belong to.
+        map_id: Toolbox map identifier, used only for logging.
+
+    Returns:
+        Prototype embeddings per prompt; prompts without reviews are absent.
+    """
+    resolved_map_path = Path(map_path).expanduser().resolve()
+    out: dict[str, PromptPrototypes] = {}
+    with db.connect() as conn:
+        for prompt in prompts:
+            review = feedback_module.load_review_feedback(
+                map_id, prompt, resolved_map_path
+            )
+            if review is None:
+                # An empty prototype set, not a missing entry: every rescorer is
+                # specified to fall back to the base similarity with no evidence, and
+                # a prompt nobody reviewed is exactly that case. Skipping it instead
+                # would abort the sweep on maps where only some prompts are reviewed.
+                logger.warning(
+                    "Prompt %r: no reviews at all — every rescorer will return the "
+                    "base similarity for it",
+                    prompt,
+                )
+                empty = np.empty((0, EMBEDDING_DIM), dtype=np.float32)
+                out[prompt] = PromptPrototypes(empty, empty, 0, 0)
+                continue
+            by_id = candidates.load_prototype_embeddings(
+                conn, geo_ref_id, review.positive_ids + review.negative_ids
+            )
+            positive = [by_id[i] for i in review.positive_ids if i in by_id]
+            negative = [by_id[i] for i in review.negative_ids if i in by_id]
+            # An empty prototype set still has to be (0, d): a rescorer is entitled
+            # to multiply by it, and (0, 0) would raise instead of contributing
+            # nothing.
+            dimension = next(
+                (int(embedding.shape[0]) for embedding in by_id.values()),
+                EMBEDDING_DIM,
+            )
+            empty = np.empty((0, dimension), dtype=np.float32)
+            out[prompt] = PromptPrototypes(
+                positive=(
+                    np.asarray(positive, dtype=np.float32) if positive else empty
+                ),
+                negative=(
+                    np.asarray(negative, dtype=np.float32) if negative else empty
+                ),
+                positive_requested=len(review.positive_ids),
+                negative_requested=len(review.negative_ids),
+            )
+            logger.info(
+                "Prompt %r: %d/%d positive and %d/%d negative review(s) resolved to "
+                "an embedding",
+                prompt,
+                len(positive),
+                len(review.positive_ids),
+                len(negative),
+                len(review.negative_ids),
+            )
+    return out
+
+
 def _threshold_candidates(
     predictions_by_prompt: Mapping[str, Sequence[Prediction]],
 ) -> list[float]:
@@ -612,6 +778,7 @@ def evaluate_config(
     group_radius_m: float,
     num_results: int,
     near_m: float = DEFAULT_NEAR_M,
+    prototypes_by_prompt: Mapping[str, PromptPrototypes] | None = None,
 ) -> ConfigMetrics:
     """Evaluate one in-process localization configuration on all prompts.
 
@@ -623,6 +790,7 @@ def evaluate_config(
         group_radius_m: Radius for the grouped ground-truth view.
         num_results: Maximum returned clusters, applied consistently to the params.
         near_m: Maximum distance for assigning an annotation proxy to a detection.
+        prototypes_by_prompt: Reviewed embeddings, needed only by a rescorer.
 
     Returns:
         Strict/grouped metrics, shared-threshold estimates, and granularity controls.
@@ -643,7 +811,11 @@ def evaluate_config(
 
     for prompt, prompt_annotations in annotations_by_prompt.items():
         localizations, selected, cluster_labels = localize_from_enriched_candidates(
-            apply_feedback(candidates_by_prompt[prompt], effective_params),
+            apply_feedback(
+                candidates_by_prompt[prompt],
+                effective_params,
+                (prototypes_by_prompt or {}).get(prompt),
+            ),
             geo_transform,
             effective_params,
             return_cluster_labels=True,
@@ -777,6 +949,7 @@ def sweep(
     out_dir: str | Path,
     base_params: LocalizationParams | None = None,
     near_m: float = DEFAULT_NEAR_M,
+    prototypes_by_prompt: Mapping[str, PromptPrototypes] | None = None,
 ) -> list[ConfigMetrics]:
     """Evaluate a parameter grid and write one summary CSV plus detailed JSON.
 
@@ -790,6 +963,7 @@ def sweep(
         out_dir: Output directory for CSV and JSON artifacts.
         base_params: Base parameters before grid overrides.
         near_m: Maximum distance for assigning an annotation proxy to a detection.
+        prototypes_by_prompt: Reviewed embeddings, needed only by a rescorer.
 
     Returns:
         Metrics in grid order.
@@ -807,6 +981,7 @@ def sweep(
             group_radius_m=group_radius_m,
             num_results=int(entry.get("num_results", num_results)),
             near_m=near_m,
+            prototypes_by_prompt=prototypes_by_prompt,
         )
         elapsed = time.perf_counter() - started
         metrics = replace(metrics, label=label, elapsed_s=elapsed)
@@ -966,6 +1141,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         timeout_s=args.timeout,
         with_feedback=args.with_feedback,
     )
+    grid = _load_grid(args.grid)
+    manifest = map_manifest.load_map_manifest(map_path)
+    prototypes = None
+    if any(entry.get("rescorer") for entry in grid):
+        if manifest.geo_ref_id is None:
+            raise ValueError(f"{manifest.path}: manifest records no geo_ref_id")
+        prototypes = fetch_prompt_prototypes(
+            map_path,
+            list(prompt_candidates),
+            geo_ref_id=int(manifest.geo_ref_id),
+            map_id=manifest.map_id,
+        )
     pose_source = georef_source.load_pose_source(map_path)
     base_params = replace(
         LocalizationParams(),
@@ -978,12 +1165,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             prompt_candidates,
             pose_source.geo_transform,
             base_params,
-            map_id=map_manifest.load_map_manifest(map_path).map_id,
+            map_id=manifest.map_id,
             bricks_base_url=args.bricks_base_url,
             timeout_s=args.timeout,
         )
     sweep(
-        _load_grid(args.grid),
+        grid,
         prompt_candidates,
         annotations,
         pose_source.geo_transform,
@@ -992,6 +1179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_dir=args.out_dir,
         base_params=base_params,
         near_m=args.near_m,
+        prototypes_by_prompt=prototypes,
     )
     return 0
 

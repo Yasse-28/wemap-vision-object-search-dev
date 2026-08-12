@@ -92,6 +92,13 @@ class LocalizationParams:
     # itself happens in `candidates.load_enriched_candidates`, which is the only
     # place that sees the whole retrieved set at once.
     feedback_normalization: FeedbackNormalization = "none"
+    # Review rescoring beyond the max-prototype boost above (`None` = off). The seam
+    # is **offline only**: `toolbox/benchmark/association_sweep.py` runs the named
+    # rescorer over the retrieved set and writes `similarity_boosted`, and this file
+    # only decides — through `feedback_enabled` — that the boosted column is the one
+    # to rank on. Nothing in the service builds a rescorer. See `bricks/rescoring.py`.
+    rescorer: str | None = None
+    rescorer_params: dict[str, object] | None = None
     # How a cluster picks the floor it claims: `"seed"` is production's behaviour and
     # stays the default, so this file's default path remains the ported one. `"median"`
     # is a dev-only experiment for objects whose observers straddle two floors; see
@@ -101,7 +108,11 @@ class LocalizationParams:
 
     @property
     def feedback_enabled(self) -> bool:
-        return bool(self.feedback_alpha) or bool(self.feedback_beta)
+        return (
+            bool(self.feedback_alpha)
+            or bool(self.feedback_beta)
+            or self.rescorer is not None
+        )
 
 
 @dataclass(frozen=True)

@@ -450,6 +450,48 @@ fit. Read `_log_feedback_coverage` before reading any of it: 8 of 12 prompts on 
 and 2 of 6 on vinci resolve **no** prototype at all — ids are BIGSERIAL and no reingest
 preserves them — and an inert boost is otherwise indistinguishable from a useless one.
 
+### Five ways to spend the same reviews
+
+`toolbox/bricks/rescoring.py` + `rescoring_{multi_prototype,linear_probe,knn_cache,
+graph_propagation}.py` are the `feat/rescoring-*` worktrees' methods, ported here so
+they can be compared **on today's ranking rule** — their own branch predates the ratio
+score, which is why their original numbers cannot be read against these. A rescorer sees
+every candidate embedding and every reviewed embedding and returns one score per
+candidate; `LocalizationParams.rescorer` names it. The seam is **offline only**:
+`association_sweep` runs it and writes `similarity_boosted`, `localize` merely ranks on
+that column, and no service builds one.
+
+Measured at fixed association and granularity (`toolbox/benchmark/grids/
+rescorer-comparison-*.json`), reading **mAP and the leave-one-prompt-out macro F1**:
+
+| method | vinci mAP / F1 LOO | bbhotel mAP / F1 LOO |
+|---|---|---|
+| no reviews | 0.391 / 0.313 | 0.701 / 0.639 |
+| `max_prototype` α=β=0.1 *(today's boost)* | 0.441 / **0.233** | 0.736 / 0.653 |
+| `max_prototype` **α=0.2 β=0.5 (the UI defaults)** | **0.097** / 0.143 | **0.487** / 0.474 |
+| `multi_prototype` k=2 | 0.438 / 0.297 | 0.734 / 0.684 |
+| **`knn_cache` k=15 γ=0.2** | 0.473 / **0.410** | **0.751** / **0.711** |
+| `knn_cache` k=5 | 0.468 / **0.430** | 0.695 / 0.692 |
+| `linear_probe` w=1.0 | **0.524** / 0.156 | **0.761** / 0.536 |
+| `graph_propagation` γ=0.2 | 0.484 / 0.390 | 0.738 / 0.658 |
+
+- **The kNN vote is the only method that raises what transfers** (+0.117 and +0.072 of
+  LOO macro F1), where the current max-prototype boost *lowers* it on vinci. Same sign
+  on both maps.
+- **The shipped UI defaults are harmful**: α=0.2 with β=0.5 and no normalisation puts a
+  ~0.8-scale image↔image negative term against a 0.15–0.30 base, and quarters the mAP.
+  Fix that regardless of what else is adopted.
+- **The linear probe has the best mAP and the worst transfer** — it ranks well *inside*
+  a query and produces scores that are not comparable across queries. The standardized
+  mix its round-5 note proposed recovers about half the F1, confirming the diagnosis.
+- **Clustering the prototypes buys nothing**: `multi_prototype` ties `max_prototype`.
+
+Two structural controls, both passing: `identity` reproduces the no-review baseline
+digit for digit (the normalisation artefact the original branch had to correct does not
+exist under the ratio score), and `max_prototype` reproduces the SQL boost exactly. Pair
+F1 is identical across every method at fixed association — rescoring changes ranking,
+never geometry.
+
 Full write-up, with figures: `docs/plans/2026-08-12-plafond-de-profondeur-et-boost.md`.
 
 ### Other divergences from production

@@ -3,13 +3,14 @@
 **Date :** 2026-08-12. **Branche :** `wip/2026-08-12-depth-cap-boost-association`.
 **Cartes :** `vinci-st-domingue` (index v1 converti, 1 046 404 candidats, 6 prompts,
 258 annotations) et `bbhotel-choisy` (27 226 candidats, 12 prompts, 674 annotations).
-**Artefacts :** `{map}/benchmark/sweep-depth-boost-2026-08-12/` (55 configurations hors
-ligne au total). **Rapport :**
+**Artefacts :** `{map}/benchmark/sweep-depth-boost-2026-08-12/` et
+`.../sweep-rescorers-2026-08-12/` (99 configurations hors ligne au total). **Rapport :**
 `~/Workspace/Current Work/PoC Vinci/reports/2026-08-12-plafond-profondeur-et-boost.html`.
 
-Trois leviers, à retrieval identique : plafond sur la profondeur des détections, boost
-des candidats par les reviews humaines, et les associations multicut / incremental
-rejouées avec les deux précédents.
+Quatre leviers, à retrieval identique : plafond sur la profondeur des détections, boost
+des candidats par les reviews humaines, quatre méthodes de rescoring concurrentes
+portées depuis les worktrees `feat/rescoring-*`, et les associations multicut /
+incremental rejouées avec les précédents.
 
 ## 0. Ce qui a été mesuré avant d'implémenter
 
@@ -81,16 +82,53 @@ quelques prompts seulement rend le seuil partagé plus difficile à transférer.
 que la réingestion ne préserve pas. `_log_feedback_coverage` le journalise à chaque run ;
 sans ça, un boost inerte et un boost inutile produisent la même ligne.
 
-## 3. Associations — rien de nouveau, et c'est le résultat attendu
+## 3. Cinq façons d'exploiter les mêmes reviews
+
+Les quatre méthodes des worktrees `feat/rescoring-*` ont été portées sur cette branche
+et rejouées sur le même jeu retrouvé, la même association et le même score. Leur branche
+d'origine est antérieure au score en ratio, donc leurs chiffres d'alors ne sont pas
+comparables à ceux-ci. Artefacts : `{map}/benchmark/sweep-rescorers-2026-08-12/`,
+grilles `toolbox/benchmark/grids/rescorer-comparison-*.json`.
+
+| méthode | vinci mAP / F1 LOO | bbhotel mAP / F1 LOO |
+|---|---|---|
+| sans reviews | 0,391 / 0,313 | 0,701 / 0,639 |
+| `max_prototype` α=β=0,1 *(actuel)* | 0,441 / **0,233** | 0,736 / 0,653 |
+| `max_prototype` **α=0,2 β=0,5 (défauts UI)** | **0,097** / 0,143 | **0,487** / 0,474 |
+| `multi_prototype` k=2 | 0,438 / 0,297 | 0,734 / 0,684 |
+| **`knn_cache` k=15 γ=0,2** | 0,473 / **0,410** | **0,751** / **0,711** |
+| `knn_cache` k=5 | 0,468 / **0,430** | 0,695 / 0,692 |
+| `linear_probe` w=1,0 | **0,524** / 0,156 | **0,761** / 0,536 |
+| `graph_propagation` γ=0,2 | 0,484 / 0,390 | 0,738 / 0,658 |
+
+- **Le vote kNN est la seule méthode qui améliore ce qui transfère** (+0,117 et +0,072
+  de F1 LOO), là où le boost actuel le dégrade sur vinci. Même signe sur les deux cartes.
+- **Les défauts affichés par l'UI sont nocifs** : α=0,2 avec β=0,5 et sans
+  normalisation divisent la mAP par quatre sur vinci. À corriger indépendamment.
+- **La sonde linéaire a la meilleure mAP et le pire transfert** : elle classe bien à
+  l'intérieur d'une requête et produit des scores non comparables entre requêtes. Le
+  mélange standardisé de sa note « round 5 » en récupère la moitié — le diagnostic de
+  cette note était le bon.
+- **Regrouper les prototypes n'apporte rien** : `multi_prototype` fait jeu égal avec
+  `max_prototype`, à k=2 comme à k=4.
+
+Deux contrôles structurels passent : `identity` reproduit la ligne de base au chiffre
+près — l'artefact de normalisation que la branche d'origine avait dû corriger n'existe
+plus avec le score en ratio — et `max_prototype` reproduit exactement le boost SQL. Le
+pair F1 est identique pour toutes les méthodes à association fixée.
+
+## 4. Associations — rien de nouveau, et c'est le résultat attendu
 
 Conforme au 12/08 : sur vinci multicut `pivot` 2,5 domine en pair F1 (0,856 contre 0,799
 pour le défaut), incremental somme 1,2 fait aussi bien à granularité plus fine, et les
 deux se composent avec le plafond sans interférence.
 
-## 4. Ce qu'il reste à faire
+## 5. Ce qu'il reste à faire
 
-1. Ne pas porter le plafond en production comme constante — le dériver du `venue_type`
+1. Corriger les défauts `feedback_alpha`/`feedback_beta` du toolbox (0,2 / 0,5) : ils
+   sont nocifs sur les deux cartes.
+2. Ne pas porter le plafond en production comme constante — le dériver du `venue_type`
    ou de l'espacement des keyframes, décidé sur au moins trois cartes.
-2. Mesurer le boost hors échantillon : annoter la requête A et évaluer sur la requête B
+3. Mesurer le boost hors échantillon : annoter la requête A et évaluer sur la requête B
    du même objet, ou réserver deux prompts de vinci dont les reviews ne servent jamais.
-3. Refaire la mesure du plafond quand la vérité terrain contiendra des objets lointains.
+4. Refaire la mesure du plafond quand la vérité terrain contiendra des objets lointains.

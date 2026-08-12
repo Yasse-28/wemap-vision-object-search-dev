@@ -120,8 +120,14 @@ Those controls are not decoration: the bench cannot rank two granularities, so a
 in split/merge behaviour has to be read off them rather than off the metric.
 
 Ready-made grids live in `grids/`; `depth-cap-boost-{vinci,bbhotel}.json` are the
-12/08 depth-cap and review-boost runs, each centred on its own map's granularity
+12/08 depth-cap and review-boost runs, and `rescorer-comparison-{vinci,bbhotel}.json`
+compare the five review-rescoring methods. Each is centred on its own map's granularity
 optimum (they differ, see `AI_CONTEXT/bricks.md`).
+
+A grid entry may also name a `rescorer` and its `rescorer_params`; the driver then loads
+each prompt's reviewed embeddings and runs it over the retrieved set. Always keep the
+`identity` row: it is the no-review baseline seen through the rescoring path, so a
+difference between the two would be an artefact rather than a review signal.
 
 `--with-feedback` additionally resolves the map's review prototypes, which is what makes
 `feedback_alpha`, `feedback_beta` and `feedback_normalization` do anything offline —
