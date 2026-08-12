@@ -283,6 +283,24 @@ def bulk_copy(
     return n
 
 
+def drop_partial_hnsw_index(conn, geo_ref_id: int) -> None:
+    """Drop this georef's partial HNSW index if it exists. **Dev-only addition.**
+
+    Call it before re-ingesting a georef. With the index still in place every
+    COPY'd row becomes an incremental HNSW insert: measured here at ~1 000 rows per
+    minute against a 1 M-row re-ingest, i.e. hours instead of minutes, and pgvector
+    documents that an incrementally built graph also has lower recall than a bulk
+    build. `create_partial_hnsw_index` cannot undo it afterwards — its
+    `IF NOT EXISTS` skips a *valid* index, so it rebuilds nothing.
+
+    Plain `DROP INDEX` (not `CONCURRENTLY`) so it participates in the ingest
+    transaction: if the COPY fails, the index is still there.
+    """
+    index_name = INDEX_NAME_TEMPLATE.format(geo_ref_id=geo_ref_id)
+    with conn.cursor() as cursor:
+        cursor.execute(f"DROP INDEX IF EXISTS {index_name}")
+
+
 def create_partial_hnsw_index(conn, geo_ref_id: int) -> None:
     """Create the per-georef partial HNSW index over ``embedding``.
 

@@ -48,7 +48,11 @@ from indexing.grid import filter_by_distance
 
 from toolbox.bricks import Connection, db_schema
 from toolbox.bricks.georef_source import KeyframePose, load_pose_source
-from toolbox.bricks.ingest import bulk_copy, create_partial_hnsw_index
+from toolbox.bricks.ingest import (
+    bulk_copy,
+    create_partial_hnsw_index,
+    drop_partial_hnsw_index,
+)
 from toolbox.bricks.vendored import erp
 from toolbox.bricks.vendored.maths import quaternion
 from toolbox.logging import logger
@@ -321,6 +325,10 @@ def run_ingest(
         captures_with_data = 0
         conn.autocommit = False
         try:
+            # Index-free COPY, then one bulk build below. Leave the partial HNSW
+            # index in place and every row is an incremental insert into it — hours
+            # instead of minutes, and a worse graph. See `drop_partial_hnsw_index`.
+            drop_partial_hnsw_index(conn, geo_ref_id)
             with conn.cursor() as cursor:
                 cursor.execute(
                     "DELETE FROM object_search_candidate WHERE geo_ref_id = %s",
