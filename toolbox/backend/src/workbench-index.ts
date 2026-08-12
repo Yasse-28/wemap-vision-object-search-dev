@@ -22,9 +22,11 @@ import {
 } from "./map-manifest.js";
 import {
   MetadataError,
+  metadataRowMatches,
   requireMetadata,
   resolveMetadataPath,
   rowByIndex,
+  rowSlice,
   rowsForKeyframe,
   type LoadedMetadata,
   type MetadataRow,
@@ -407,30 +409,39 @@ export async function metadataRowsPayload(
   const wanted = query.keyframeIds?.length
     ? query.keyframeIds.map(Number).filter(Number.isInteger)
     : null;
-  const source = wanted
-    ? wanted.flatMap((keyframeId) => rowsForKeyframe(metadata, keyframeId))
-    : metadata.rows;
   const labelQuery = query.labelQuery?.toLowerCase() ?? null;
-  const matching = source.filter((row) => {
-    if (query.detectorSource && row.detectorSource !== query.detectorSource) {
-      return false;
-    }
-    if (query.withDepthOnly && row.depth === null) {
-      return false;
-    }
-    if (labelQuery && !(row.label ?? "").toLowerCase().includes(labelQuery)) {
-      return false;
-    }
-    return true;
-  });
+  const filter = {
+    detectorSource: query.detectorSource,
+    labelQuery,
+    withDepthOnly: query.withDepthOnly,
+  };
   const offset = Math.max(0, Math.round(query.offset));
   const limit = Math.max(1, Math.min(20_000, Math.round(query.limit)));
+  const rows: MetadataRow[] = [];
+  let total = 0;
+  const ranges = wanted
+    ? wanted.flatMap((keyframeId) => {
+        const range = metadata.rangeByKeyframe.get(keyframeId);
+        return range ? [[range.rowStart, range.rowEnd] as const] : [];
+      })
+    : [[0, metadata.rowCount] as const];
+  for (const [start, end] of ranges) {
+    for (let rowPosition = start; rowPosition < end; rowPosition += 1) {
+      if (!metadataRowMatches(metadata, rowPosition, filter)) {
+        continue;
+      }
+      if (total >= offset && rows.length < limit) {
+        rows.push(...rowSlice(metadata, rowPosition, rowPosition + 1));
+      }
+      total += 1;
+    }
+  }
   return {
-    total: matching.length,
+    total,
     offset,
     limit,
     postprocessed: metadata.postprocessed,
-    rows: matching.slice(offset, offset + limit).map(metadataRowRecord),
+    rows: rows.map(metadataRowRecord),
   };
 }
 

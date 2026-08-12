@@ -51,7 +51,11 @@ import {
   paddingMask,
 } from "./erp-geometry.js";
 import { loadMapManifest } from "./map-manifest.js";
-import { requireMetadata, type MetadataRow } from "./object-search-metadata.js";
+import {
+  requireMetadata,
+  rowSlice,
+  type MetadataRow,
+} from "./object-search-metadata.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -160,7 +164,8 @@ test(
     const picked: MetadataRow[] = [];
     let skippedDegenerate = 0;
     for (let i = 0; i < SAMPLES; i += 1) {
-      const row = metadata.rows[Math.floor(((i + 0.5) * metadata.rows.length) / SAMPLES)];
+      const rowPosition = Math.floor(((i + 0.5) * metadata.rowCount) / SAMPLES);
+      const row = rowSlice(metadata, rowPosition, rowPosition + 1)[0];
       if (!row?.thumbnailKey) {
         continue;
       }

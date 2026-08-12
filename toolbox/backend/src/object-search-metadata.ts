@@ -34,14 +34,26 @@ import { access, stat } from "node:fs/promises";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 
-import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from "hyparquet";
+import { asyncBufferFromFile, parquetMetadataAsync, parquetRead } from "hyparquet";
+import type { ParquetParsers } from "hyparquet";
 
 import type { MapEntry } from "./config.js";
 
 const METADATA_FILENAME = "metadata.parquet";
 const OBJECT_SEARCH_DIRNAME = "object-search";
-/** Above this the whole-file read stops being a reasonable thing to do in one heap. */
-const MAX_ROW_COUNT = 500_000;
+/**
+ * The fixed-width store uses 77 bytes/row: 2×int32 + 6×float64 + 1 depth-mask
+ * byte + 3×dictionary int32 + 2×thumbnail int32. At two million rows that is
+ * 154 MB, before the comparatively small dictionaries and fallback strings.
+ */
+const MAX_ROW_COUNT = 2_000_000;
+const MAX_CACHED_MAPS = 2;
+const INT32_UPPER_BOUND = 2 ** 31;
+const INT32_LOWER_BOUND = -(2 ** 31);
+const NULL_DICTIONARY_CODE = -1;
+const THUMBNAIL_PATTERN = /^(.*\/)(\d{6})\.jpg$/;
+const THUMBNAIL_BASENAME_BASE = 1_000_000;
+const UTF8_DECODER = new TextDecoder();
 
 export class MetadataError extends Error {
   constructor(
@@ -69,7 +81,41 @@ export type MetadataRow = {
   depth: number | null;
 };
 
-/** Rows of one keyframe: `[start, end)` into {@link LoadedMetadata.rows}. */
+type DictionaryColumn = {
+  dictionary: string[];
+  codes: Int32Array;
+};
+
+type ThumbnailColumn =
+  | {
+      storage: "prefix-basename";
+      prefixes: string[];
+      prefixCodes: Int32Array;
+      basenames: Int32Array;
+    }
+  | {
+      storage: "plain";
+      values: (string | null)[];
+    };
+
+export type MetadataColumns = {
+  rowIndex: Int32Array;
+  videoKeyframeId: Int32Array;
+  thetaCenter: Float64Array;
+  phiCenter: Float64Array;
+  angularWidth: Float64Array;
+  angularHeight: Float64Array;
+  detectorSource: DictionaryColumn;
+  label: DictionaryColumn;
+  detectionScore: Float64Array;
+  vkImagePath: DictionaryColumn;
+  thumbnailKey: ThumbnailColumn;
+  depth: Float64Array;
+  /** One means parquet supplied a value, including NaN; zero means parquet NULL. */
+  depthPresent: Uint8Array;
+};
+
+/** Rows of one keyframe: `[start, end)` into the loaded column store. */
 export type KeyframeRowRange = {
   keyframeId: number;
   rowStart: number;
@@ -81,7 +127,7 @@ export type LoadedMetadata = {
   metadataPath: string;
   mtimeMs: number;
   rowCount: number;
-  rows: MetadataRow[];
+  columns: MetadataColumns;
   keyframeIds: number[];
   rangeByKeyframe: Map<number, KeyframeRowRange>;
   /** Whether `prepare_postprocess` has run (`thumbnail_key` + `depth` present). */
@@ -160,20 +206,89 @@ function asNullableText(value: unknown): string | null {
   return text.length ? text : null;
 }
 
-function toMetadataRow(raw: Record<string, unknown>): MetadataRow {
+function assertInt32(value: unknown, columnName: string, metadataPath: string): number {
+  const parsed = asNumber(value);
+  if (
+    !Number.isSafeInteger(parsed)
+    || parsed < INT32_LOWER_BOUND
+    || parsed >= INT32_UPPER_BOUND
+  ) {
+    throw new MetadataError(
+      500,
+      `${metadataPath}: ${columnName} value ${String(value)} is not a safe int below 2^31.`,
+    );
+  }
+  return parsed;
+}
+
+function dictionaryValue(column: DictionaryColumn, rowPosition: number): string | null {
+  const code = column.codes[rowPosition];
+  return code === NULL_DICTIONARY_CODE ? null : (column.dictionary[code] ?? null);
+}
+
+function thumbnailValue(column: ThumbnailColumn, rowPosition: number): string | null {
+  if (column.storage === "plain") {
+    return column.values[rowPosition] ?? null;
+  }
+  const prefixCode = column.prefixCodes[rowPosition];
+  if (prefixCode === NULL_DICTIONARY_CODE) {
+    return null;
+  }
+  const prefix = column.prefixes[prefixCode];
+  return prefix === undefined
+    ? null
+    : `${prefix}${String(column.basenames[rowPosition]).padStart(6, "0")}.jpg`;
+}
+
+function rowAtPosition(metadata: LoadedMetadata, rowPosition: number): MetadataRow {
+  const { columns } = metadata;
+  const depth = columns.depthPresent[rowPosition]
+    ? asNullableNumber(columns.depth[rowPosition])
+    : null;
   return {
-    rowIndex: asNumber(raw.row_index),
-    videoKeyframeId: asNumber(raw.video_keyframe_id),
-    thetaCenter: asNumber(raw.theta_center),
-    phiCenter: asNumber(raw.phi_center),
-    angularWidth: asNumber(raw.angular_width),
-    angularHeight: asNumber(raw.angular_height),
-    detectorSource: asText(raw.detector_source),
-    label: asNullableText(raw.label),
-    detectionScore: asNullableNumber(raw.detection_score),
-    thumbnailKey: asNullableText(raw.thumbnail_key),
-    depth: asNullableNumber(raw.depth),
+    rowIndex: columns.rowIndex[rowPosition],
+    videoKeyframeId: columns.videoKeyframeId[rowPosition],
+    thetaCenter: columns.thetaCenter[rowPosition],
+    phiCenter: columns.phiCenter[rowPosition],
+    angularWidth: columns.angularWidth[rowPosition],
+    angularHeight: columns.angularHeight[rowPosition],
+    detectorSource: dictionaryValue(columns.detectorSource, rowPosition) ?? "",
+    label: dictionaryValue(columns.label, rowPosition),
+    detectionScore: asNullableNumber(columns.detectionScore[rowPosition]),
+    thumbnailKey: thumbnailValue(columns.thumbnailKey, rowPosition),
+    depth,
   };
+}
+
+export type MetadataColumnFilter = {
+  detectorSource: string | null;
+  labelQuery: string | null;
+  withDepthOnly: boolean;
+};
+
+/** Test route filters directly against columns without constructing a row object. */
+export function metadataRowMatches(
+  metadata: LoadedMetadata,
+  rowPosition: number,
+  filter: MetadataColumnFilter,
+): boolean {
+  const { columns } = metadata;
+  if (
+    filter.detectorSource
+    && dictionaryValue(columns.detectorSource, rowPosition) !== filter.detectorSource
+  ) {
+    return false;
+  }
+  if (
+    filter.withDepthOnly
+    && (!columns.depthPresent[rowPosition] || !Number.isFinite(columns.depth[rowPosition]))
+  ) {
+    return false;
+  }
+  return !filter.labelQuery
+    || (dictionaryValue(columns.label, rowPosition) ?? "")
+      .toLowerCase()
+      .includes(filter.labelQuery);
 }
 
 /**
@@ -184,15 +299,15 @@ function toMetadataRow(raw: Record<string, unknown>): MetadataRow {
  * pipeline and every other assumption here (thumbnail naming, embedding alignment)
  * is suspect too — better to say so than to serve a plausible mixture.
  */
-function buildRanges(rows: MetadataRow[], metadataPath: string): {
+function buildRanges(columns: MetadataColumns, metadataPath: string): {
   keyframeIds: number[];
   rangeByKeyframe: Map<number, KeyframeRowRange>;
 } {
   const keyframeIds: number[] = [];
   const rangeByKeyframe = new Map<number, KeyframeRowRange>();
   let current: KeyframeRowRange | null = null;
-  for (let index = 0; index < rows.length; index += 1) {
-    const keyframeId = rows[index].videoKeyframeId;
+  for (let index = 0; index < columns.videoKeyframeId.length; index += 1) {
+    const keyframeId = columns.videoKeyframeId[index];
     if (current && current.keyframeId === keyframeId) {
       current.rowEnd = index + 1;
     } else {
@@ -208,11 +323,207 @@ function buildRanges(rows: MetadataRow[], metadataPath: string): {
       rangeByKeyframe.set(keyframeId, current);
       keyframeIds.push(keyframeId);
     }
-    if (rows[index].depth !== null) {
+    if (columns.depthPresent[index] && Number.isFinite(columns.depth[index])) {
       current.withDepth += 1;
     }
   }
   return { keyframeIds, rangeByKeyframe };
+}
+
+async function readColumn(
+  file: Awaited<ReturnType<typeof asyncBufferFromFile>>,
+  fileMetadata: Awaited<ReturnType<typeof parquetMetadataAsync>>,
+  columnName: string,
+  onValue: (value: unknown, rowPosition: number) => void,
+  stringFromBytes?: (bytes: Uint8Array) => unknown,
+): Promise<void> {
+  let decodedCount = 0;
+  let callbackError: unknown = null;
+  await parquetRead({
+    file,
+    metadata: fileMetadata,
+    columns: [columnName],
+    ...(stringFromBytes
+      ? {
+          parsers: { stringFromBytes } as ParquetParsers,
+        }
+      : {}),
+    onChunk: ({ columnData, rowStart }) => {
+      for (let offset = 0; offset < columnData.length; offset += 1) {
+        if (callbackError === null) {
+          try {
+            onValue(columnData[offset] as unknown, rowStart + offset);
+          } catch (error: unknown) {
+            callbackError = error;
+          }
+        }
+        decodedCount += 1;
+      }
+    },
+  });
+  if (callbackError !== null) {
+    throw callbackError;
+  }
+  if (decodedCount !== Number(fileMetadata.num_rows)) {
+    throw new MetadataError(
+      500,
+      `${columnName} decoded ${decodedCount} rows; expected ${fileMetadata.num_rows}.`,
+    );
+  }
+}
+
+async function readInt32Column(
+  file: Awaited<ReturnType<typeof asyncBufferFromFile>>,
+  fileMetadata: Awaited<ReturnType<typeof parquetMetadataAsync>>,
+  columnName: string,
+  metadataPath: string,
+  rowCount: number,
+): Promise<Int32Array> {
+  const values = new Int32Array(rowCount);
+  await readColumn(file, fileMetadata, columnName, (value, rowPosition) => {
+    values[rowPosition] = assertInt32(value, columnName, metadataPath);
+  });
+  return values;
+}
+
+async function readFloat64Column(
+  file: Awaited<ReturnType<typeof asyncBufferFromFile>>,
+  fileMetadata: Awaited<ReturnType<typeof parquetMetadataAsync>>,
+  columnName: string,
+  rowCount: number,
+  missingValue = Number.NaN,
+  present?: Uint8Array,
+): Promise<Float64Array> {
+  const values = new Float64Array(rowCount);
+  values.fill(missingValue);
+  await readColumn(file, fileMetadata, columnName, (value, rowPosition) => {
+    if (value !== null && value !== undefined && present) {
+      present[rowPosition] = 1;
+    }
+    values[rowPosition] = value === null || value === undefined
+      ? missingValue
+      : asNumber(value);
+  });
+  return values;
+}
+
+async function readDictionaryColumn(
+  file: Awaited<ReturnType<typeof asyncBufferFromFile>>,
+  fileMetadata: Awaited<ReturnType<typeof parquetMetadataAsync>>,
+  columnName: string,
+  rowCount: number,
+  nullable: boolean,
+): Promise<DictionaryColumn> {
+  const dictionary: string[] = [];
+  const codeByValue = new Map<string, number>();
+  const codes = new Int32Array(rowCount);
+  codes.fill(NULL_DICTIONARY_CODE);
+  const stringFromBytes = (bytes: Uint8Array): number => {
+    const decoded = UTF8_DECODER.decode(bytes);
+    const text = nullable ? asNullableText(decoded) : decoded;
+    if (text === null) {
+      return NULL_DICTIONARY_CODE;
+    }
+    let code = codeByValue.get(text);
+    if (code === undefined) {
+      code = dictionary.length;
+      dictionary.push(text);
+      codeByValue.set(text, code);
+    }
+    return code;
+  };
+  await readColumn(
+    file,
+    fileMetadata,
+    columnName,
+    (value, rowPosition) => {
+      codes[rowPosition] = value === null || value === undefined
+        ? NULL_DICTIONARY_CODE
+        : asNumber(value);
+    },
+    stringFromBytes,
+  );
+  return { dictionary, codes };
+}
+
+async function readThumbnailColumn(
+  file: Awaited<ReturnType<typeof asyncBufferFromFile>>,
+  fileMetadata: Awaited<ReturnType<typeof parquetMetadataAsync>>,
+  metadataPath: string,
+  rowCount: number,
+): Promise<ThumbnailColumn> {
+  const prefixes: string[] = [];
+  const codeByPrefix = new Map<string, number>();
+  const prefixCodes = new Int32Array(rowCount);
+  prefixCodes.fill(NULL_DICTIONARY_CODE);
+  const basenames = new Int32Array(rowCount);
+  let plainValues: (string | null)[] | null = null;
+  let parserUsesPlainStrings = false;
+
+  const stringFromBytes = (bytes: Uint8Array): number | string => {
+    const text = UTF8_DECODER.decode(bytes).trim();
+    if (!text.length) {
+      return text;
+    }
+    if (parserUsesPlainStrings) {
+      return text;
+    }
+    const match = THUMBNAIL_PATTERN.exec(text);
+    if (!match) {
+      parserUsesPlainStrings = true;
+      return text;
+    }
+    const prefix = match[1];
+    let prefixCode = codeByPrefix.get(prefix);
+    if (prefixCode === undefined) {
+      prefixCode = prefixes.length;
+      prefixes.push(prefix);
+      codeByPrefix.set(prefix, prefixCode);
+    }
+    return prefixCode * THUMBNAIL_BASENAME_BASE + Number(match[2]);
+  };
+
+  await readColumn(file, fileMetadata, "thumbnail_key", (value, rowPosition) => {
+    if (value === null || value === undefined) {
+      return;
+    }
+    if (plainValues) {
+      if (typeof value === "number") {
+        const prefixCode = Math.floor(value / THUMBNAIL_BASENAME_BASE);
+        plainValues[rowPosition] = `${prefixes[prefixCode]}`
+          + `${String(value % THUMBNAIL_BASENAME_BASE).padStart(6, "0")}.jpg`;
+      } else {
+        plainValues[rowPosition] = asNullableText(value);
+      }
+      return;
+    }
+    if (typeof value === "number") {
+      const prefixCode = Math.floor(value / THUMBNAIL_BASENAME_BASE);
+      prefixCodes[rowPosition] = prefixCode;
+      basenames[rowPosition] = value % THUMBNAIL_BASENAME_BASE;
+      return;
+    }
+    const text = asNullableText(value);
+    if (text !== null) {
+      plainValues = Array.from({ length: rowCount }, (_, priorPosition) =>
+        priorPosition < rowPosition
+          ? thumbnailValue(
+              { storage: "prefix-basename", prefixes, prefixCodes, basenames },
+              priorPosition,
+            )
+          : null,
+      );
+      plainValues[rowPosition] = asNullableText(value);
+      console.warn(
+        `${metadataPath}: thumbnail_key does not use <prefix>/<NNNNNN>.jpg; `
+        + "storing that column as plain strings.",
+      );
+    }
+  }, stringFromBytes);
+
+  return plainValues
+    ? { storage: "plain", values: plainValues }
+    : { storage: "prefix-basename", prefixes, prefixCodes, basenames };
 }
 
 async function loadMetadataUncached(
@@ -225,28 +536,120 @@ async function loadMetadataUncached(
   if (declaredRows > MAX_ROW_COUNT) {
     throw new MetadataError(
       507,
-      `${metadataPath} holds ${declaredRows} rows; this explorer reads the whole `
-      + `file into memory and refuses above ${MAX_ROW_COUNT}.`,
+      `${metadataPath} holds ${declaredRows} rows; the columnar metadata store is `
+      + `limited to ${MAX_ROW_COUNT} rows.`,
     );
   }
 
   const columns = new Set(
     fileMetadata.schema.map((element) => element.name).filter(Boolean),
   );
-  const rawRows = (await parquetReadObjects({ file })) as Record<string, unknown>[];
-  const rows = rawRows.map(toMetadataRow);
-  if (rows.length && !Number.isFinite(rows[0].rowIndex)) {
-    // The BigInt trap, caught at the one place it is still cheap to notice.
-    throw new MetadataError(500, `${metadataPath}: row_index did not decode to a number.`);
-  }
+  const hasColumn = (columnName: string): boolean => columns.has(columnName);
+  const emptyDictionary = (): DictionaryColumn => ({
+    dictionary: [],
+    codes: new Int32Array(declaredRows).fill(NULL_DICTIONARY_CODE),
+  });
+  const depthPresent = new Uint8Array(declaredRows);
+  const metadataColumns: MetadataColumns = {
+    rowIndex: await readInt32Column(
+      file,
+      fileMetadata,
+      "row_index",
+      metadataPath,
+      declaredRows,
+    ),
+    videoKeyframeId: await readInt32Column(
+      file,
+      fileMetadata,
+      "video_keyframe_id",
+      metadataPath,
+      declaredRows,
+    ),
+    thetaCenter: await readFloat64Column(
+      file,
+      fileMetadata,
+      "theta_center",
+      declaredRows,
+    ),
+    phiCenter: await readFloat64Column(
+      file,
+      fileMetadata,
+      "phi_center",
+      declaredRows,
+    ),
+    angularWidth: await readFloat64Column(
+      file,
+      fileMetadata,
+      "angular_width",
+      declaredRows,
+    ),
+    angularHeight: await readFloat64Column(
+      file,
+      fileMetadata,
+      "angular_height",
+      declaredRows,
+    ),
+    detectorSource: await readDictionaryColumn(
+      file,
+      fileMetadata,
+      "detector_source",
+      declaredRows,
+      false,
+    ),
+    label: await readDictionaryColumn(
+      file,
+      fileMetadata,
+      "label",
+      declaredRows,
+      true,
+    ),
+    detectionScore: await readFloat64Column(
+      file,
+      fileMetadata,
+      "detection_score",
+      declaredRows,
+    ),
+    vkImagePath: hasColumn("vk_image_path")
+      ? await readDictionaryColumn(
+          file,
+          fileMetadata,
+          "vk_image_path",
+          declaredRows,
+          false,
+        )
+      : emptyDictionary(),
+    thumbnailKey: hasColumn("thumbnail_key")
+      ? await readThumbnailColumn(file, fileMetadata, metadataPath, declaredRows)
+      : {
+          storage: "prefix-basename",
+          prefixes: [],
+          prefixCodes: new Int32Array(declaredRows).fill(NULL_DICTIONARY_CODE),
+          basenames: new Int32Array(declaredRows),
+        },
+    depth: hasColumn("depth")
+      ? await readFloat64Column(
+          file,
+          fileMetadata,
+          "depth",
+          declaredRows,
+          Number.NaN,
+          depthPresent,
+        )
+      : new Float64Array(declaredRows).fill(Number.NaN),
+    depthPresent,
+  };
 
-  const { keyframeIds, rangeByKeyframe } = buildRanges(rows, metadataPath);
+  const { keyframeIds, rangeByKeyframe } = buildRanges(metadataColumns, metadataPath);
   const detectorSourceCounts: Record<string, number> = {};
   let withDepthCount = 0;
-  for (const row of rows) {
-    const key = row.detectorSource || "unknown";
+  for (let rowPosition = 0; rowPosition < declaredRows; rowPosition += 1) {
+    const detectorSource = dictionaryValue(metadataColumns.detectorSource, rowPosition) ?? "";
+    const key = detectorSource || "unknown";
     detectorSourceCounts[key] = (detectorSourceCounts[key] ?? 0) + 1;
-    if (row.depth !== null) {
+    if (
+      metadataColumns.depthPresent[rowPosition]
+      && Number.isFinite(metadataColumns.depth[rowPosition])
+    ) {
       withDepthCount += 1;
     }
   }
@@ -254,8 +657,8 @@ async function loadMetadataUncached(
   return {
     metadataPath,
     mtimeMs,
-    rowCount: rows.length,
-    rows,
+    rowCount: declaredRows,
+    columns: metadataColumns,
     keyframeIds,
     rangeByKeyframe,
     postprocessed: columns.has("depth") && columns.has("thumbnail_key"),
@@ -281,7 +684,9 @@ export async function loadMetadata(metadataPath: string): Promise<LoadedMetadata
     throw error;
   });
   metadataCache.set(cacheKey, promise);
-  if (metadataCache.size > 8) {
+  // Two 935k-row maps are about 144 MB of fixed-width data. A larger entry-count
+  // cache would retain hundreds of MB even though the explorer normally uses one map.
+  if (metadataCache.size > MAX_CACHED_MAPS) {
     metadataCache.delete(metadataCache.keys().next().value as string);
   }
   return promise;
@@ -321,7 +726,29 @@ export function rowsForKeyframe(
   keyframeId: number,
 ): MetadataRow[] {
   const range = metadata.rangeByKeyframe.get(keyframeId);
-  return range ? metadata.rows.slice(range.rowStart, range.rowEnd) : [];
+  return range ? rowSlice(metadata, range.rowStart, range.rowEnd) : [];
+}
+
+/** Materialise only `[start, end)` from the column store. */
+export function rowSlice(
+  metadata: LoadedMetadata,
+  start: number,
+  end: number,
+): MetadataRow[] {
+  return Array.from(iterateMetadataRows(metadata, start, end));
+}
+
+/** Iterate rows on demand without retaining a materialised table. */
+export function* iterateMetadataRows(
+  metadata: LoadedMetadata,
+  start = 0,
+  end = metadata.rowCount,
+): Generator<MetadataRow> {
+  const boundedStart = Math.max(0, Math.min(metadata.rowCount, Math.trunc(start)));
+  const boundedEnd = Math.max(boundedStart, Math.min(metadata.rowCount, Math.trunc(end)));
+  for (let rowPosition = boundedStart; rowPosition < boundedEnd; rowPosition += 1) {
+    yield rowAtPosition(metadata, rowPosition);
+  }
 }
 
 /** One row by its `row_index`, or null. */
@@ -330,9 +757,10 @@ export function rowByIndex(
   rowIndex: number,
 ): MetadataRow | null {
   // row_index is a dense 0-based counter, so try the direct hit before scanning.
-  const direct = metadata.rows[rowIndex];
-  if (direct && direct.rowIndex === rowIndex) {
-    return direct;
+  const directRowIndex = metadata.columns.rowIndex[rowIndex];
+  if (directRowIndex === rowIndex) {
+    return rowAtPosition(metadata, rowIndex);
   }
-  return metadata.rows.find((row) => row.rowIndex === rowIndex) ?? null;
+  const rowPosition = metadata.columns.rowIndex.findIndex((value) => value === rowIndex);
+  return rowPosition >= 0 ? rowAtPosition(metadata, rowPosition) : null;
 }
