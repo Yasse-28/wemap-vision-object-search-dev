@@ -167,6 +167,19 @@ def test_angles_and_columns_map_across(
     assert metadata["detection_score"].isna().all()
 
 
+def test_thumbnail_key_is_the_virtual_render_path(
+    converted: tuple[pd.DataFrame, np.ndarray],
+) -> None:
+    metadata, _ = converted
+
+    # No JPEG exists; the toolbox's preview route recognises this shape and renders the
+    # cutout from the ERP. The row index in the path must be the row's own.
+    assert metadata["thumbnail_key"].tolist() == [
+        "object-search/rows/0.png",
+        "object-search/rows/1.png",
+    ]
+
+
 def test_embeddings_stay_aligned_with_the_metadata_rows(
     converted: tuple[pd.DataFrame, np.ndarray],
 ) -> None:

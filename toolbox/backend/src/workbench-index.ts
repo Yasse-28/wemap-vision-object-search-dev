@@ -1263,9 +1263,28 @@ export async function metadataRowRenderPng(
   return rowRenderPng(map, row, options);
 }
 
+/**
+ * Virtual `thumbnail_key` for an index with no thumbnail JPEGs on disk.
+ *
+ * An index converted from the v1 SQLite lineage has no crops: v1 rendered its previews
+ * from the ERP on request and stored none. Writing a million of them is possible but
+ * costly (12.6 GB of JPEGs, ~139 GB once exFAT's 128 KB clusters are counted), and the
+ * renderer already exists for the explorer — so `v1_index_convert` writes this path
+ * instead of a file, and the preview route renders it on demand.
+ *
+ * It is deliberately the *same* field the UI already reads, so nothing downstream
+ * changes: pgvector carries the string, the response carries it, and the panel asks for
+ * it through `/preview.png?preview_path=…` exactly as it does for a real thumbnail.
+ */
+const VIRTUAL_ROW_PREVIEW = /^object-search\/rows\/(\d+)\.(?:png|jpg)$/;
+
 export async function previewFromPathPng(map: MapEntry, previewPath: string | null): Promise<Buffer> {
   if (!previewPath) {
     throw new WorkbenchRouteError(400, "Missing preview_path");
+  }
+  const virtual = VIRTUAL_ROW_PREVIEW.exec(previewPath);
+  if (virtual) {
+    return metadataRowRenderPng(map, Number(virtual[1]), {});
   }
   const resolved = path.isAbsolute(previewPath) ? previewPath : path.resolve(map.path, previewPath);
   if (!(await pathExists(resolved))) {

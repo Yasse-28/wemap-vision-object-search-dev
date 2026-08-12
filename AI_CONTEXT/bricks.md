@@ -438,9 +438,12 @@ index loses the same way (14 %). Ingest a converted index with a small
 instead of re-applied.
 
 What does not survive: `detection_score` (v1 never stored it → NULL, debug-only) and
-thumbnails (v1 rendered previews on the fly, so `thumbnail_key` is empty and search
-results carry no cutout image; the explorer's own ERP re-render still works). `depth`
-is carried over as v1 sampled it, rather than re-sampled by `prepare_postprocess`.
+the thumbnails — v1 rendered previews on request and stored none. `thumbnail_key` gets a
+**virtual** path instead, `{outputs_dirname}/rows/{row_index}.png`, which the toolbox's
+preview route re-renders from the ERP (`VIRTUAL_ROW_PREVIEW` in `workbench-index.ts`;
+`VIRTUAL_THUMBNAIL_DIRNAME` here). Writing the JPEGs would cost 12.6 GB for a million
+rows, or ~139 GB on an exFAT drive with 128 KB clusters. `depth` is carried over as v1
+sampled it, rather than re-sampled by `prepare_postprocess`.
 
 ## What replaced what
 

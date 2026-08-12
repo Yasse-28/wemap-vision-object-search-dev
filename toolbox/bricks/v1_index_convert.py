@@ -43,8 +43,14 @@ with the flip, against 1.31 m and 0.15 without it.
 - `detection_score`: v1 never stored the detector confidence. Written as NaN →
   NULL, which is debug/stats only — `localize`'s `confidence` comes from cluster
   geometry, not from this column.
-- thumbnails: v1 rendered cutout previews on the fly from the ERP, so there is no
-  JPEG for `thumbnail_key` to point at and search results have no preview image.
+- thumbnails: v1 rendered cutout previews on request and stored none, so there is no
+  JPEG to point at. `thumbnail_key` therefore gets a **virtual** path,
+  `{outputs_dirname}/rows/{row_index}.png`, which the toolbox's preview route
+  re-renders from the ERP on demand (`workbench-index.ts`, `VIRTUAL_ROW_PREVIEW`).
+  Writing the files instead would cost 12.6 GB of JPEGs for a million rows — and
+  ~139 GB once exFAT's 128 KB clusters are counted. The rendered patch is the stored
+  angles re-projected, *not* the pixels v1 embedded; the two differ because v1 cut its
+  crops from cubemap faces.
 
 `keyframe_id` is remapped: v1 ids are `georef.db` rows, v2 ids are indices into the
 manifest's `geo_keyframes`. The two are joined on the image filename — the only
@@ -76,6 +82,12 @@ DEFAULT_V1_DB = "object-search.db"
 DEFAULT_GEOREF_DB = "georef.db"
 DEFAULT_OUTPUTS_DIRNAME = "object-search"
 DEFAULT_BATCH_ROWS = 20_000
+
+# `thumbnail_key` points here instead of at a JPEG: no file exists at
+# `{outputs_dirname}/rows/{row_index}.png`, and the toolbox's preview route recognises
+# the shape and re-renders the cutout from the ERP (see the module docstring). The
+# directory name is shared with `workbench-index.ts`'s VIRTUAL_ROW_PREVIEW pattern.
+VIRTUAL_THUMBNAIL_DIRNAME = "rows"
 
 # Column order and types are the v2 contract: `prepare/writer.py` for the first ten,
 # `prepare_postprocess` for `thumbnail_key`/`depth`, and the prod dump for the last two.
@@ -172,6 +184,7 @@ def _convert_batch(
     id_map: dict[int, int],
     image_by_index: dict[int, str],
     stats: ConversionStats,
+    thumbnail_prefix: str,
 ) -> tuple[dict[str, list], np.ndarray]:
     """Turn one batch of v1 rows into v2 columns plus their float16 embeddings."""
     columns: dict[str, list] = {name: [] for name in SCHEMA.names}
@@ -205,7 +218,9 @@ def _convert_batch(
         columns["detector_source"].append(row["detection_source"] or "")
         columns["label"].append(row["label"])
         columns["detection_score"].append(float("nan"))
-        columns["thumbnail_key"].append("")
+        # No JPEG exists — v1 rendered previews on request. This is the *virtual* key
+        # the toolbox re-renders from the ERP on demand (see the module docstring).
+        columns["thumbnail_key"].append(f"{thumbnail_prefix}{row_index}.png")
         columns["depth"].append(float("nan") if depth is None else float(depth))
         columns["geokeyframe_id"].append(vk_id)
         columns["vk_image_path"].append(image_by_index.get(vk_id, ""))
@@ -277,7 +292,11 @@ def convert(
                 _iter_object_batches(v1_db, batch_rows), start=1
             ):
                 columns, embeddings = _convert_batch(
-                    batch, id_map, image_by_index, stats
+                    batch,
+                    id_map,
+                    image_by_index,
+                    stats,
+                    f"{outputs_dirname}/{VIRTUAL_THUMBNAIL_DIRNAME}/",
                 )
                 if columns["row_index"]:
                     writer.write_table(_table_from_columns(columns))

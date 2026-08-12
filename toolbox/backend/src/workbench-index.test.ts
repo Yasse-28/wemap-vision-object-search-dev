@@ -12,6 +12,7 @@ import {
   metadataKeyframesPayload,
   objectSearchMetadataMarkersPayload,
   objectSearchMetadataStatusPayload,
+  previewFromPathPng,
   WorkbenchRouteError,
 } from "./workbench-index.js";
 
@@ -272,6 +273,52 @@ test("rejects a point at the destination camera origin", async () => {
     await assert.rejects(
       indexProjectWorldPointPayload(fixture.map, "2", { point_world_wds: [0, 0, 0] }),
       (error: unknown) => error instanceof WorkbenchRouteError && error.status === 422,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// `object-search/rows/{n}.png` is the virtual thumbnail_key a v1-converted index
+// carries instead of a JPEG on disk. These pin the routing rather than the render:
+// the fixture map has no ERP images, so a routed request fails *inside* the renderer
+// with its own message, and a plain path still fails on the filesystem.
+test("preview path routes a virtual row key to the renderer", async () => {
+  const fixture = await createMetadataMap();
+  try {
+    await assert.rejects(
+      previewFromPathPng(fixture.map, "object-search/rows/999999.png"),
+      (error: unknown) =>
+        error instanceof WorkbenchRouteError &&
+        error.status === 404 &&
+        /Row 999999 not found/.test(error.message),
+    );
+    await assert.rejects(
+      previewFromPathPng(fixture.map, "object-search/rows/0.png"),
+      (error: unknown) =>
+        error instanceof WorkbenchRouteError &&
+        /Equirectangular source image not found/.test(error.message),
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("preview path still serves a real file, and 404s when it is absent", async () => {
+  const fixture = await createMetadataMap();
+  try {
+    await assert.rejects(
+      previewFromPathPng(fixture.map, "object-search/thumbnails/000000.jpg"),
+      (error: unknown) =>
+        error instanceof WorkbenchRouteError &&
+        error.status === 404 &&
+        /Preview file not found/.test(error.message),
+    );
+    // Not a row key: the extension and the directory both have to match.
+    await assert.rejects(
+      previewFromPathPng(fixture.map, "object-search/rows/0.webp"),
+      (error: unknown) =>
+        error instanceof WorkbenchRouteError && /Preview file not found/.test(error.message),
     );
   } finally {
     await fixture.cleanup();

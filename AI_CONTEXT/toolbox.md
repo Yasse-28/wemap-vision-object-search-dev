@@ -44,7 +44,7 @@ The annotation ownership boundary is recorded in
 | `GET /object-search-metadata/keyframes/{id}/equirect-preview.png` | Bare ERP (`draw_boxes=false`, JPEG) or with reconstructed boxes (PNG). |
 | `GET /object-search-metadata/keyframes/{id}/depth-preview.png`, `POST …/depth-pin`, `…/view-cone`, `…/project-world-point` | Manifest-only, except `depth-pin` with `projection: "cutout"`, which needs `row_index`. |
 | `GET /object-search-metadata/keyframe-graph` | From `360-viewer/graph.geojson`. |
-| `GET /preview.png?preview_path=` | Serves a file from the map directory. **The default preview** for a proposal (`thumbnail_key`) and for a search result. |
+| `GET /preview.png?preview_path=` | Serves a file from the map directory. **The default preview** for a proposal (`thumbnail_key`) and for a search result. `object-search/rows/{row_index}.png` is a **virtual** key with no file behind it: a v1-converted index has no crops, so the route re-renders that row from the ERP instead (`VIRTUAL_ROW_PREVIEW`). |
 | `GET /review-annotations`, `POST\|DELETE /review-annotations/detection-review` | Integrated review annotations in `{map}/object-search-annotations.db`; no external service. |
 | `POST /benchmark/score-prompt` | Runs the existing Python evaluator for one ground-truth prompt with the Annotation panel's current localization parameters; returns 404 when that prompt has no benchmark ground truth. |
 
@@ -151,7 +151,11 @@ created **once per `emmid`** in a detached `<div>` and cached:
 - **Boxes are reconstructed from float16 angles** — good to a few ERP pixels, not
   exact. Say so in anything user-facing.
 - **The stored thumbnail is the default preview**, not the re-render: it is the only
-  image certain to be what MetaCLIP2 embedded. The re-render exists for maps prepared
+  image certain to be what MetaCLIP2 embedded. The exception is an index converted from
+  v1, which has no thumbnails at all: there `thumbnail_key` is the virtual
+  `object-search/rows/{row_index}.png` and every preview *is* a re-render, so it shows
+  the stored angles re-projected rather than the pixels that were embedded (v1 cut its
+  crops from cubemap faces). The re-render exists for maps prepared
   without crops and for a widened context view, and it differs from the thumbnail
   (which went through `build_padding_mask`, cropping wide boxes).
 - **A proposal can span ≥180°** (a real GroundingDINO `handrail` at 357°). No
