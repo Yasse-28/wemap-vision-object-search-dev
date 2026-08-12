@@ -1,0 +1,141 @@
+[
+  {
+    "label": "baseline",
+    "clustering_eps_m": 3.0
+  },
+  {
+    "label": "detection-a0.5",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "detection",
+    "vlm_alpha": 0.5
+  },
+  {
+    "label": "detection-a0.75",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "detection",
+    "vlm_alpha": 0.75
+  },
+  {
+    "label": "detection-a1.0",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "detection",
+    "vlm_alpha": 1.0
+  },
+  {
+    "label": "detection-a1.5",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "detection",
+    "vlm_alpha": 1.5
+  },
+  {
+    "label": "detection-a2.0",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "detection",
+    "vlm_alpha": 2.0
+  },
+  {
+    "label": "detection-a4.0",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "detection",
+    "vlm_alpha": 4.0
+  },
+  {
+    "label": "knn-only",
+    "clustering_eps_m": 3.0,
+    "rescorer": "knn_cache",
+    "rescorer_params": {
+      "k": 15,
+      "gamma": 0.2
+    }
+  },
+  {
+    "label": "knn-then-detection-a0.5",
+    "clustering_eps_m": 3.0,
+    "rescorer": "knn_cache",
+    "rescorer_params": {
+      "k": 15,
+      "gamma": 0.2
+    },
+    "vlm_gate": "detection",
+    "vlm_alpha": 0.5
+  },
+  {
+    "label": "knn-then-detection-a1.0",
+    "clustering_eps_m": 3.0,
+    "rescorer": "knn_cache",
+    "rescorer_params": {
+      "k": 15,
+      "gamma": 0.2
+    },
+    "vlm_gate": "detection",
+    "vlm_alpha": 1.0
+  },
+  {
+    "label": "knn-then-detection-a2.0",
+    "clustering_eps_m": 3.0,
+    "rescorer": "knn_cache",
+    "rescorer_params": {
+      "k": 15,
+      "gamma": 0.2
+    },
+    "vlm_gate": "detection",
+    "vlm_alpha": 2.0
+  },
+  {
+    "label": "mc2.5-detection-a1.0",
+    "association": "multicut",
+    "multicut_geo_pivot": 2.5,
+    "vlm_gate": "detection",
+    "vlm_alpha": 1.0
+  },
+  {
+    "label": "mc2.5-knn-then-detection-a1.0",
+    "association": "multicut",
+    "multicut_geo_pivot": 2.5,
+    "rescorer": "knn_cache",
+    "rescorer_params": {
+      "k": 15,
+      "gamma": 0.2
+    },
+    "vlm_gate": "detection",
+    "vlm_alpha": 1.0
+  },
+  {
+    "label": "eps2.0-detection-a1.0",
+    "clustering_eps_m": 2.0,
+    "vlm_gate": "detection",
+    "vlm_alpha": 1.0
+  },
+  {
+    "label": "cluster-mean-a0.25",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "cluster",
+    "vlm_alpha": 0.25
+  },
+  {
+    "label": "cluster-mean-a0.5",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "cluster",
+    "vlm_alpha": 0.5
+  },
+  {
+    "label": "cluster-max-a0.5",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "cluster",
+    "vlm_alpha": 0.5,
+    "vlm_aggregate": "max"
+  },
+  {
+    "label": "cluster-mean-a1.0",
+    "clustering_eps_m": 3.0,
+    "vlm_gate": "cluster",
+    "vlm_alpha": 1.0
+  },
+  {
+    "label": "eps3.0-cap15-detection-a1.0",
+    "clustering_eps_m": 3.0,
+    "max_depth_m": 15.0,
+    "vlm_gate": "detection",
+    "vlm_alpha": 1.0
+  }
+]

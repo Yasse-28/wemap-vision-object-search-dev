@@ -511,18 +511,32 @@ nothing in the service builds a model.
 The diagnostic to run before any of it, and the reason this line of work is worth
 pursuing at all: `python -m toolbox.benchmark.vlm_cue_separability` scores the cutouts a
 human already reviewed and reports the AUC between the `true_positive` and
-`false_positive` classes. On `bbhotel-choisy`, over the four prompts whose reviews still
-resolve:
+`false_positive` classes.
 
 | cue, on the same data | AUC |
 |---|---|
 | distance between depth-projected points (association) | 0.879 |
 | **cutout↔cutout cosine, MetaCLIP** | **0.529** |
-| **Qwen3-VL `p(yes)`** | **0.925** (0.877–0.991 per prompt) |
+| Qwen3-VL `p(yes)`, `bbhotel-choisy` | **0.925** (0.877–0.991 per prompt) |
+| Qwen3-VL `p(yes)`, `vinci-st-domingue` | **0.594** (0.200–0.852 per prompt) |
 
-That is the first semantic cue measured here that is not a coin flip, and it explains why
-every semantics-based association variant came back neutral: the embedding space, not the
-idea, was the limit.
+The first number is the point: a semantic cue that is not a coin flip, which explains why
+every semantics-based association variant came back neutral — the embedding space, not
+the idea, was the limit.
+
+**The second is the warning, and it is map-specific, not model-specific.** Two vinci
+prompts score *below* 0.5, i.e. the model prefers the human's false positives. Reading
+the cutouts explains it: the false positives of `check in counter` are self-service
+kiosks with the word "Check-in" printed on them, and those of `emergency power plant` are
+the building housing the generator. They are hard negatives from a neighbouring class,
+on trade vocabulary whose boundary the annotator drew and the model does not know.
+Rewording the question recovers half the gap (0.594 → 0.683) — and makes the question a
+hyperparameter tuned on the evaluation data, so treat that number as exploration.
+
+Note the AUC is a **pessimistic** proxy: reviews exist only for the borderline cutouts a
+human bothered to judge, while the gate runs over the whole retrieved set, most of which
+is easy to reject. Vinci gains as much as bbhotel end to end (+0.048 of LOO macro F1)
+despite the far worse AUC.
 
 Measured on `bbhotel-choisy` at `eps` 1.5, weight swept
 (`toolbox/benchmark/grids/vlm-gate-bbhotel*.json`):
@@ -537,20 +551,38 @@ Measured on `bbhotel-choisy` at `eps` 1.5, weight swept
 | knn_cache alone | **0.751** | **0.711** | 0.508 |
 | knn_cache then detection gate | 0.758 | 0.660 | 0.508 |
 
-- **The detection level gains (+0.047 LOO), the cluster level does not** — the opposite
+And on `vinci-st-domingue` at `eps` 3.0, once its cutouts are rendered:
+
+| configuration | mAP strict | F1 LOO | pair F1 |
+|---|---|---|---|
+| no gate | 0.391 | 0.313 | 0.820 |
+| **detection, weight 1.0** | 0.425 | **0.361** | 0.820 |
+| cluster, mean, weight 0.25 | 0.404 | 0.244 | 0.820 |
+| knn_cache alone | 0.473 | 0.410 | 0.820 |
+| **knn_cache then detection gate** | **0.490** | **0.417** | 0.820 |
+
+- **The detection level gains on both maps (+0.047 and +0.048 LOO), the cluster level
+  does not** — the opposite
   of what the 3D-grounding literature does, which verifies a candidate object across
   several views. Max aggregation lands on the baseline, mean and min below it. Untested
   explanation: a cluster's observations are near-duplicate views, so averaging adds no
   independent evidence, and it applies after the ratio, on a different scale.
-- **The gate and the kNN review vote overlap.** Stacked they give the session's best mAP
-  (0.758 strict, 0.772 grouped) and a *worse* transferable F1 than the kNN alone.
+- **Whether the gate composes with the kNN review vote depends on the map.** On bbhotel
+  they overlap: stacked they give the best mAP (0.758) and a *worse* transferable F1 than
+  the kNN alone. On vinci they compose (+0.007 LOO, +0.017 mAP over the kNN), which is
+  what a weaker, less redundant VLM cue predicts.
 - **Pair F1 is identical at fixed association everywhere**, which is the structural
   control: a gate is a score, so it never moves a cluster.
 
-**Converted v1 indexes cannot be gated.** Their `thumbnail_key` is virtual
-(`{outputs}/rows/{row}.png`, re-rendered from the ERP by the toolbox on demand), so there
-is no file to show the model — `vinci-st-domingue` scores zero cutouts today, and gating
-it needs the cutouts rendered first.
+**Converted v1 indexes need their cutouts rendered first.** Their `thumbnail_key` is
+virtual (`{outputs}/rows/{row}.png`, re-rendered from the ERP by the toolbox on demand),
+so there is no file to show the model. `toolbox/bricks/render_cutouts.py` inverts the
+stored angles back to an ERP pixel box and calls the **mirror's own**
+`create_proposal_cutouts`, so the rendered cutout is the one the embedder saw;
+`python -m toolbox.benchmark.render_benchmark_cutouts` renders exactly what a map's
+benchmark needs (5 547 cutouts, 2 385 keyframes, 9 minutes and 79 MB for vinci) to a
+local directory, defaulting to `~/.cache/wemap-object-search/cutouts/<map_id>` rather
+than the map's own — often external — disk. Pass it to the sweep as `--cutout-root`.
 
 Full write-up, with figures: `docs/plans/2026-08-12-plafond-de-profondeur-et-boost.md`.
 

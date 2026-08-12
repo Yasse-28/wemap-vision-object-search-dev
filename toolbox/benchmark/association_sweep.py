@@ -1255,6 +1255,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--vlm-model", default=GateConfig().model_id)
     parser.add_argument(
+        "--cutout-root",
+        type=Path,
+        default=None,
+        help=(
+            "Rendered cutouts for a converted v1 index, whose thumbnail keys are "
+            "virtual. See toolbox.benchmark.render_benchmark_cutouts."
+        ),
+    )
+    parser.add_argument(
         "--with-feedback",
         action="store_true",
         help=(
@@ -1308,6 +1317,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 map_id=manifest.map_id,
                 cache_dir=args.cache_dir.expanduser().resolve() / "vlm",
                 scorer=scorer,
+                cutout_root=(
+                    args.cutout_root.expanduser().resolve()
+                    if args.cutout_root is not None
+                    else None
+                ),
                 refresh=args.refresh,
             )
             for prompt in prompt_candidates

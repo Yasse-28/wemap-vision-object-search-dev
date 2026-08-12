@@ -136,6 +136,20 @@ Premier signal sémantique non trivial mesuré ici. Il explique rétrospectiveme
 la porte sémantique, le descripteur accumulé et le terme sémantique du multicut sont tous
 revenus neutres : la limite était l'espace d'embedding.
 
+L'indice **ne transfère pas** : 0,594 groupé sur vinci, avec deux prompts *sous* 0,5 —
+le modèle y préfère les faux positifs de l'humain. Les images l'expliquent : les faux
+positifs de « checkin counter » sont des bornes libre-service **portant le mot
+« Check-in » imprimé**, ceux d'« emergency power plant » sont le bâtiment qui abrite le
+groupe électrogène. Négatifs difficiles d'une classe voisine, sur un vocabulaire de
+métier dont l'annotateur a tranché la frontière. Reformuler la question récupère la
+moitié de l'écart (0,594 → 0,683), au prix d'un hyperparamètre réglé sur les données
+d'évaluation.
+
+À noter : cette AUC est une borne **pessimiste**. Les reviews n'existent que pour les cas
+limites qu'un humain a pris la peine de juger, alors que la gate s'applique à tout le jeu
+retrouvé, dont l'essentiel est facile à rejeter — et vinci gagne autant que bbhotel bout
+en bout malgré une AUC bien pire.
+
 **Puis la gate appliquée**, bbhotel, `eps` 1,5 :
 
 | configuration | mAP stricte | F1 LOO | pair F1 |
@@ -148,17 +162,34 @@ revenus neutres : la limite était l'espace d'embedding.
 | vote kNN seul | **0,751** | **0,711** | 0,508 |
 | vote kNN puis gate détection | 0,758 | 0,660 | 0,508 |
 
-- **Le niveau détection gagne (+0,047 de F1 LOO), le niveau cluster non** — l'inverse de
-  la littérature du grounding 3D. Hypothèse non testée : les observations d'un cluster
-  sont des vues quasi identiques, donc la moyenne n'ajoute pas d'évidence indépendante.
-- **Gate et vote kNN se recouvrent** : empilés, meilleure mAP de la session (0,758 /
-  0,772 groupée) mais F1 transférable en baisse contre le kNN seul.
+Et sur vinci, `eps` 3,0, une fois ses découpes rendues :
+
+| configuration | mAP stricte | F1 LOO | pair F1 |
+|---|---|---|---|
+| sans gate | 0,391 | 0,313 | 0,820 |
+| **détection, poids 1,0** | 0,425 | **0,361** | 0,820 |
+| cluster, moyenne, poids 0,25 | 0,404 | 0,244 | 0,820 |
+| vote kNN seul | 0,473 | 0,410 | 0,820 |
+| **vote kNN puis gate détection** | **0,490** | **0,417** | 0,820 |
+
+- **Le niveau détection gagne sur les deux cartes (+0,047 et +0,048 de F1 LOO), le niveau
+  cluster perd sur les deux** — l'inverse de la littérature du grounding 3D. Hypothèse non
+  testée : les observations d'un cluster sont des vues quasi identiques, donc la moyenne
+  n'ajoute pas d'évidence indépendante.
+- **La composition avec le vote kNN dépend de la carte** : redondante sur bbhotel (F1 LOO
+  0,711 → 0,660), additive sur vinci (0,410 → 0,417), ce qui est cohérent avec un indice
+  VLM plus faible et donc moins redondant là-bas.
 - **Le pair F1 est identique partout à association fixée** : la gate est un score, elle ne
   déplace aucun cluster.
 
-Deux limites. Vinci n'est pas mesurable en l'état — index v1 converti, vignettes
-virtuelles, rien à montrer au modèle. Et le coût en ligne serait de 1 000 appels VLM par
-requête ; hors ligne c'est acceptable uniquement parce que le score se met en cache.
+**Le déblocage de vinci.** Son index v1 converti ne stocke aucune découpe. Les 5 547 que
+le banc utilise ont été rendues une fois par `render_benchmark_cutouts`, avec la *même*
+fonction de projection que l'indexeur — 2 385 keyframes décodés, 9 minutes, 79 Mo sur le
+disque local (`~/.cache/wemap-object-search/cutouts/<map_id>`), contre 12,6 Go pour
+l'index entier dont le banc n'a pas besoin.
+
+Reste le coût en ligne : 1 000 appels VLM par requête. Hors ligne c'est acceptable
+uniquement parce que le score se met en cache et sert toutes les configurations.
 
 ## 5. Associations — rien de nouveau, et c'est le résultat attendu
 
@@ -168,12 +199,13 @@ deux se composent avec le plafond sans interférence.
 
 ## 6. Ce qu'il reste à faire
 
-1. Rendre les découpes de vinci depuis les ERP pour pouvoir y mesurer la gate : c'est la
-   carte du PoC, et la seule qu'on ne sait pas encore scorer.
-2. Corriger les défauts `feedback_alpha`/`feedback_beta` du toolbox (0,2 / 0,5) : ils
+1. Corriger les défauts `feedback_alpha`/`feedback_beta` du toolbox (0,2 / 0,5) : ils
    sont nocifs sur les deux cartes.
-3. Ne pas porter le plafond en production comme constante — le dériver du `venue_type`
+2. Ne pas porter le plafond en production comme constante — le dériver du `venue_type`
    ou de l'espacement des keyframes, décidé sur au moins trois cartes.
-4. Mesurer le boost hors échantillon : annoter la requête A et évaluer sur la requête B
+3. Mesurer le boost hors échantillon : annoter la requête A et évaluer sur la requête B
    du même objet, ou réserver deux prompts de vinci dont les reviews ne servent jamais.
-5. Refaire la mesure du plafond quand la vérité terrain contiendra des objets lointains.
+4. Refaire la mesure du plafond quand la vérité terrain contiendra des objets lointains.
+5. Traiter la question posée au VLM comme un paramètre par carte, pas comme une
+   constante : elle vaut 0,09 d'AUC sur vinci, et la régler proprement demande un jeu de
+   découpes revues qui ne serve pas aussi à mesurer.

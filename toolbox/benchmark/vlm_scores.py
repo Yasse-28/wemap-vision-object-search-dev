@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from toolbox.bricks.candidates import EnrichedCandidate
+from toolbox.bricks.render_cutouts import resolve_cutout_path
 from toolbox.bricks.vlm_gate import GateConfig, VlmYesNoScorer
 from toolbox.logging import logger
 
@@ -52,6 +53,7 @@ def load_or_score(
     map_id: str,
     cache_dir: Path,
     scorer: VlmYesNoScorer,
+    cutout_root: Path | None = None,
     refresh: bool = False,
 ) -> dict[int, float]:
     """Return `p(yes)` per candidate id, scoring only what is not cached.
@@ -67,21 +69,40 @@ def load_or_score(
         map_id: Toolbox map identifier, part of the cache key.
         cache_dir: Directory holding the score tables.
         scorer: Yes/no scorer, loaded lazily on the first miss.
+        cutout_root: Where `render_benchmark_cutouts` wrote the cutouts of a converted
+            v1 index, whose stored thumbnail keys are virtual.
         refresh: Rescore and overwrite an existing table.
 
     Returns:
         Candidate id mapped to `p(yes)`.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_path(cache_dir, map_id, prompt, scorer.config)
+    table_path = cache_path(cache_dir, map_id, prompt, scorer.config)
     cached: dict[int, float] = {}
-    if path.is_file() and not refresh:
-        with np.load(path) as data:
+    if table_path.is_file() and not refresh:
+        with np.load(table_path) as data:
             cached = {
                 int(key): float(value)
                 for key, value in zip(data["ids"], data["scores"])
             }
-    missing = [c for c in prompt_candidates if c.id not in cached and c.thumbnail]
+    resolved: list[tuple[EnrichedCandidate, Path]] = []
+    unresolved = 0
+    for candidate in prompt_candidates:
+        if candidate.id in cached or not candidate.thumbnail:
+            continue
+        cutout_path = resolve_cutout_path(map_path, candidate.thumbnail, cutout_root)
+        if cutout_path is None:
+            unresolved += 1
+            continue
+        resolved.append((candidate, cutout_path))
+    if unresolved:
+        logger.warning(
+            "Prompt %r: %d candidate(s) have a virtual thumbnail and no rendered "
+            "cutout — run `python -m toolbox.benchmark.render_benchmark_cutouts`",
+            prompt,
+            unresolved,
+        )
+    missing = [candidate for candidate, _ in resolved]
     if missing:
         logger.info(
             "Prompt %r: scoring %d cutout(s) with the VLM (%d already cached)",
@@ -89,9 +110,7 @@ def load_or_score(
             len(missing),
             len(cached),
         )
-        scores = scorer.score_paths(
-            [map_path / str(candidate.thumbnail) for candidate in missing], prompt
-        )
+        scores = scorer.score_paths([path for _, path in resolved], prompt)
         unreadable = 0
         for candidate, score in zip(missing, scores.tolist()):
             if np.isfinite(score):
@@ -107,7 +126,7 @@ def load_or_score(
             )
         ids = np.asarray(sorted(cached), dtype=np.int64)
         np.savez(
-            path,
+            table_path,
             ids=ids,
             scores=np.asarray([cached[int(i)] for i in ids], dtype=np.float64),
         )

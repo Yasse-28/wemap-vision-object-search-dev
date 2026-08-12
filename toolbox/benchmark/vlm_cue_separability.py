@@ -31,6 +31,7 @@ import numpy as np
 from toolbox.benchmark.pair_cue_separability import _percentiles, _rank_auc
 from toolbox.bricks import candidates, db, map_manifest
 from toolbox.bricks.feedback import annotation_db_path, normalize_query
+from toolbox.bricks.render_cutouts import resolve_cutout_path
 from toolbox.bricks.vlm_gate import DEFAULT_QUESTION, GateConfig, VlmYesNoScorer
 from toolbox.logging import logger
 
@@ -84,6 +85,7 @@ def evaluate_prompt(
     map_path: Path,
     *,
     max_per_class: int | None,
+    cutout_root: Path | None = None,
 ) -> PromptReport:
     """Score one prompt's reviewed cutouts and summarise the separation.
 
@@ -94,6 +96,7 @@ def evaluate_prompt(
         thumbnails: Candidate id mapped to thumbnail key.
         map_path: Map directory the thumbnail keys are relative to.
         max_per_class: Cap on cutouts scored per class, or None for all of them.
+        cutout_root: Rendered cutouts, for an index whose thumbnail keys are virtual.
 
     Returns:
         Percentiles and AUC for the two classes.
@@ -105,7 +108,13 @@ def evaluate_prompt(
     negatives = [i for i in negatives if i in thumbnails][:max_per_class]
     scored: dict[str, np.ndarray] = {}
     for name, ids in (("positive", positives), ("negative", negatives)):
-        paths = [map_path / thumbnails[i] for i in ids]
+        paths = [
+            path
+            for path in (
+                resolve_cutout_path(map_path, thumbnails[i], cutout_root) for i in ids
+            )
+            if path is not None
+        ]
         values = scorer.score_paths(paths, query)
         scored[name] = values[np.isfinite(values)]
         logger.info("Prompt %r: scored %d %s cutout(s)", query, scored[name].size, name)
@@ -133,6 +142,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=None,
         help="Cap the cutouts scored per class and prompt, for a quick look.",
     )
+    parser.add_argument("--cutout-root", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=None)
     return parser.parse_args(argv)
 
@@ -166,6 +176,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 thumbnails,
                 map_path,
                 max_per_class=args.max_per_class,
+                cutout_root=(
+                    args.cutout_root.expanduser().resolve()
+                    if args.cutout_root is not None
+                    else None
+                ),
             )
     pooled_auc = _pooled_auc(report)
     payload = {"per_prompt": report, "pooled_auc": pooled_auc, "model": args.model}

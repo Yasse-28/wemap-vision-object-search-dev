@@ -10,6 +10,7 @@ are pinned here.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from pathlib import Path
 
@@ -205,3 +206,55 @@ def test_refuses_to_overwrite_an_existing_output_dir(tmp_path: Path) -> None:
 
     with pytest.raises(FileExistsError):
         convert(v1_dir=tmp_path / "v1", map_path=map_path)
+
+
+def test_virtual_thumbnail_keys_resolve_to_rendered_cutouts(tmp_path: Path) -> None:
+    """The virtual key `convert` writes must round-trip through the renderer."""
+    from toolbox.bricks.render_cutouts import (
+        rendered_path,
+        resolve_cutout_path,
+        rows_for_thumbnail_keys,
+        virtual_row_index,
+    )
+
+    key = "object-search/rows/12345.png"
+    assert virtual_row_index(key) == 12345
+    assert virtual_row_index("object-search/thumbnails/000001.jpg") is None
+    assert rows_for_thumbnail_keys([key, "object-search/thumbnails/1.jpg", None]) == [
+        12345
+    ]
+
+    # Sharded by thousands, so a million-row index does not make one flat directory.
+    assert rendered_path(tmp_path, 12345) == tmp_path / "0012" / "12345.jpg"
+
+    # A real key resolves against the map; a virtual one needs a rendered root, and
+    # without one the caller gets None rather than a path that cannot exist.
+    assert resolve_cutout_path(tmp_path, "object-search/thumbnails/1.jpg", None) == (
+        tmp_path / "object-search/thumbnails/1.jpg"
+    )
+    assert resolve_cutout_path(tmp_path, key, None) is None
+    assert resolve_cutout_path(tmp_path, key, tmp_path / "cutouts") == (
+        tmp_path / "cutouts" / "0012" / "12345.jpg"
+    )
+
+
+def test_erp_boxes_invert_the_prepare_convention() -> None:
+    """Angles -> ERP box must be the inverse of what `prepare` computed."""
+    import numpy as np
+
+    from toolbox.bricks.render_cutouts import _erp_boxes
+
+    width, height = 5760, 2880
+    # A box two degrees wide at the centre of the ERP, i.e. theta = phi = 0.
+    boxes = _erp_boxes(
+        np.asarray([0.0]),
+        np.asarray([0.0]),
+        np.asarray([2.0 * math.pi * 100.0 / width]),
+        np.asarray([math.pi * 50.0 / height]),
+        width,
+        height,
+    )
+
+    assert boxes == [
+        (width // 2 - 50, height // 2 - 25, width // 2 + 50, height // 2 + 25)
+    ]
