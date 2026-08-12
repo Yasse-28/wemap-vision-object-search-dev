@@ -22,7 +22,7 @@ diverge, production wins. A "small improvement" here is a bug.
 
 | Path | Ported from (backend) | Key symbols |
 |---|---|---|
-| `ingest.py` | `db/ingest.py` | `encode_copy_stream`, `bulk_copy`, `create_partial_hnsw_index`, `_EWKB_POINTZ_PREFIX`, `_HNSW_INDEX_LOCK_KEY`, `INDEX_NAME_TEMPLATE` |
+| `ingest.py` | `db/ingest.py` | `encode_copy_stream`, `bulk_copy`, `create_partial_hnsw_index`, `drop_partial_hnsw_index` (**dev-only**), `_EWKB_POINTZ_PREFIX`, `_HNSW_INDEX_LOCK_KEY`, `INDEX_NAME_TEMPLATE` |
 | `ingest_cli.py` | `object_search_ingest.py` | `run_ingest`, `_compute_object_positions`, `_ingest_capture`, `_upsert_geokeyframes`, `discover_capture_dirs`, `EMBEDDING_DIM=1024`, `DEFAULT_MIN_DISTANCE=1.5` |
 | `candidates.py` | `candidates.py` | `EnrichedCandidate`, `load_enriched_candidates`, `_prefilter_hnsw_results`, `apply_feedback_boost`, `normalize_prototype_similarities`, `_parse_embedding`, `FEEDBACK_NORMALIZATIONS`, `K_INTERNAL=1000`, `LOOSE_ALPHA=0.3` |
 | `feedback.py` | *(dev-only — no production counterpart)* | `ReviewFeedback`, `load_review_feedback`, `normalize_query`, `DB_FILENAME` — reads the toolbox's `object-search-annotations.db` |
@@ -30,6 +30,7 @@ diverge, production wins. A "small improvement" here is a bug.
 | `prepare_runner.py` | `object_search_prepare.py` (its `image_entries` construction) | `collect_image_entries`, `run` |
 | `prepare_postprocess.py` | `object_search_prepare.py::_sample_depths` | `postprocess_metadata`, `sample_depths` |
 | `map_manifest.py` | *(no counterpart — replaces the ORM)* | `load_map_manifest`, `find_manifest`, `MapManifest`, `ManifestKeyframe` |
+| `v1_index_convert.py` | *(dev-only — no production counterpart)* | `convert`, `load_keyframe_map`, `ConversionStats`, `SCHEMA` — re-shapes a `legacy/` SQLite index into `metadata.parquet` + `embeddings.npy` |
 | `vendored/proposal_cutouts.py` | overrides the **mirror's** `prepare/proposal_cutouts.py` | `create_proposal_cutouts`, `install`, `DEFAULT_CUTOUT_BATCH=10` — memory-only delta, see gotcha 11 |
 | `georef_source.py` | *(no counterpart — replaces the ORM)* | `load_pose_source`, `PoseSource`, `KeyframePose` — a thin façade over `map_manifest` |
 | `db_schema.py` | `api/models.py` + migrations | `ensure_schema`, `CREATE_CANDIDATE`, `CREATE_GEOKEYFRAME` |
@@ -404,6 +405,42 @@ or `"median"`) selects how `_cluster_level_from_detections` picks the floor a cl
 claims. `UNRESOLVED_LEVEL=-9999` avoids colliding with the real basement level;
 production still uses `-1` and must be fixed before the next re-sync. Treat any other
 behavioural change as a bug, and any change of the strategy default as one too.
+
+### Converting a v1 SQLite index (dev-only)
+
+`v1_index_convert.py` re-shapes a `legacy/` index (`object-search.db`) into the v2
+prepare outputs, so a map whose v1 index covers more keyframes than the v2 one can be
+compared without re-running detection. It is a re-shaping, not a re-computation: both
+lineages embed proposal cutouts with the same MetaCLIP2 checkpoint (v1 float32, v2
+float16) and v1's `bbox_spherical_coordinates` is `[theta, phi, fov_x, fov_y]` in the
+*same* convention as `theta_center`/`phi_center`/`angular_*`.
+
+Three things are load-bearing and all three are silent when wrong. **`phi` is
+negated**: v1 builds its ray in OpenCV (`y` down) and stores `phi = asin(y)`, while
+v2's `phi` is positive up — keep the sign and every object mirrors about the horizon
+(median |Δ| against the depth TIFF: 0.09 m flipped, 1.31 m not). v1 `keyframe_id` →
+manifest index is resolved **by image filename**, since v1 ids are `georef.db` rows
+and do not equal manifest indices. And parquet row `i` must stay embedding row `i`.
+Pinned by `toolbox/tests/test_v1_index_convert.py`.
+
+**Re-ingest drops the partial HNSW index first** (`drop_partial_hnsw_index`, called by
+`run_ingest`). `create_partial_hnsw_index` alone does not rebuild one: its
+`IF NOT EXISTS` skips a *valid* index, so every COPY'd row became an incremental
+insert into the old graph — measured at ~1 000 rows/min against 1 046 404 rows copied
+in 109 s index-free. Dev-only addition; production has no counterpart.
+
+**Ingest re-thins, and that throws most of a converted index away.**
+`filter_by_distance` selects keyframes from *all* the manifest's poses, not from the
+ones the index covers, so a v1 index already thinned at 1.5 m keeps only 20 % of its
+rows (2 538 of 11 340 keyframes) when ingested at the 1.5 m default — the prod-dump
+index loses the same way (14 %). Ingest a converted index with a small
+`--min-distance` (0.05 m → 98 % of rows) so the thinning it already had is respected
+instead of re-applied.
+
+What does not survive: `detection_score` (v1 never stored it → NULL, debug-only) and
+thumbnails (v1 rendered previews on the fly, so `thumbnail_key` is empty and search
+results carry no cutout image; the explorer's own ERP re-render still works). `depth`
+is carried over as v1 sampled it, rather than re-sampled by `prepare_postprocess`.
 
 ## What replaced what
 
