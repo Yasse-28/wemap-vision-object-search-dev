@@ -141,7 +141,7 @@ OpenGL camera forward (`-Z`) means "looking North".
 | Path | Purpose |
 |---|---|
 | `infra/postgres/Dockerfile` | `pgvector/pgvector:pg17` + PostGIS. The stock image has no PostGIS, and the schema needs both extensions. |
-| `infra/postgres/compose.yml` | Local dev instance, built from that Dockerfile. `PGVECTOR_PASSWORD` required; `pgdata/` gitignored. Run: `docker compose -f infra/postgres/compose.yml up -d`. |
+| `infra/postgres/compose.yml` | Local dev instance, built from that Dockerfile. `PGVECTOR_PASSWORD` required; `pgdata/` gitignored. Run: `docker compose -f infra/postgres/compose.yml up -d`. Sets `shm_size: 2gb` — Docker's 64 MB default kills a parallel HNSW build on a million-row georef. |
 
 Note `PGVECTOR_*` configures only the container. The pipeline itself reads
 `DATABASE_*` (plus `ENVIRONMENT_NAME=onprem`), because that is what the mirrored

@@ -10,6 +10,12 @@ services:
       POSTGRES_DB: object_search_db
     ports:
       - "${PGVECTOR_PORT:-5432}:5432"
+    # Docker's default /dev/shm is 64 MB. A parallel HNSW build allocates
+    # maintenance_work_mem there per worker, so building the index for a
+    # million-row georef dies with "could not resize shared memory segment …
+    # No space left on device" — and leaves an INVALID index behind, which
+    # `create_partial_hnsw_index` then has to drop and redo.
+    shm_size: 2gb
     volumes:
       - ./pgdata:/var/lib/postgresql/data
     healthcheck:
