@@ -1,0 +1,23 @@
+[
+  {"label": "baseline", "clustering_eps_m": 1.5},
+
+  {"label": "detection-a0.1", "clustering_eps_m": 1.5, "vlm_gate": "detection", "vlm_alpha": 0.1},
+  {"label": "detection-a0.25", "clustering_eps_m": 1.5, "vlm_gate": "detection", "vlm_alpha": 0.25},
+  {"label": "detection-a0.5", "clustering_eps_m": 1.5, "vlm_gate": "detection", "vlm_alpha": 0.5},
+  {"label": "detection-a0.25-center", "clustering_eps_m": 1.5, "vlm_gate": "detection", "vlm_alpha": 0.25, "feedback_normalization": "center"},
+
+  {"label": "cluster-mean-a0.1", "clustering_eps_m": 1.5, "vlm_gate": "cluster", "vlm_alpha": 0.1},
+  {"label": "cluster-mean-a0.25", "clustering_eps_m": 1.5, "vlm_gate": "cluster", "vlm_alpha": 0.25},
+  {"label": "cluster-mean-a0.5", "clustering_eps_m": 1.5, "vlm_gate": "cluster", "vlm_alpha": 0.5},
+  {"label": "cluster-mean-a1.0", "clustering_eps_m": 1.5, "vlm_gate": "cluster", "vlm_alpha": 1.0},
+  {"label": "cluster-max-a0.5", "clustering_eps_m": 1.5, "vlm_gate": "cluster", "vlm_alpha": 0.5, "vlm_aggregate": "max"},
+  {"label": "cluster-min-a0.5", "clustering_eps_m": 1.5, "vlm_gate": "cluster", "vlm_alpha": 0.5, "vlm_aggregate": "min"},
+  {"label": "cluster-mean-a0.5-center", "clustering_eps_m": 1.5, "vlm_gate": "cluster", "vlm_alpha": 0.5, "feedback_normalization": "center"},
+
+  {"label": "knn-only", "clustering_eps_m": 1.5, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}},
+  {"label": "knn-plus-cluster-a0.5", "clustering_eps_m": 1.5, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}, "vlm_gate": "cluster", "vlm_alpha": 0.5},
+
+  {"label": "mc1.5-baseline", "association": "multicut", "multicut_geo_pivot": 1.5},
+  {"label": "mc1.5-cluster-mean-a0.5", "association": "multicut", "multicut_geo_pivot": 1.5, "vlm_gate": "cluster", "vlm_alpha": 0.5},
+  {"label": "mc1.5-detection-a0.25", "association": "multicut", "multicut_geo_pivot": 1.5, "vlm_gate": "detection", "vlm_alpha": 0.25}
+]

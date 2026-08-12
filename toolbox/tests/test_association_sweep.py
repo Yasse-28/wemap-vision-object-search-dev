@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import pytest
@@ -359,3 +359,93 @@ def test_rescorer_without_cached_embeddings_fails_loudly() -> None:
             LocalizationParams(rescorer="identity"),
             _prototypes([[1.0, 0.0]]),
         )
+
+
+def test_detection_gate_demotes_rejected_candidates_without_dropping_them() -> None:
+    cached = [
+        _feedback_candidate(1, 0.30, 0.0, 0.0),
+        _feedback_candidate(2, 0.28, 0.0, 0.0),
+    ]
+
+    gated = association_sweep.apply_feedback(
+        cached,
+        LocalizationParams(vlm_gate="detection", vlm_alpha=0.2),
+        None,
+        {1: 0.9, 2: 0.1},
+    )
+
+    assert [c.similarity_boosted for c in gated] == [
+        pytest.approx(0.30 + 0.2 * 0.9),
+        pytest.approx(0.28 + 0.2 * 0.1),
+    ]
+    # A gate is a score, not a filter: both candidates survive to association.
+    assert len(gated) == len(cached)
+
+
+def test_unscored_candidates_keep_their_raw_similarity() -> None:
+    cached = [
+        _feedback_candidate(1, 0.30, 0.0, 0.0),
+        _feedback_candidate(2, 0.28, 0, 0),
+    ]
+
+    gated = association_sweep.apply_feedback(
+        cached, LocalizationParams(vlm_gate="detection", vlm_alpha=0.5), None, {1: 0.9}
+    )
+
+    # "The cutout could not be read" is no evidence, not a rejection.
+    assert gated[1].similarity_boosted == pytest.approx(0.28)
+
+
+def test_detection_gate_without_scores_fails_instead_of_doing_nothing() -> None:
+    with pytest.raises(ValueError, match="--with-vlm"):
+        association_sweep.apply_feedback(
+            [_feedback_candidate(1, 0.30, 0.0, 0.0)],
+            LocalizationParams(vlm_gate="detection"),
+            None,
+            None,
+        )
+
+
+def _localization(match_score: float, *object_ids: int) -> dict:
+    return {
+        "match_score": match_score,
+        "coordinates": [48.0, 2.0, 36.0],
+        "observations": [{"object_idx": object_id} for object_id in object_ids],
+    }
+
+
+def test_cluster_gate_reranks_on_the_agreement_of_a_cluster_s_own_views() -> None:
+    localizations = [_localization(1.0, 1, 2), _localization(0.8, 3, 4)]
+
+    reranked = association_sweep.apply_cluster_gate(
+        localizations,
+        LocalizationParams(vlm_gate="cluster", vlm_alpha=1.0, vlm_aggregate="mean"),
+        {1: 0.1, 2: 0.1, 3: 0.9, 4: 0.9},
+    )
+
+    # The runner-up's views agree that it matches; the leader's do not, and 1.0 + 0.1
+    # loses to 0.8 + 0.9. Membership and coordinates are untouched.
+    assert [item["match_score"] for item in reranked] == [
+        pytest.approx(1.7),
+        pytest.approx(1.1),
+    ]
+    assert reranked[0]["observations"] == [{"object_idx": 3}, {"object_idx": 4}]
+
+
+def test_cluster_gate_aggregates_by_the_requested_rule() -> None:
+    localizations = [_localization(1.0, 1, 2)]
+
+    cases: tuple[tuple[Literal["max", "min", "mean"], float], ...] = (
+        ("max", 0.9),
+        ("min", 0.1),
+        ("mean", 0.5),
+    )
+    for aggregate, expected in cases:
+        (gated,) = association_sweep.apply_cluster_gate(
+            localizations,
+            LocalizationParams(
+                vlm_gate="cluster", vlm_alpha=1.0, vlm_aggregate=aggregate
+            ),
+            {1: 0.1, 2: 0.9},
+        )
+        assert gated["vlm_gate_score"] == pytest.approx(expected)

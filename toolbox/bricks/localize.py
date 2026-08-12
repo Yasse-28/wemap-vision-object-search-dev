@@ -99,6 +99,13 @@ class LocalizationParams:
     # to rank on. Nothing in the service builds a rescorer. See `bricks/rescoring.py`.
     rescorer: str | None = None
     rescorer_params: dict[str, object] | None = None
+    # VLM validation gate, also offline only (`None` = off). `"detection"` applies
+    # `p(yes)` to each candidate before association, `"cluster"` aggregates the same
+    # scores over a returned cluster's observations and re-ranks. The scores come from
+    # `toolbox/benchmark/vlm_scores.py`; nothing here calls a model.
+    vlm_gate: Literal["detection", "cluster"] | None = None
+    vlm_alpha: float = 0.5
+    vlm_aggregate: Literal["max", "mean", "min"] = "mean"
     # How a cluster picks the floor it claims: `"seed"` is production's behaviour and
     # stays the default, so this file's default path remains the ported one. `"median"`
     # is a dev-only experiment for objects whose observers straddle two floors; see
@@ -112,6 +119,7 @@ class LocalizationParams:
             bool(self.feedback_alpha)
             or bool(self.feedback_beta)
             or self.rescorer is not None
+            or self.vlm_gate == "detection"
         )
 
 

@@ -17,6 +17,7 @@ from typing import Any, TypeAlias
 
 import numpy as np
 
+from toolbox.benchmark import vlm_scores as vlm_scores_module
 from toolbox.benchmark.object_search_http_benchmark import (
     Annotation,
     AnnotationGroup,
@@ -55,6 +56,7 @@ from toolbox.bricks.localize import (
 )
 from toolbox.bricks.rescoring import RescoreInput, build_rescorer
 from toolbox.bricks.vendored.geo_transform import GeoTransform
+from toolbox.bricks.vlm_gate import GateConfig, VlmYesNoScorer
 from toolbox.logging import logger
 
 DEFAULT_ACCURACY_M = 5.0
@@ -330,10 +332,119 @@ def _rescore(
     ]
 
 
+def apply_detection_gate(
+    prompt_candidates: Sequence[EnrichedCandidate],
+    params: LocalizationParams,
+    vlm_scores: Mapping[int, float],
+) -> list[EnrichedCandidate]:
+    """Fold `p(yes)` into each candidate's ranking similarity, before association.
+
+    The gate is a *score*, not a filter: a candidate the VLM rejects is demoted, not
+    dropped, so cluster geometry is identical with and without it and the comparison
+    stays readable at fixed granularity. `feedback_normalization` rescales the column
+    across the retrieved set first, for the reason its own docstring gives — a constant
+    offset flattens the ratio instead of sharpening it.
+
+    Candidates with no score (unreadable cutout) keep their raw similarity: the honest
+    reading of "the gate saw nothing" is "no evidence", not "rejected".
+
+    Args:
+        prompt_candidates: One prompt's candidates, in retrieval order.
+        params: Configuration carrying `vlm_alpha` and the normalization.
+        vlm_scores: `p(yes)` by candidate id.
+
+    Returns:
+        The candidates with `similarity_boosted` set.
+    """
+    values = [
+        float(vlm_scores.get(candidate.id, np.nan)) for candidate in prompt_candidates
+    ]
+    finite = [value for value in values if math.isfinite(value)]
+    # Normalisation is fitted on the scored candidates only, then applied to them;
+    # unscored ones are held out of both steps rather than imputed at the median.
+    applied = dict(
+        zip(
+            [index for index, value in enumerate(values) if math.isfinite(value)],
+            normalize_prototype_similarities(finite, params.feedback_normalization),
+        )
+    )
+    # The base is `effective_similarity`, not the raw one, so the gate composes with a
+    # rescorer instead of replacing it: run the review model first, verify on top.
+    return [
+        replace(
+            candidate,
+            similarity_boosted=(
+                candidate.effective_similarity + params.vlm_alpha * applied[index]
+                if index in applied
+                else candidate.effective_similarity
+            ),
+        )
+        for index, candidate in enumerate(prompt_candidates)
+    ]
+
+
+def apply_cluster_gate(
+    localizations: Sequence[dict],
+    params: LocalizationParams,
+    vlm_scores: Mapping[int, float],
+) -> list[dict]:
+    """Re-rank returned clusters by the VLM verdict on their own observations.
+
+    This is the shape the 3D-grounding literature uses (VLM-Grounder, SeqVLM,
+    DRIVE-Nav): verify a *candidate object* from several of its views and let the views
+    agree, rather than judging every detection in isolation. A cluster's observations
+    are already its best-scoring views, capped by `max_observations_per_cluster`.
+
+    Clusters keep their membership and their coordinates — only `match_score` moves —
+    so this changes what a caller would accept, never where it would go.
+
+    Args:
+        localizations: Localization dicts, ranked, as `localize` returned them.
+        params: Configuration carrying `vlm_alpha` and `vlm_aggregate`.
+        vlm_scores: `p(yes)` by candidate id.
+
+    Returns:
+        The same clusters, re-scored and re-sorted by descending `match_score`.
+    """
+    aggregates: dict[str, Callable[[Sequence[float]], np.floating]] = {
+        "max": np.max,
+        "mean": np.mean,
+        "min": np.min,
+    }
+    aggregate = aggregates[params.vlm_aggregate]
+    gate_values: list[float] = []
+    for localization in localizations:
+        scored = [
+            vlm_scores[int(observation["object_idx"])]
+            for observation in localization.get("observations", [])
+            if int(observation["object_idx"]) in vlm_scores
+        ]
+        gate_values.append(float(aggregate(scored)) if scored else float("nan"))
+    finite = [value for value in gate_values if math.isfinite(value)]
+    applied = dict(
+        zip(
+            [index for index, value in enumerate(gate_values) if math.isfinite(value)],
+            normalize_prototype_similarities(finite, params.feedback_normalization),
+        )
+    )
+    rescored: list[dict] = []
+    for index, localization in enumerate(localizations):
+        updated = dict(localization)
+        if index in applied:
+            updated["match_score"] = (
+                float(localization["match_score"]) + params.vlm_alpha * applied[index]
+            )
+            updated["vlm_gate_score"] = gate_values[index]
+        rescored.append(updated)
+    rescored.sort(key=lambda item: float(item["match_score"]), reverse=True)
+    return rescored
+
+
 def apply_feedback(
     prompt_candidates: Sequence[EnrichedCandidate],
     params: LocalizationParams,
     prototypes: PromptPrototypes | None = None,
+    vlm_scores: Mapping[int, float] | None = None,
 ) -> list[EnrichedCandidate]:
     """Recompute the review boost on cached candidates, for one configuration.
 
@@ -351,6 +462,7 @@ def apply_feedback(
         prompt_candidates: One prompt's cached candidates, in retrieval order.
         params: Configuration whose feedback gains and normalization apply.
         prototypes: Reviewed embeddings, required only by the rescorer branch.
+        vlm_scores: `p(yes)` by candidate id, required only by the detection gate.
 
     Returns:
         The candidates with `similarity_boosted` and the applied columns set, or the
@@ -358,8 +470,17 @@ def apply_feedback(
     """
     if not params.feedback_enabled or not prompt_candidates:
         return list(prompt_candidates)
+    staged = list(prompt_candidates)
     if params.rescorer is not None:
-        return _rescore(prompt_candidates, params, prototypes)
+        staged = _rescore(staged, params, prototypes)
+    if params.vlm_gate == "detection":
+        if vlm_scores is None:
+            raise ValueError(
+                "The detection gate needs VLM scores; run the sweep with --with-vlm"
+            )
+        return apply_detection_gate(staged, params, vlm_scores)
+    if params.rescorer is not None:
+        return staged
     # Normalisation spans the whole retrieved set, exactly as at load time — not the
     # `candidate_count` truncation, and not the depth-capped subset.
     applied_pos = normalize_prototype_similarities(
@@ -779,6 +900,7 @@ def evaluate_config(
     num_results: int,
     near_m: float = DEFAULT_NEAR_M,
     prototypes_by_prompt: Mapping[str, PromptPrototypes] | None = None,
+    vlm_scores_by_prompt: Mapping[str, Mapping[int, float]] | None = None,
 ) -> ConfigMetrics:
     """Evaluate one in-process localization configuration on all prompts.
 
@@ -791,6 +913,7 @@ def evaluate_config(
         num_results: Maximum returned clusters, applied consistently to the params.
         near_m: Maximum distance for assigning an annotation proxy to a detection.
         prototypes_by_prompt: Reviewed embeddings, needed only by a rescorer.
+        vlm_scores_by_prompt: `p(yes)` per candidate, needed only by a VLM gate.
 
     Returns:
         Strict/grouped metrics, shared-threshold estimates, and granularity controls.
@@ -815,6 +938,7 @@ def evaluate_config(
                 candidates_by_prompt[prompt],
                 effective_params,
                 (prototypes_by_prompt or {}).get(prompt),
+                (vlm_scores_by_prompt or {}).get(prompt),
             ),
             geo_transform,
             effective_params,
@@ -824,6 +948,15 @@ def evaluate_config(
             selected, prompt_annotations, near_m
         )
         partitions.append(partition_metrics(cluster_labels, annotation_labels))
+        if effective_params.vlm_gate == "cluster":
+            prompt_scores = (vlm_scores_by_prompt or {}).get(prompt)
+            if prompt_scores is None:
+                raise ValueError(
+                    "The cluster gate needs VLM scores; run the sweep with --with-vlm"
+                )
+            localizations = apply_cluster_gate(
+                localizations, effective_params, prompt_scores
+            )
         predictions = parse_predictions({"localizations": localizations}, "match_score")
         predictions_by_prompt[prompt] = predictions
         groups = group_annotations(prompt_annotations, group_radius_m)
@@ -950,6 +1083,7 @@ def sweep(
     base_params: LocalizationParams | None = None,
     near_m: float = DEFAULT_NEAR_M,
     prototypes_by_prompt: Mapping[str, PromptPrototypes] | None = None,
+    vlm_scores_by_prompt: Mapping[str, Mapping[int, float]] | None = None,
 ) -> list[ConfigMetrics]:
     """Evaluate a parameter grid and write one summary CSV plus detailed JSON.
 
@@ -982,6 +1116,7 @@ def sweep(
             num_results=int(entry.get("num_results", num_results)),
             near_m=near_m,
             prototypes_by_prompt=prototypes_by_prompt,
+            vlm_scores_by_prompt=vlm_scores_by_prompt,
         )
         elapsed = time.perf_counter() - started
         metrics = replace(metrics, label=label, elapsed_s=elapsed)
@@ -1111,6 +1246,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument(
+        "--with-vlm",
+        action="store_true",
+        help=(
+            "Score every cached candidate with the VLM gate model, once, and reuse "
+            "the table for every grid row naming a `vlm_gate`."
+        ),
+    )
+    parser.add_argument("--vlm-model", default=GateConfig().model_id)
+    parser.add_argument(
         "--with-feedback",
         action="store_true",
         help=(
@@ -1153,6 +1297,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             geo_ref_id=int(manifest.geo_ref_id),
             map_id=manifest.map_id,
         )
+    vlm_scores = None
+    if args.with_vlm or any(entry.get("vlm_gate") for entry in grid):
+        scorer = VlmYesNoScorer(GateConfig(model_id=args.vlm_model))
+        vlm_scores = {
+            prompt: vlm_scores_module.load_or_score(
+                prompt,
+                prompt_candidates[prompt],
+                map_path=map_path,
+                map_id=manifest.map_id,
+                cache_dir=args.cache_dir.expanduser().resolve() / "vlm",
+                scorer=scorer,
+                refresh=args.refresh,
+            )
+            for prompt in prompt_candidates
+        }
+        for prompt, scores in vlm_scores.items():
+            logger.info(
+                "Prompt %r: VLM gate covers %.1f%% of the candidates",
+                prompt,
+                100.0 * vlm_scores_module.coverage(prompt_candidates[prompt], scores),
+            )
     pose_source = georef_source.load_pose_source(map_path)
     base_params = replace(
         LocalizationParams(),
@@ -1180,6 +1345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         base_params=base_params,
         near_m=args.near_m,
         prototypes_by_prompt=prototypes,
+        vlm_scores_by_prompt=vlm_scores,
     )
     return 0
 

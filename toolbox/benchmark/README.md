@@ -129,6 +129,36 @@ each prompt's reviewed embeddings and runs it over the retrieved set. Always kee
 `identity` row: it is the no-review baseline seen through the rescoring path, so a
 difference between the two would be an artefact rather than a review signal.
 
+## The VLM validation gate
+
+`--with-vlm` scores every cached candidate with Qwen3-VL once per prompt
+(`toolbox/bricks/vlm_gate.py`), caches the table under `<cache-dir>/vlm/`, and reuses it
+for every grid row that names a `vlm_gate`. Scoring runs at roughly 12 cutouts/s on the
+dev card, so a 12-prompt map costs ~15 minutes **once**; the sweep itself then runs at
+its usual speed.
+
+Two levels, both applying the same scores:
+
+- `"detection"` folds `p(yes)` into each candidate's ranking similarity before
+  association, weighted by `vlm_alpha` and rescaled by `feedback_normalization`;
+- `"cluster"` aggregates (`vlm_aggregate`: `mean`, `max`, `min`) the scores of a
+  returned cluster's own observations and re-ranks — the multi-view verification shape
+  the 3D-grounding literature uses.
+
+Neither drops anything: the gate is a score, so cluster membership and coordinates are
+identical with and without it, and every row stays comparable at fixed granularity.
+
+`python -m toolbox.benchmark.vlm_cue_separability --map-path …` is the diagnostic to run
+first: it scores the cutouts a human already reviewed and reports the AUC of `p(yes)`
+between their `true_positive` and `false_positive` classes. Run it before wiring a gate
+into anything — a cue that cannot separate labelled cutouts will not rank unlabelled
+ones.
+
+**Converted v1 indexes cannot be gated as they stand.** Their `thumbnail_key` is a
+virtual path that the toolbox re-renders from the ERP on demand, so there is no file to
+show the model; `vlm_scores.load_or_score` logs the unreadable count and leaves those
+candidates unscored rather than rejected.
+
 `--with-feedback` additionally resolves the map's review prototypes, which is what makes
 `feedback_alpha`, `feedback_beta` and `feedback_normalization` do anything offline —
 without it those keys are accepted and silently inert. It fetches the raw prototype

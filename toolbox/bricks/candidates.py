@@ -105,6 +105,15 @@ WHERE geo_ref_id = %s AND id = ANY(%s)
 """
 
 
+# The column is `thumbnail`, holding what prepare wrote as `thumbnail_key` — the
+# rename happens in the response, not in the table.
+_THUMBNAIL_KEYS_SQL = """
+SELECT id, thumbnail
+FROM object_search_candidate
+WHERE geo_ref_id = %s AND id = ANY(%s)
+"""
+
+
 def load_prototype_embeddings(
     conn, geo_ref_id: int, ids: list[int]
 ) -> dict[int, np.ndarray]:
@@ -133,6 +142,28 @@ def load_prototype_embeddings(
         if embedding is not None:
             resolved[int(candidate_id)] = embedding
     return resolved
+
+
+def load_thumbnail_keys(conn, geo_ref_id: int, ids: list[int]) -> dict[int, str]:
+    """Fetch candidate thumbnail keys, by candidate id.
+
+    Same contract as `load_prototype_embeddings`: ids that resolve to nothing are
+    absent rather than empty, so a caller can count what it lost.
+
+    Args:
+        conn: Open psycopg2 connection.
+        geo_ref_id: Georef partition the ids belong to.
+        ids: Candidate ids to fetch.
+
+    Returns:
+        Candidate id mapped to its thumbnail key, relative to the map directory.
+    """
+    if not ids:
+        return {}
+    with conn.cursor() as cursor:
+        cursor.execute(_THUMBNAIL_KEYS_SQL, [geo_ref_id, list(ids)])
+        rows = cursor.fetchall()
+    return {int(candidate_id): key for candidate_id, key in rows if key}
 
 
 def _parse_embedding(raw: object) -> np.ndarray | None:

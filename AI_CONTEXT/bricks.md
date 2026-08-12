@@ -492,6 +492,66 @@ exist under the ratio score), and `max_prototype` reproduces the SQL boost exact
 F1 is identical across every method at fixed association — rescoring changes ranking,
 never geometry.
 
+### The VLM validation gate — the cross-encoder half
+
+`toolbox/bricks/vlm_gate.py` runs Qwen3-VL-4B (4-bit NF4, so it fits beside the online
+service on an 8 GB card) as a yes/no relevance scorer over cutouts, and
+`toolbox/benchmark/vlm_scores.py` caches `p(yes)` per (prompt, candidate) so one scoring
+pass (~12 cutouts/s) serves a whole sweep. Retrieval is a bi-encoder; this is the
+cross-encoder that sees the query and the cutout together.
+
+**Read the probability, never the answer.** VLMs over-answer "yes" to existence
+questions (POPE), so the decision is badly calibrated where the ranking is not.
+`LocalizationParams.vlm_gate` picks where the score applies — `"detection"` before
+association, `"cluster"` aggregated over a returned cluster's observations — and both are
+*scores*, not filters, so membership and coordinates are identical with and without the
+gate and every row stays readable at fixed granularity. The seam is offline only:
+nothing in the service builds a model.
+
+The diagnostic to run before any of it, and the reason this line of work is worth
+pursuing at all: `python -m toolbox.benchmark.vlm_cue_separability` scores the cutouts a
+human already reviewed and reports the AUC between the `true_positive` and
+`false_positive` classes. On `bbhotel-choisy`, over the four prompts whose reviews still
+resolve:
+
+| cue, on the same data | AUC |
+|---|---|
+| distance between depth-projected points (association) | 0.879 |
+| **cutout↔cutout cosine, MetaCLIP** | **0.529** |
+| **Qwen3-VL `p(yes)`** | **0.925** (0.877–0.991 per prompt) |
+
+That is the first semantic cue measured here that is not a coin flip, and it explains why
+every semantics-based association variant came back neutral: the embedding space, not the
+idea, was the limit.
+
+Measured on `bbhotel-choisy` at `eps` 1.5, weight swept
+(`toolbox/benchmark/grids/vlm-gate-bbhotel*.json`):
+
+| configuration | mAP strict | F1 LOO | pair F1 |
+|---|---|---|---|
+| no gate | 0.701 | 0.639 | 0.508 |
+| **detection, weight 0.75–1.0** | 0.716 | **0.686** | 0.508 |
+| detection, weight 4.0 | **0.720** | 0.669 | 0.508 |
+| cluster, mean, weight 0.25 | 0.718 | 0.618 | 0.508 |
+| cluster, max, weight 0.5 | 0.704 | 0.638 | 0.508 |
+| knn_cache alone | **0.751** | **0.711** | 0.508 |
+| knn_cache then detection gate | 0.758 | 0.660 | 0.508 |
+
+- **The detection level gains (+0.047 LOO), the cluster level does not** — the opposite
+  of what the 3D-grounding literature does, which verifies a candidate object across
+  several views. Max aggregation lands on the baseline, mean and min below it. Untested
+  explanation: a cluster's observations are near-duplicate views, so averaging adds no
+  independent evidence, and it applies after the ratio, on a different scale.
+- **The gate and the kNN review vote overlap.** Stacked they give the session's best mAP
+  (0.758 strict, 0.772 grouped) and a *worse* transferable F1 than the kNN alone.
+- **Pair F1 is identical at fixed association everywhere**, which is the structural
+  control: a gate is a score, so it never moves a cluster.
+
+**Converted v1 indexes cannot be gated.** Their `thumbnail_key` is virtual
+(`{outputs}/rows/{row}.png`, re-rendered from the ERP by the toolbox on demand), so there
+is no file to show the model — `vinci-st-domingue` scores zero cutouts today, and gating
+it needs the cutouts rendered first.
+
 Full write-up, with figures: `docs/plans/2026-08-12-plafond-de-profondeur-et-boost.md`.
 
 ### Other divergences from production

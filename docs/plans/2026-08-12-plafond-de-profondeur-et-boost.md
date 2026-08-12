@@ -7,10 +7,10 @@
 `.../sweep-rescorers-2026-08-12/` (99 configurations hors ligne au total). **Rapport :**
 `~/Workspace/Current Work/PoC Vinci/reports/2026-08-12-plafond-profondeur-et-boost.html`.
 
-Quatre leviers, à retrieval identique : plafond sur la profondeur des détections, boost
+Cinq leviers, à retrieval identique : plafond sur la profondeur des détections, boost
 des candidats par les reviews humaines, quatre méthodes de rescoring concurrentes
 portées depuis les worktrees `feat/rescoring-*`, et les associations multicut /
-incremental rejouées avec les précédents.
+incremental rejouées avec les précédents, et une gate de validation Qwen3-VL.
 
 ## 0. Ce qui a été mesuré avant d'implémenter
 
@@ -117,18 +117,63 @@ près — l'artefact de normalisation que la branche d'origine avait dû corrige
 plus avec le score en ratio — et `max_prototype` reproduit exactement le boost SQL. Le
 pair F1 est identique pour toutes les méthodes à association fixée.
 
-## 4. Associations — rien de nouveau, et c'est le résultat attendu
+## 4. La gate de validation par VLM
+
+Qwen3-VL-4B en NF4 4 bits (≈3 Go, cohabite avec le service MetaCLIP sur 8 Go) lit
+`p(oui)` dans les logits, sans génération. Le score est mis en cache par
+(prompt, candidat), donc une passe (~12 découpes/s, 15 min pour bbhotel) sert toutes les
+configurations, et **les deux niveaux de gate partagent la même table**.
+
+**L'indice d'abord**, sur les découpes qu'un humain avait déjà jugées :
+
+| indice, mêmes données | AUC |
+|---|---|
+| distance entre points projetés | 0,879 |
+| cosinus découpe↔découpe (MetaCLIP) | **0,529** |
+| **Qwen3-VL `p(oui)`** | **0,925** (0,877 à 0,991 selon le prompt) |
+
+Premier signal sémantique non trivial mesuré ici. Il explique rétrospectivement pourquoi
+la porte sémantique, le descripteur accumulé et le terme sémantique du multicut sont tous
+revenus neutres : la limite était l'espace d'embedding.
+
+**Puis la gate appliquée**, bbhotel, `eps` 1,5 :
+
+| configuration | mAP stricte | F1 LOO | pair F1 |
+|---|---|---|---|
+| sans gate | 0,701 | 0,639 | 0,508 |
+| **détection, poids 0,75–1,0** | 0,716 | **0,686** | 0,508 |
+| détection, poids 4,0 | **0,720** | 0,669 | 0,508 |
+| cluster, moyenne, poids 0,25 | 0,718 | 0,618 | 0,508 |
+| cluster, maximum, poids 0,5 | 0,704 | 0,638 | 0,508 |
+| vote kNN seul | **0,751** | **0,711** | 0,508 |
+| vote kNN puis gate détection | 0,758 | 0,660 | 0,508 |
+
+- **Le niveau détection gagne (+0,047 de F1 LOO), le niveau cluster non** — l'inverse de
+  la littérature du grounding 3D. Hypothèse non testée : les observations d'un cluster
+  sont des vues quasi identiques, donc la moyenne n'ajoute pas d'évidence indépendante.
+- **Gate et vote kNN se recouvrent** : empilés, meilleure mAP de la session (0,758 /
+  0,772 groupée) mais F1 transférable en baisse contre le kNN seul.
+- **Le pair F1 est identique partout à association fixée** : la gate est un score, elle ne
+  déplace aucun cluster.
+
+Deux limites. Vinci n'est pas mesurable en l'état — index v1 converti, vignettes
+virtuelles, rien à montrer au modèle. Et le coût en ligne serait de 1 000 appels VLM par
+requête ; hors ligne c'est acceptable uniquement parce que le score se met en cache.
+
+## 5. Associations — rien de nouveau, et c'est le résultat attendu
 
 Conforme au 12/08 : sur vinci multicut `pivot` 2,5 domine en pair F1 (0,856 contre 0,799
 pour le défaut), incremental somme 1,2 fait aussi bien à granularité plus fine, et les
 deux se composent avec le plafond sans interférence.
 
-## 5. Ce qu'il reste à faire
+## 6. Ce qu'il reste à faire
 
-1. Corriger les défauts `feedback_alpha`/`feedback_beta` du toolbox (0,2 / 0,5) : ils
+1. Rendre les découpes de vinci depuis les ERP pour pouvoir y mesurer la gate : c'est la
+   carte du PoC, et la seule qu'on ne sait pas encore scorer.
+2. Corriger les défauts `feedback_alpha`/`feedback_beta` du toolbox (0,2 / 0,5) : ils
    sont nocifs sur les deux cartes.
-2. Ne pas porter le plafond en production comme constante — le dériver du `venue_type`
+3. Ne pas porter le plafond en production comme constante — le dériver du `venue_type`
    ou de l'espacement des keyframes, décidé sur au moins trois cartes.
-3. Mesurer le boost hors échantillon : annoter la requête A et évaluer sur la requête B
+4. Mesurer le boost hors échantillon : annoter la requête A et évaluer sur la requête B
    du même objet, ou réserver deux prompts de vinci dont les reviews ne servent jamais.
-4. Refaire la mesure du plafond quand la vérité terrain contiendra des objets lointains.
+5. Refaire la mesure du plafond quand la vérité terrain contiendra des objets lointains.
