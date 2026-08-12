@@ -191,6 +191,37 @@ l'index entier dont le banc n'a pas besoin.
 Reste le coût en ligne : 1 000 appels VLM par requête. Hors ligne c'est acceptable
 uniquement parce que le score se met en cache et sert toutes les configurations.
 
+## 4b. Prompts négatifs — mesurés, et négatifs sauf confusion nommée
+
+`negative_prompt_cue.py`, même protocole sur les découpes revues. Score relatif au lieu
+de la similarité brute : `margin` (requête moins le meilleur négatif) et `softmax`
+(`log p(requête | {requête} ∪ négatifs)`, sans échelle par requête — c'était l'argument).
+Trois sources de négatifs : `benchmark` (les autres prompts de la carte : closed-set,
+borne supérieure), `venue` (le vocabulaire de détection de `prepare` : la version
+open-set honnête), `manual`.
+
+| AUC groupée | bbhotel (brut 0,851) | vinci (brut 0,558) |
+|---|---|---|
+| manual, softmax | 0,854 | **0,616** |
+| benchmark, softmax | 0,815 | 0,606 |
+| **venue, softmax** | 0,833 | **0,462** |
+| venue, margin | **0,730** | 0,447 |
+
+**Le vocabulaire générique nuit, et le mécanisme est vérifié** : sur les *vrais positifs*
+de « x ray machine », le négatif gagnant est `baggage x ray machine`, puis
+`oversized baggage scanner` ; sur « e gates », `access control gate`. Tout vocabulaire
+assez riche pour décrire un lieu contient des synonymes de la requête, et le max sur les
+négatifs soustrait alors exactement le signal cherché.
+
+**Par prompt, une confusion nommée vaut beaucoup** : « checkin counter » passe de 0,467 à
+0,890 dès que la borne libre-service est un négatif, « emergency power plant » de 0,700 à
+0,851, « lampe » de 0,667 à 0,857. Là où il n'y a pas de confusion, ça coûte (« x ray
+machine » 0,574 → 0,426). La moyenne est donc nulle par compensation. `softmax` bat
+`margin` partout.
+
+Aucun rescorer n'a été écrit : c'est un instrument ciblé pour une confusion nommée, à
+exposer comme champ « exclure » par requête, pas un mécanisme à activer.
+
 ## 5. Associations — rien de nouveau, et c'est le résultat attendu
 
 Conforme au 12/08 : sur vinci multicut `pivot` 2,5 domine en pair F1 (0,856 contre 0,799

@@ -574,6 +574,42 @@ And on `vinci-st-domingue` at `eps` 3.0, once its cutouts are rendered:
 - **Pair F1 is identical at fixed association everywhere**, which is the structural
   control: a gate is a score, so it never moves a cluster.
 
+### Negative prompts — measured, and negative except where a confusion is named
+
+`toolbox/benchmark/negative_prompt_cue.py` scores the reviewed cutouts by a *relative*
+text score instead of the raw retrieval similarity: `margin` (query minus the best
+negative) and `softmax` (`log p(query | {query} ∪ negatives)`, which is scale-free per
+query and was the reason to try — a per-query offset is what makes one shared acceptance
+threshold transfer badly). Negatives come from three sources that do not measure the same
+thing: `benchmark` (the map's other prompts — closed-set, an upper bound), `venue` (the
+detection vocabulary `prepare` already uses — the honest open-set version), and `manual`.
+
+Pooled AUC on the reviewed cutouts, against the raw similarity:
+
+| | bbhotel (raw 0.851) | vinci (raw 0.558) |
+|---|---|---|
+| manual, softmax | 0.854 | **0.616** |
+| benchmark, softmax | 0.815 | 0.606 |
+| **venue, softmax** | 0.833 | **0.462** |
+| venue, margin | **0.730** | 0.447 |
+
+**The generic vocabulary is actively harmful, and the mechanism is not subtle.** On the
+*true positives* of `x ray machine`, the winning venue negative is `baggage x ray
+machine` (and `oversized baggage scanner`, `carry on baggage scanner`); on `e gates` it is
+`access control gate`. Any vocabulary rich enough to describe a venue contains synonyms
+of the query, and `max over negatives` then subtracts exactly the signal being measured.
+Curating that per query is the human cost the approach was supposed to avoid.
+
+**Per prompt, a *named* confusion is worth a lot**: `checkin counter` goes 0.467 → 0.890
+once a check-in kiosk is a negative, `emergency power plant` 0.700 → 0.851, `lampe`
+0.667 → 0.857. Where no confusion exists it costs (`x ray machine` 0.574 → 0.426, `tv`
+0.982 → 0.857), which is why the mean over prompts is a wash. `softmax` beats `margin`
+everywhere, as the scale argument predicts.
+
+Conclusion, and it is why no rescorer was built: negative prompts are a **targeted
+instrument for a named confusion**, best exposed as a per-query "exclude" field, not an
+automatic mechanism to switch on.
+
 **Converted v1 indexes need their cutouts rendered first.** Their `thumbnail_key` is
 virtual (`{outputs}/rows/{row}.png`, re-rendered from the ERP by the toolbox on demand),
 so there is no file to show the model. `toolbox/bricks/render_cutouts.py` inverts the

@@ -19,13 +19,13 @@ l'étendue de l'objet, etc.
 
 Prior annoncé avant la mesure : plate. **Faux.**
 
-| `eps` | porte off | | porte 0.80 | | porte 0.85 | |
-|---|---|---|---|---|---|---|
-| | strict | groupé | strict | groupé | strict | groupé |
-| **0.5 m** | **0.788** | 0.675 | 0.752 | 0.659 | 0.703 | 0.628 |
-| 1.0 m | 0.729 | 0.687 | 0.735 | 0.660 | 0.715 | 0.638 |
-| 2.0 m *(défaut)* | 0.653 | 0.713 | 0.694 | 0.692 | 0.698 | 0.639 |
-| 3.0 m | 0.607 | **0.731** | 0.677 | 0.700 | 0.679 | 0.645 |
+| `eps`            | porte off |           | porte 0.80 |        | porte 0.85 |        |
+| ---------------- | --------- | --------- | ---------- | ------ | ---------- | ------ |
+|                  | strict    | groupé    | strict     | groupé | strict     | groupé |
+| **0.5 m**        | **0.788** | 0.675     | 0.752      | 0.659  | 0.703      | 0.628  |
+| 1.0 m            | 0.729     | 0.687     | 0.735      | 0.660  | 0.715      | 0.638  |
+| 2.0 m *(défaut)* | 0.653     | 0.713     | 0.694      | 0.692  | 0.698      | 0.639  |
+| 3.0 m            | 0.607     | **0.731** | 0.677      | 0.700  | 0.679      | 0.645  |
 
 De 2.0 à 0.5 m, la mAP stricte gagne **+0.135**. À comparer aux autres leviers de la
 journée : porte sémantique +0.045, langue du prompt +0.039, changement de score +0.001
@@ -48,26 +48,26 @@ Ni l'une ni l'autre ne décrit ce qu'un utilisateur appellerait « un objet » :
 
 ### Règle de tri qui en découle
 
-| type d'intervention | mesurable ? | vérifié |
-|---|---|---|
-| change le **classement** à granularité fixe | oui | score en ratio et comparaison de modèles ont bougé dans le **même sens** sur les deux vues |
-| change la **granularité** | **non** | `eps`, porte sémantique, `min_keyframes`, IoU 3D, rayon adaptatif — signe décidé par le choix de vérité terrain |
+| type d'intervention                         | mesurable ? | vérifié                                                                                                         |
+| ------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------- |
+| change le **classement** à granularité fixe | oui         | score en ratio et comparaison de modèles ont bougé dans le **même sens** sur les deux vues                      |
+| change la **granularité**                   | **non**     | `eps`, porte sémantique, `min_keyframes`, IoU 3D, rayon adaptatif — signe décidé par le choix de vérité terrain |
 
 ## 3. AP par classe, `eps` (porte off)
 
-| classe | GT | 0.5 | 1.0 | 2.0 | 3.0 | 0.5 + porte 0.85 | 0.5 − 2.0 |
-|---|---|---|---|---|---|---|---|
-| chaise | 213 | 0.620 | 0.288 | 0.138 | 0.082 | **0.831** | **+0.482** |
-| table | 77 | 0.740 | 0.453 | 0.246 | 0.139 | 0.754 | **+0.494** |
-| poubelle | 2 | 0.667 | 0.393 | 0.393 | 0.393 | 0.450 | +0.274 |
-| lampe | 55 | **0.805** | 0.745 | 0.552 | 0.485 | 0.565 | +0.253 |
-| plante | 22 | 0.597 | 0.668 | 0.461 | 0.282 | 0.526 | +0.136 |
-| signe de sortie | 88 | 0.857 | 0.877 | 0.816 | 0.818 | 0.815 | +0.041 |
-| ascenseur | 21 | 0.959 | 0.987 | 0.929 | 0.914 | 0.781 | +0.030 |
-| extincteur | 29 | **1.000** | 0.993 | 0.999 | 1.000 | 0.987 | +0.001 |
-| cctv | 41 | 0.902 | 0.914 | 0.908 | 0.914 | 0.838 | −0.006 |
-| detecteur de fumée | 119 | 0.832 | 0.924 | 0.925 | 0.812 | 0.682 | **−0.094** |
-| **mAP** | 674 | **0.788** | 0.729 | 0.653 | 0.607 | 0.703 | |
+| classe             | GT  | 0.5       | 1.0   | 2.0   | 3.0   | 0.5 + porte 0.85 | 0.5 − 2.0  |
+| ------------------ | --- | --------- | ----- | ----- | ----- | ---------------- | ---------- |
+| chaise             | 213 | 0.620     | 0.288 | 0.138 | 0.082 | **0.831**        | **+0.482** |
+| table              | 77  | 0.740     | 0.453 | 0.246 | 0.139 | 0.754            | **+0.494** |
+| poubelle           | 2   | 0.667     | 0.393 | 0.393 | 0.393 | 0.450            | +0.274     |
+| lampe              | 55  | **0.805** | 0.745 | 0.552 | 0.485 | 0.565            | +0.253     |
+| plante             | 22  | 0.597     | 0.668 | 0.461 | 0.282 | 0.526            | +0.136     |
+| signe de sortie    | 88  | 0.857     | 0.877 | 0.816 | 0.818 | 0.815            | +0.041     |
+| ascenseur          | 21  | 0.959     | 0.987 | 0.929 | 0.914 | 0.781            | +0.030     |
+| extincteur         | 29  | **1.000** | 0.993 | 0.999 | 1.000 | 0.987            | +0.001     |
+| cctv               | 41  | 0.902     | 0.914 | 0.908 | 0.914 | 0.838            | −0.006     |
+| detecteur de fumée | 119 | 0.832     | 0.924 | 0.925 | 0.812 | 0.682            | **−0.094** |
+| **mAP**            | 674 | **0.788** | 0.729 | 0.653 | 0.607 | 0.703            |            |
 
 Le +0.135 global vient presque entièrement de `chaise` (+0.482) et `table` (+0.494) —
 les deux classes que le volet 3 avait montrées **plates sous les trois modèles
