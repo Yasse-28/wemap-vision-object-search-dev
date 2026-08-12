@@ -157,7 +157,51 @@ Trois lectures :
 - Mesuré sur l'index v1 converti, dont les rangées n'ont ni `detection_score` ni
   vignette. Ni l'un ni l'autre n'entre dans une métrique ci-dessus.
 
-## 5. Ce qu'il faudrait faire ensuite
+## 5. Le seuil d'acceptation ne coupe rien avant 0,84
+
+Balayage du `acceptance_threshold` sur les six mêmes configurations, 8 seuils chacune,
+48 runs HTTP complets. Artefacts : `{map}/benchmark/threshold-2026-08-12/`.
+
+`match_score` est un **rapport au meilleur cluster de la requête**, donc son étendue
+utile n'est pas [0, 1] : sur les 530 clusters renvoyés par la configuration de
+référence, le plus faible score **0,838**. Conséquence directe, et elle invalide la
+façon dont le seuil est réglé aujourd'hui :
+
+| seuil | eps 2.0 | eps 3.0 | multicut 2.5 | + rayons | incr. somme 1.2 | porte 0.80 |
+|---|---|---|---|---|---|---|
+| 0,25 / 0,50 / 0,75 | 0.307 | 0.311 | 0.314 | **0.325** | 0.313 | 0.277 |
+| **0,90** | 0.353 | 0.367 | 0.370 | **0.383** | 0.344 | 0.319 |
+| 0,95 | 0.207 | 0.199 | 0.212 | **0.222** | 0.195 | 0.203 |
+| 0,98 | 0.120 | 0.110 | **0.123** | **0.123** | 0.108 | 0.114 |
+| 0,99 | 0.065 | 0.058 | **0.066** | **0.066** | 0.065 | 0.065 |
+| 1,00 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+- **0,25, 0,50 et 0,75 sont la même mesure** : elles retiennent 100 % des clusters
+  renvoyés. Le seuil du banc (0,5) et celui de l'UI ne filtrent rien ; ils ne font que
+  laisser `num_results` et `min_similarity` décider.
+- **1,00 rejette tout**, la comparaison étant stricte (`score > seuil`) et le meilleur
+  cluster valant exactement 1,00 par construction.
+- **L'optimum est à 0,90 pour les six configurations** : +0.046 de F1 sur la référence
+  (0.307 → 0.353), +0.058 sur la meilleure (0.325 → 0.383), pour une précision qui
+  passe de 0.228 à 0.290 et un rappel qui ne perd que 0.019.
+- **L'ordre des méthodes est indépendant du seuil** : `multicut 2.5 + centroïde rayons`
+  est premier à tous les seuils utiles, `porte 0.80` dernier partout sauf en mAP. Le
+  point de fonctionnement et le choix d'association sont donc séparables.
+- Au-delà de 0,95 la mesure perd son sens : 40 clusters acceptés pour 258 annotations,
+  le rappel plafonne à 0,15.
+
+Le vrai défaut n'est pas le seuil, c'est **l'étalement du score** : 0,84–1,00 d'étendue
+utile, où 0,01 de seuil déplace ~20 points de rappel. C'est structurel au score en
+rapport — borne haute atteinte par construction, borne basse fixée par
+`min_similarity`. Un score dont le seuil serait transférable demanderait une
+normalisation qui ne dépende pas de la requête.
+
+Réserve : les six configurations partagent le même `min_similarity` (0.15). Le
+plancher 0,838 en dépend, donc les trois lignes inertes le sont *pour ce réglage* ;
+un `min_similarity` plus bas élargirait l'étendue vers le bas sans rendre 0,50
+discriminant pour autant.
+
+## 6. Ce qu'il faudrait faire ensuite
 
 1. **Ne pas** changer `clustering_eps_m` en production : deux cartes, deux optima
    (1.25–1.5 m et ~3 m). Chercher plutôt de quoi il dépend — espacement des
@@ -170,3 +214,7 @@ Trois lectures :
 4. Réparer le GT vinci avant de lire un chiffre absolu : compléter `e gates`, et
    décider si les annotations FIDS désignent des écrans ou des murs d'écrans (152
    annotations, 102 FN au seuil dans tous les runs).
+5. Porter le seuil d'acceptation par défaut de 0,5 à 0,9 dans le banc et dans l'UI —
+   c'est un gain sans contrepartie sur cette carte, et à vérifier sur bbhotel avant
+   de le figer. Puis regarder si le score peut être normalisé autrement qu'en rapport
+   à la requête, pour que le seuil transfère.
