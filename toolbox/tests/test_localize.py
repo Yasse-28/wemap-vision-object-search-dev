@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
+from toolbox.bricks import localize
 from toolbox.bricks.candidates import EnrichedCandidate
 from toolbox.bricks.localize import (
     UNRESOLVED_LEVEL,
@@ -1126,3 +1127,65 @@ def test_median_level_never_falls_back_to_the_projected_position() -> None:
     )
     assert seeded["level"] == 0, "production resolves it from the centroid altitude"
     assert median["level"] is None, "the median reads keyframe poses only"
+
+
+def test_depth_cap_drops_only_detections_beyond_it() -> None:
+    # Depth is the distance from the keyframe pose to the object position, so these
+    # sit at 1 m and 12 m from their respective cameras.
+    near = _candidate(1, (1.0, 0.0, 0.0), keyframe_id=10, similarity=0.9)
+    far = _candidate(
+        2,
+        (12.0, 0.0, 0.0),
+        keyframe_id=11,
+        similarity=0.95,
+        keyframe_origin=(0.0, 0.0, 0.0),
+    )
+
+    assert localize.detection_depths([near, far]).tolist() == [
+        pytest.approx(1.0),
+        pytest.approx(12.0),
+    ]
+    assert localize._filter_by_max_depth([near, far], None) == [near, far]
+    assert localize._filter_by_max_depth([near, far], 15.0) == [near, far]
+    assert localize._filter_by_max_depth([near, far], 5.0) == [near]
+
+
+def test_depth_cap_measures_depth_from_each_own_keyframe() -> None:
+    # Same object position, two cameras: the cap is per detection, not a distance to
+    # the origin, so only the far observer is dropped.
+    close_observer = _candidate(
+        1,
+        (10.0, 0.0, 0.0),
+        keyframe_id=10,
+        similarity=0.9,
+        keyframe_origin=(9.0, 0.0, 0.0),
+    )
+    far_observer = _candidate(
+        2,
+        (10.0, 0.0, 0.0),
+        keyframe_id=11,
+        similarity=0.9,
+        keyframe_origin=(0.0, 0.0, 0.0),
+    )
+
+    kept = localize._filter_by_max_depth([close_observer, far_observer], 5.0)
+
+    assert kept == [close_observer]
+
+
+def test_depth_cap_can_empty_the_selection_without_raising() -> None:
+    candidates = [_candidate(1, (30.0, 0.0, 0.0), keyframe_id=10, similarity=0.9)]
+
+    assert (
+        localize_from_enriched_candidates(
+            candidates, _geo_transform(), LocalizationParams(max_depth_m=5.0)
+        )
+        == []
+    )
+
+
+def test_depth_cap_rejects_a_non_positive_value() -> None:
+    with pytest.raises(ValueError, match="max_depth_m"):
+        localize._filter_by_max_depth(
+            [_candidate(1, (1.0, 0.0, 0.0), keyframe_id=10, similarity=0.9)], 0.0
+        )

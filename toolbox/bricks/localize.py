@@ -47,6 +47,14 @@ class LocalizationParams:
     # for itself — they exist to be swept, not to be on.
     min_observations_per_cluster: int = 1
     max_cluster_spread_m: float | None = None
+    # Absolute cap on a detection's own depth, in metres. `None` = off = production's
+    # behaviour. This is a *detection* filter, not a cluster one: it drops the far
+    # points whose depth estimate carries the most error before anything associates
+    # them, so it changes cluster geometry as well as ranking. It is applied to the
+    # already-truncated `candidate_count` set, so it removes far detections without
+    # backfilling nearer ones — the comparison against `None` is then an ablation of
+    # those detections alone. See `_filter_by_max_depth`.
+    max_depth_m: float | None = None
     # Optional semantic gate on the legacy leader/canopy experiment. This conjunctive
     # seed rule is ours, not ConceptGraphs' accumulated-descriptor sum rule. `None` =
     # off, which is production's geometry-only behavior.
@@ -152,6 +160,65 @@ def select_top_candidates(
         return []
     count = min(max(int(candidate_count), 1), len(candidates))
     return candidates[:count]
+
+
+def detection_depths(candidates: list[EnrichedCandidate]) -> np.ndarray:
+    """Each detection's depth in metres, recovered from its own geometry.
+
+    Ingest lifts a detection as ``object_position = camera_position + depth · ray``
+    with a unit ray, so the distance between the object position and its keyframe
+    pose *is* the sampled depth. Reading it back this way rather than carrying the
+    `depth` column through enrichment keeps the enrichment SQL untouched and lets
+    already-cached candidates be swept.
+
+    Args:
+        candidates: Enriched detections.
+
+    Returns:
+        Depths aligned with ``candidates``; empty when there are none.
+    """
+    if not candidates:
+        return np.empty(0, dtype=np.float64)
+    positions = np.array([c.eus_xyz for c in candidates], dtype=np.float64)
+    origins = np.array(
+        [c.geokeyframe_pose.position for c in candidates], dtype=np.float64
+    )
+    return np.linalg.norm(positions - origins, axis=1)
+
+
+def _filter_by_max_depth(
+    candidates: list[EnrichedCandidate], max_depth_m: float | None
+) -> list[EnrichedCandidate]:
+    """Drop detections deeper than ``max_depth_m``, preserving retrieval order.
+
+    Args:
+        candidates: Selected detections in retrieval order.
+        max_depth_m: Depth cap in metres, or ``None`` to keep every detection.
+
+    Returns:
+        The retained detections, in their original order.
+
+    Raises:
+        ValueError: If ``max_depth_m`` is not positive.
+    """
+    if max_depth_m is None:
+        return candidates
+    if max_depth_m <= 0.0:
+        raise ValueError("max_depth_m must be positive when set")
+    depths = detection_depths(candidates)
+    kept = [
+        candidate
+        for candidate, depth in zip(candidates, depths.tolist())
+        if depth <= max_depth_m
+    ]
+    if len(kept) != len(candidates):
+        logger.info(
+            "Depth cap %.1f m dropped %d/%d detection(s)",
+            max_depth_m,
+            len(candidates) - len(kept),
+            len(candidates),
+        )
+    return kept
 
 
 def _relabel_clusters_compact(cluster_ids: np.ndarray) -> np.ndarray:
@@ -1364,7 +1431,9 @@ def localize_from_enriched_candidates(
         returns every selected candidate and its pre-ranking association label.
     """
     params = params or LocalizationParams()
-    selected = select_top_candidates(candidates, params.candidate_count)
+    selected = _filter_by_max_depth(
+        select_top_candidates(candidates, params.candidate_count), params.max_depth_m
+    )
     if not selected:
         if return_cluster_labels:
             return [], [], np.empty(0, dtype=np.int32)
