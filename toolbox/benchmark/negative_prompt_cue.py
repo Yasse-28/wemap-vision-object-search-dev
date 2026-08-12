@@ -35,6 +35,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TypedDict
@@ -106,6 +107,27 @@ class CueReport(TypedDict):
     negative_percentiles: dict[str, float]
 
 
+def winning_negatives(
+    embeddings: np.ndarray,
+    labels: np.ndarray,
+    negatives: np.ndarray,
+    names: Sequence[str],
+    *,
+    top: int = 5,
+) -> list[tuple[str, int]]:
+    """Which negative prompt wins on the *true positives*, and how often.
+
+    The diagnostic that explains a negative set rather than merely scoring it: when a
+    negative is a synonym of the query, it takes the maximum on the cutouts the query
+    is supposed to match, and the contrast subtracts the very signal being measured.
+    """
+    if negatives.size == 0 or not labels.any():
+        return []
+    winners = np.asarray(names)[(embeddings[labels] @ negatives.T).argmax(axis=1)]
+    counts = Counter(winners.tolist())
+    return counts.most_common(top)
+
+
 def load_reviews(map_path: Path) -> dict[str, dict[int, bool]]:
     """Reviewed candidate ids per normalised query, mapped to "is a true positive"."""
     path = annotation_db_path(map_path.name, map_path)
@@ -122,6 +144,19 @@ def load_reviews(map_path: Path) -> dict[str, dict[int, bool]]:
     return by_query
 
 
+def _manual_key(query: str) -> str:
+    """Lookup key for `MANUAL_NEGATIVES`, insensitive to spacing.
+
+    Users type what they type: the same prompt appears as "check in counter" on one
+    map and "checkin counter" on another, and `normalize_query` deliberately leaves
+    inner whitespace alone because "fire exit" and "fire  exit" are different searches.
+    For a hand-written table keyed by concept, though, that distinction is noise.
+    """
+    return "".join(
+        character for character in normalize_query(query) if character.isalnum()
+    )
+
+
 def venue_vocabulary(venue_type: str | None) -> tuple[str, ...]:
     """The detection vocabulary `prepare` uses for this venue, as negative prompts."""
     from prepare import prompts as prepare_prompts
@@ -136,38 +171,30 @@ def venue_vocabulary(venue_type: str | None) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _manual_key(query: str) -> str:
-    """Lookup key for `MANUAL_NEGATIVES`, insensitive to spacing.
-
-    Users type what they type: the same prompt appears as "check in counter" on one
-    map and "checkin counter" on another, and `normalize_query` deliberately leaves
-    inner whitespace alone because "fire exit" and "fire  exit" are different searches.
-    For a hand-written table keyed by concept, though, that distinction is noise.
-    """
-    return "".join(
-        character for character in normalize_query(query) if character.isalnum()
-    )
-
-
 def negatives_for(
     query: str, source: str, *, all_queries: Sequence[str], venue_type: str | None
 ) -> tuple[str, ...]:
     """Negative prompts for one query, from the requested source.
 
-    The query itself is always removed — a prompt cannot be its own negative. Near
-    synonyms are *not* removed: leaving "self check in kiosk" in the vocabulary of a
-    "check in kiosk" query is the open-set reality, not an oversight.
+    The query is always removed, **compared without spacing**: the reviews store
+    "checkin kiosk" and the venue vocabulary says "check in kiosk", and a plain
+    normalised comparison leaves the query in its own negative set — where it wins on
+    180 of that prompt's true positives and inverts the score.
+
+    Near synonyms are *not* removed. "self check in kiosk" against "check in kiosk", or
+    "decorative plant" against "plante", is the open-set reality, and pretending
+    otherwise would measure a vocabulary nobody can build in advance.
     """
-    normalised = normalize_query(query)
+    squashed = _manual_key(query)
     if source == "benchmark":
         pool: tuple[str, ...] = tuple(all_queries)
     elif source == "venue":
         pool = venue_vocabulary(venue_type)
     elif source == "manual":
-        pool = MANUAL_NEGATIVES.get(_manual_key(query), ())
+        pool = MANUAL_NEGATIVES.get(squashed, ())
     else:
         raise ValueError(f"Unknown negative source {source!r}")
-    return tuple(entry for entry in pool if normalize_query(entry) != normalised)
+    return tuple(entry for entry in pool if _manual_key(entry) != squashed)
 
 
 def score_variants(
@@ -246,6 +273,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return np.asarray(embedder.embed_text(text), dtype=np.float64)
 
     report: dict[str, dict[str, CueReport]] = {}
+    winners: dict[str, dict[str, list[tuple[str, int]]]] = {}
     with db.connect() as conn:
         for query, labels in reviews.items():
             by_id = candidates_module.load_prototype_embeddings(
@@ -268,6 +296,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue
             positive = embed(query)
             prompt_report: dict[str, CueReport] = {}
+            explained: dict[str, list[tuple[str, int]]] = {}
             for source in sources:
                 negative_prompts = negatives_for(
                     query,
@@ -285,16 +314,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ).items():
                     key = "raw" if name == "raw" else f"{source}/{name}"
                     prompt_report[key] = _report(values, truth)
+                explained[source] = winning_negatives(
+                    matrix, truth, negatives, negative_prompts
+                )
                 logger.info(
-                    "Prompt %r, %s: %d negative(s)",
+                    "Prompt %r, %s: %d negative(s); wins on true positives: %s",
                     query,
                     source,
                     len(negative_prompts),
+                    explained[source][:3],
                 )
             report[query] = prompt_report
+            winners[query] = explained
 
     pooled = _pooled(report)
-    payload = {"per_prompt": report, "pooled_auc": pooled}
+    payload = {
+        "per_prompt": report,
+        "pooled_auc": pooled,
+        "winning_negatives": winners,
+    }
     text = json.dumps(payload, indent=2, sort_keys=True)
     if args.out is not None:
         args.out.expanduser().resolve().write_text(text, encoding="utf-8")

@@ -590,15 +590,25 @@ Pooled AUC on the reviewed cutouts, against the raw similarity:
 |---|---|---|
 | manual, softmax | 0.854 | **0.616** |
 | benchmark, softmax | 0.815 | 0.606 |
-| **venue, softmax** | 0.833 | **0.462** |
-| venue, margin | **0.730** | 0.447 |
+| **venue, softmax** | 0.833 | **0.476** |
+| venue, margin | **0.730** | 0.478 |
 
-**The generic vocabulary is actively harmful, and the mechanism is not subtle.** On the
-*true positives* of `x ray machine`, the winning venue negative is `baggage x ray
-machine` (and `oversized baggage scanner`, `carry on baggage scanner`); on `e gates` it is
-`access control gate`. Any vocabulary rich enough to describe a venue contains synonyms
-of the query, and `max over negatives` then subtracts exactly the signal being measured.
-Curating that per query is the human cost the approach was supposed to avoid.
+**The generic vocabulary is actively harmful, and the mechanism is recorded rather than
+guessed** — `winning_negatives` in the report names, per query, the negative that takes
+the maximum on that query's own *true positives*. It is a synonym every time:
+`flight information display system` loses to `flight information display` 119 times,
+`emergency power plant` to `emergency generator` 87 times, `plante` to `decorative
+plant`, `poubelle` to `trash bin`, `x ray machine` to `oversized baggage scanner`. Any
+vocabulary rich enough to describe a venue contains synonyms of what is searched in it,
+and `max over negatives` then subtracts exactly the signal being measured. Curating that
+per query is the human cost the approach was supposed to avoid.
+
+A coarser version of the same trap sits in the *comparison*, not the vocabulary: reviews
+store `checkin kiosk` while the vocabulary says `check in kiosk`, so a `normalize_query`
+comparison left the query inside its own negative set, where it won on 180 of that
+prompt's true positives. `negatives_for` therefore compares **letters only**
+(`_manual_key`). Spelling variants are excluded; genuine synonyms are not, because
+pretending they can be is what this measurement disproves.
 
 **Per prompt, a *named* confusion is worth a lot**: `checkin counter` goes 0.467 → 0.890
 once a check-in kiosk is a negative, `emergency power plant` 0.700 → 0.851, `lampe`
