@@ -139,6 +139,126 @@ function CollapsibleOnlineOverrides(props: {
           }
         />
       </label>
+      <details className="object-search-online-experimental">
+        <summary>Expérimental</summary>
+        <div className="object-search-online-experimental-fields">
+          <label className="object-search-online-input">
+            <span>association</span>
+            <select
+              value={props.overrides.association}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  association: event.target
+                    .value as OnlineLocalizeOverrides["association"],
+                })
+              }
+            >
+              <option value="leader_canopy">leader_canopy</option>
+              <option value="incremental">incremental</option>
+              <option value="cdog">cdog</option>
+              <option value="multicut">multicut</option>
+            </select>
+          </label>
+          <label className="object-search-online-input">
+            <span>combination</span>
+            <select
+              value={props.overrides.combination}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  combination: event.target
+                    .value as OnlineLocalizeOverrides["combination"],
+                })
+              }
+            >
+              <option value="conjunctive">conjunctive</option>
+              <option value="sum">sum</option>
+            </select>
+          </label>
+          <label className="object-search-online-input">
+            <span>association_sim_threshold</span>
+            <input
+              type="number"
+              min={0}
+              max={2}
+              step="any"
+              value={props.overrides.association_sim_threshold}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  association_sim_threshold: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label className="object-search-online-input">
+            <span>max_depth_m</span>
+            <input
+              type="number"
+              min={Number.EPSILON}
+              step="any"
+              placeholder="off"
+              value={props.overrides.max_depth_m ?? ""}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  max_depth_m:
+                    event.target.value === "" ? null : Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label className="object-search-online-input">
+            <span>max_depth_stage</span>
+            <select
+              value={props.overrides.max_depth_stage}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  max_depth_stage: event.target
+                    .value as OnlineLocalizeOverrides["max_depth_stage"],
+                })
+              }
+            >
+              <option value="after_select">after_select</option>
+              <option value="before_select">before_select</option>
+            </select>
+          </label>
+          <label className="object-search-online-input">
+            <span>max_cluster_spread_m</span>
+            <input
+              type="number"
+              min={Number.EPSILON}
+              step="any"
+              placeholder="off"
+              value={props.overrides.max_cluster_spread_m ?? ""}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  max_cluster_spread_m:
+                    event.target.value === "" ? null : Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label className="object-search-online-input">
+            <span>min_observations_per_cluster</span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={props.overrides.min_observations_per_cluster}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.overrides,
+                  min_observations_per_cluster: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+        </div>
+      </details>
     </div>
   );
 }

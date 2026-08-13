@@ -105,6 +105,13 @@ export type OnlineLocalizeOverrides = {
    * highest-similarity one. Dev-only — see `toolbox/bricks/localize.py`.
    */
   level_strategy: "seed" | "median";
+  association: "leader_canopy" | "incremental" | "cdog" | "multicut";
+  combination: "conjunctive" | "sum";
+  association_sim_threshold: number;
+  max_depth_m: number | null;
+  max_depth_stage: "after_select" | "before_select";
+  max_cluster_spread_m: number | null;
+  min_observations_per_cluster: number;
 };
 
 export const DEFAULT_ONLINE_OVERRIDES: OnlineLocalizeOverrides = {
@@ -119,6 +126,13 @@ export const DEFAULT_ONLINE_OVERRIDES: OnlineLocalizeOverrides = {
   min_keyframes_per_cluster: 2,
   candidate_count: 1000,
   level_strategy: "seed",
+  association: "leader_canopy",
+  combination: "sum",
+  association_sim_threshold: 1.1,
+  max_depth_m: null,
+  max_depth_stage: "after_select",
+  max_cluster_spread_m: null,
+  min_observations_per_cluster: 1,
 };
 
 export type TextSearchState = {
