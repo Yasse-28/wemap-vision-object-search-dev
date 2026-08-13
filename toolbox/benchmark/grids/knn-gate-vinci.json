@@ -1,0 +1,8 @@
+[
+  {"label": "knn-alone", "clustering_eps_m": 3.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}},
+  {"label": "knn+cluster-a0.25", "clustering_eps_m": 3.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}, "vlm_gate": "cluster", "vlm_alpha": 0.25},
+  {"label": "knn+cluster-a0.5", "clustering_eps_m": 3.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}, "vlm_gate": "cluster", "vlm_alpha": 0.5},
+  {"label": "knn+cluster-a1.0", "clustering_eps_m": 3.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}, "vlm_gate": "cluster", "vlm_alpha": 1.0},
+  {"label": "knn+cluster-max-a0.5", "clustering_eps_m": 3.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}, "vlm_gate": "cluster", "vlm_alpha": 0.5, "vlm_aggregate": "max"},
+  {"label": "knn+detection-a1.0", "clustering_eps_m": 3.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}, "vlm_gate": "detection", "vlm_alpha": 1.0}
+]

@@ -652,6 +652,13 @@ Three readings, and the first corrects an earlier one on this page.
   (median spread 0.518 → 0.441). Read the association step on pair F1 and the scoring
   steps on LOO; mixing them is the confound this whole file warns about.
 
+Without multicut, the same gate on top of the reviews is much weaker
+(`toolbox/benchmark/grids/knn-gate-*.json`, artefacts in `{map}/benchmark/knn-gate-2026-08-13/`):
+vinci gains +0.023 of LOO at best (`max` aggregation, weight 0.5) and +0.014 at
+weight 0.25, against +0.051 once multicut is in the stack; bbhotel loses in every
+variant. So the two do compound on vinci rather than merely coexisting — and the `max`
+aggregation, which was the least bad on the plain baseline, is again the safest one.
+
 Caveat on the headline: vinci's +0.132 rests on **6 prompts** in leave-one-out, so its
 variance is large. Confirm on a third map before treating it as an architecture decision.
 
