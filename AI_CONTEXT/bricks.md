@@ -655,6 +655,39 @@ Three readings, and the first corrects an earlier one on this page.
 Caveat on the headline: vinci's +0.132 rests on **6 prompts** in leave-one-out, so its
 variance is large. Confirm on a third map before treating it as an architecture decision.
 
+### Capping before the truncation buys nothing — and a deeper fetch costs
+
+`max_depth_stage` (`"after_select"` default) decides whether the cap runs before or after
+the `candidate_count` truncation. `"before_select"` is what a production filter would do:
+keep `candidate_count` detections that are *already* under the cap, by pulling nearer
+ones up from further down the ranking. Measured with an exact top-2000 ranking
+(`--exact-retrieval`), artefacts in `{map}/benchmark/depth-stage-2026-08-13/`:
+
+| configuration | vinci mAP / LOO / pair F1 | bbhotel mAP / LOO / pair F1 |
+|---|---|---|
+| k 1000, no cap | 0.397 / 0.324 / 0.808 | 0.705 / 0.639 / 0.508 |
+| **k 2000, no cap** *(control)* | 0.423 / **0.290** / **0.788** | 0.723 / 0.638 / **0.496** |
+| cap 20 m, after select | 0.397 / 0.330 / 0.808 | 0.703 / 0.641 / 0.510 |
+| **cap 20 m, before select** | 0.398 / **0.330** / 0.809 | 0.703 / **0.641** / 0.508 |
+| multicut + kNN, cap after | 0.499 / 0.393 / 0.857 | 0.754 / 0.706 / 0.522 |
+| multicut + kNN, cap before | 0.501 / 0.384 / 0.857 | 0.754 / 0.706 / 0.520 |
+
+- **The two stages are indistinguishable** at 20 m: same LOO to three decimals on both
+  maps, and the same pair F1. Backfilling restores the *count* (564 → 613 clusters on
+  vinci) without restoring anything the metrics see.
+- **The control is the informative row.** Simply retrieving 2000 instead of 1000 raises
+  mAP (+0.026 on vinci) while *lowering* the transferable F1 (−0.034) and the partition
+  quality (−0.020): the extra candidates are lower-similarity ones that add clusters
+  rather than improve the existing ones. That is also why backfilling cannot help — what
+  it pulls in is exactly that tail.
+- **A production filter would therefore be for latency and index size, not accuracy.**
+
+Two facts about the retrieval path came out of running this. The online service **cannot
+answer k > 1000**: it sets `hnsw.ef_search = max(k, 1000)` and pgvector rejects anything
+above 1000, so a deeper list needs `candidates.query_exact_top_k`. And exact ranking is
+worth about +0.01 of LOO over the HNSW one (0.324 vs 0.313 on vinci), i.e. the
+approximate index is giving up very little.
+
 **Converted v1 indexes need their cutouts rendered first.** Their `thumbnail_key` is
 virtual (`{outputs}/rows/{row}.png`, re-rendered from the ERP by the toolbox on demand),
 so there is no file to show the model. `toolbox/bricks/render_cutouts.py` inverts the

@@ -144,6 +144,68 @@ def load_prototype_embeddings(
     return resolved
 
 
+# Exact top-k, index scans disabled (dev-only). The mirrored service cannot answer
+# k > 1000: it sets `hnsw.ef_search = max(k, 1000)` and pgvector caps that parameter at
+# 1000, so a deeper candidate list has to come from a brute-force scan. Cosine is
+# recovered from the L2 distance the same way the service does it, `1 - d^2 / 2`, which
+# holds because the embeddings are unit vectors.
+#
+# The shape matters as much as the maths. The query vector is materialised once in a CTE
+# and the distance is computed **once per row**, in a subquery, with the similarity
+# derived outside it. Writing the distance in both the SELECT list and the ORDER BY,
+# with the vector inline, casts a 10 KB text parameter twice per row: measured at
+# over 10 minutes for one query against 1.9 s for this form, on 1 046 404 rows.
+_EXACT_TOPK_SQL = """
+WITH q AS MATERIALIZED (SELECT %(vector)s::halfvec AS v),
+top AS (
+    SELECT c.id AS id, c.embedding <-> q.v AS d
+    FROM object_search_candidate AS c, q
+    WHERE c.geo_ref_id = %(geo_ref_id)s
+    ORDER BY d
+    LIMIT %(limit)s
+)
+SELECT id, 1 - (POWER(d, 2) / 2) AS similarity FROM top ORDER BY d
+"""
+
+
+def query_exact_top_k(
+    conn, geo_ref_id: int, embedding: np.ndarray, limit: int
+) -> list[dict]:
+    """Brute-force top-k for one query embedding, in the service's response shape.
+
+    Dev-only, and only for candidate lists the online service refuses to produce
+    (k > 1000). Slower than the HNSW path by construction; the point is that it is
+    exact, so every configuration in a sweep shares one ranking regardless of depth.
+
+    Args:
+        conn: Open psycopg2 connection.
+        geo_ref_id: Georef partition to search.
+        embedding: Unit-norm query embedding.
+        limit: Number of candidates to return.
+
+    Returns:
+        `[{"id": int, "similarity": float}]`, best first.
+    """
+    vector = "[" + ",".join(f"{float(value):.7g}" for value in embedding) + "]"
+    with conn.cursor() as cursor:
+        # `SET LOCAL` lasts to the end of the *transaction*, not the statement, and
+        # psycopg2 holds one open across calls — so leaving these off would make the
+        # next enrichment plan its prototype subquery as a sequential scan per row.
+        # Measured before the restore: one enrichment still running after 11 minutes.
+        cursor.execute("SET LOCAL enable_indexscan = off")
+        cursor.execute("SET LOCAL enable_bitmapscan = off")
+        try:
+            cursor.execute(
+                _EXACT_TOPK_SQL,
+                {"vector": vector, "geo_ref_id": geo_ref_id, "limit": int(limit)},
+            )
+            rows = cursor.fetchall()
+        finally:
+            cursor.execute("SET LOCAL enable_indexscan = on")
+            cursor.execute("SET LOCAL enable_bitmapscan = on")
+    return [{"id": int(row[0]), "similarity": float(row[1])} for row in rows]
+
+
 def load_thumbnail_keys(conn, geo_ref_id: int, ids: list[int]) -> dict[int, str]:
     """Fetch candidate thumbnail keys, by candidate id.
 

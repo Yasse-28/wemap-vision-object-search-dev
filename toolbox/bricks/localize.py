@@ -55,6 +55,15 @@ class LocalizationParams:
     # backfilling nearer ones — the comparison against `None` is then an ablation of
     # those detections alone. See `_filter_by_max_depth`.
     max_depth_m: float | None = None
+    # Where the cap applies relative to the `candidate_count` truncation.
+    # `"after_select"` (the default) ablates the far detections and nothing else — the
+    # working set simply shrinks. `"before_select"` caps first and *then* truncates, so
+    # the query keeps `candidate_count` usable detections by pulling in nearer ones from
+    # further down the ANN ranking. The second is what a production filter would do
+    # (`depth` is a column, so the cap can live in the enrichment SQL), and it changes
+    # the retrieved set, so it needs a fetch deeper than `candidate_count` to have
+    # anything to pull from.
+    max_depth_stage: Literal["after_select", "before_select"] = "after_select"
     # Optional semantic gate on the legacy leader/canopy experiment. This conjunctive
     # seed rule is ours, not ConceptGraphs' accumulated-descriptor sum rule. `None` =
     # off, which is production's geometry-only behavior.
@@ -1450,9 +1459,15 @@ def localize_from_enriched_candidates(
         returns every selected candidate and its pre-ranking association label.
     """
     params = params or LocalizationParams()
-    selected = _filter_by_max_depth(
-        select_top_candidates(candidates, params.candidate_count), params.max_depth_m
-    )
+    if params.max_depth_stage == "before_select":
+        selected = select_top_candidates(
+            _filter_by_max_depth(candidates, params.max_depth_m), params.candidate_count
+        )
+    else:
+        selected = _filter_by_max_depth(
+            select_top_candidates(candidates, params.candidate_count),
+            params.max_depth_m,
+        )
     if not selected:
         if return_cluster_labels:
             return [], [], np.empty(0, dtype=np.int32)

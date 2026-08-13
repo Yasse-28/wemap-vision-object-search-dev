@@ -1,0 +1,12 @@
+[
+  {"label": "A-base-k1000", "clustering_eps_m": 3.0, "candidate_count": 1000},
+  {"label": "B-base-k2000", "clustering_eps_m": 3.0, "candidate_count": 2000},
+  {"label": "C-cap20-after-k1000", "clustering_eps_m": 3.0, "candidate_count": 1000, "max_depth_m": 20.0},
+  {"label": "D-cap20-before-k1000", "clustering_eps_m": 3.0, "candidate_count": 1000, "max_depth_m": 20.0, "max_depth_stage": "before_select"},
+  {"label": "E-cap15-after-k1000", "clustering_eps_m": 3.0, "candidate_count": 1000, "max_depth_m": 15.0},
+  {"label": "F-cap15-before-k1000", "clustering_eps_m": 3.0, "candidate_count": 1000, "max_depth_m": 15.0, "max_depth_stage": "before_select"},
+
+  {"label": "G-mc+knn-cap20-after", "association": "multicut", "multicut_geo_pivot": 2.5, "candidate_count": 1000, "max_depth_m": 20.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}},
+  {"label": "H-mc+knn-cap20-before", "association": "multicut", "multicut_geo_pivot": 2.5, "candidate_count": 1000, "max_depth_m": 20.0, "max_depth_stage": "before_select", "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}},
+  {"label": "I-mc+knn-no-cap", "association": "multicut", "multicut_geo_pivot": 2.5, "candidate_count": 1000, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}}
+]

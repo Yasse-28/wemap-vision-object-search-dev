@@ -1189,3 +1189,25 @@ def test_depth_cap_rejects_a_non_positive_value() -> None:
         localize._filter_by_max_depth(
             [_candidate(1, (1.0, 0.0, 0.0), keyframe_id=10, similarity=0.9)], 0.0
         )
+
+
+def test_depth_cap_before_selection_backfills_from_deeper_in_the_ranking() -> None:
+    """`before_select` keeps `candidate_count` usable detections;
+
+    `after_select` does not."""
+    near_first = _candidate(1, (1.0, 0.0, 0.0), keyframe_id=10, similarity=0.90)
+    far = _candidate(2, (30.0, 0.0, 0.0), keyframe_id=11, similarity=0.85)
+    near_last = _candidate(3, (2.0, 0.0, 0.0), keyframe_id=12, similarity=0.10)
+    retrieved = [near_first, far, near_last]
+
+    after = localize._filter_by_max_depth(
+        localize.select_top_candidates(retrieved, 2), 15.0
+    )
+    before = localize.select_top_candidates(
+        localize._filter_by_max_depth(retrieved, 15.0), 2
+    )
+
+    # Same cap, same retrieved set: capping after the truncation leaves one detection,
+    # capping before it pulls the low-similarity near one up into the working set.
+    assert [c.id for c in after] == [1]
+    assert [c.id for c in before] == [1, 3]

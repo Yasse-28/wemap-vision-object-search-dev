@@ -293,6 +293,7 @@ class LocalizeParams(BaseModel):
     # Absolute depth cap on a detection, off by default — see
     # `localize._filter_by_max_depth`.
     max_depth_m: float | None = Field(default=None, gt=0.0)
+    max_depth_stage: Literal["after_select", "before_select"] = "after_select"
     # Optional seed-cosine gate for the legacy leader/canopy mode, or for the
     # incremental conjunctive experiment. Bounded to a cosine's range.
     semantic_gate_threshold: float | None = Field(default=None, ge=-1.0, le=1.0)
@@ -361,6 +362,7 @@ class LocalizeParams(BaseModel):
             min_observations_per_cluster=self.min_observations_per_cluster,
             max_cluster_spread_m=self.max_cluster_spread_m,
             max_depth_m=self.max_depth_m,
+            max_depth_stage=self.max_depth_stage,
             semantic_gate_threshold=self.semantic_gate_threshold,
             association=self.association,
             combination=self.combination,

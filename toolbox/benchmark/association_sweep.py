@@ -545,6 +545,7 @@ def _cache_path(
     candidate_count: int,
     *,
     with_feedback: bool,
+    exact: bool = False,
 ) -> Path:
     payload: dict[str, Any] = {
         "map_id": map_id,
@@ -556,6 +557,8 @@ def _cache_path(
     # stay addressable by the no-feedback path instead of silently going cold.
     if with_feedback:
         payload["with_feedback"] = True
+    if exact:
+        payload["exact"] = True
     key = json.dumps(
         payload,
         ensure_ascii=False,
@@ -576,6 +579,8 @@ def fetch_prompt_candidates(
     refresh: bool = False,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     with_feedback: bool = False,
+    exact: bool = False,
+    exact_device: str = "cpu",
 ) -> dict[str, list[EnrichedCandidate]]:
     """Fetch and cache the enriched ANN candidate set once per benchmark prompt.
 
@@ -587,6 +592,14 @@ def fetch_prompt_candidates(
         prompts: Optional exact prompt subset. Annotation insertion order is retained.
         refresh: Replace matching cache entries when true.
         timeout_s: ANN request timeout in seconds.
+        exact: Rank by a brute-force scan instead of asking the online service. The
+            only way to obtain more than 1000 candidates, since the service sets
+            `hnsw.ef_search = max(k, 1000)` and pgvector caps that at 1000. Uses its own
+            cache entries and embeds the query locally with the same checkpoint.
+        exact_device: Where to run that text encoder. CPU by default and on purpose: it
+            is one 1024-d vector per prompt (11 s to load, 0.12 s to embed), while the
+            GPU is usually holding the online service's own copy of the same model and a
+            second one does not fit in 8 GB.
         with_feedback: Also resolve the map's review prototypes, with both gains at
             zero, so a grid can sweep them offline through `apply_feedback`. The
             retrieved set, its order and every raw similarity are unaffected.
@@ -626,6 +639,7 @@ def fetch_prompt_candidates(
             prompt,
             candidate_count,
             with_feedback=with_feedback,
+            exact=exact,
         )
         logger.info("Candidate cache for prompt %r: %s", prompt, path)
         if path.is_file() and not refresh:
@@ -638,15 +652,36 @@ def fetch_prompt_candidates(
             missing.append((prompt, path))
 
     if missing:
+        embedder = None
+        if exact:
+            from inference.embedder import (
+                METACLIP_DTYPE,
+                METACLIP_MODEL_ID,
+                MetaClipEmbedder,
+            )
+
+            embedder = MetaClipEmbedder(
+                METACLIP_MODEL_ID,
+                exact_device,
+                METACLIP_DTYPE if exact_device != "cpu" else "float32",
+            )
         with db.connect() as conn:
             for prompt, path in missing:
-                hits = service.query_by_text(
-                    ann_base_url,
-                    geo_ref_id,
-                    prompt,
-                    candidate_count,
-                    timeout_s,
-                )
+                if embedder is not None:
+                    hits = candidates.query_exact_top_k(
+                        conn,
+                        geo_ref_id,
+                        np.asarray(embedder.embed_text(prompt), dtype=np.float64),
+                        candidate_count,
+                    )
+                else:
+                    hits = service.query_by_text(
+                        ann_base_url,
+                        geo_ref_id,
+                        prompt,
+                        candidate_count,
+                        timeout_s,
+                    )
                 review_feedback = (
                     feedback_module.load_review_feedback(
                         manifest.map_id, prompt, resolved_map_path
@@ -1245,6 +1280,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--default-accuracy", type=float, default=DEFAULT_ACCURACY_M)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--exact-device", default="cpu")
+    parser.add_argument(
+        "--exact-retrieval",
+        action="store_true",
+        help=(
+            "Rank candidates by a brute-force scan instead of the online service, the "
+            "only way past its 1000-candidate ceiling (pgvector caps hnsw.ef_search)."
+        ),
+    )
     parser.add_argument(
         "--with-vlm",
         action="store_true",
@@ -1293,6 +1337,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         refresh=args.refresh,
         timeout_s=args.timeout,
         with_feedback=args.with_feedback,
+        exact=args.exact_retrieval,
+        exact_device=args.exact_device,
     )
     grid = _load_grid(args.grid)
     manifest = map_manifest.load_map_manifest(map_path)

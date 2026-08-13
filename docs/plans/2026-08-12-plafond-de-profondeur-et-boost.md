@@ -254,6 +254,37 @@ deux se composent avec le plafond sans interférence.
 
 Réserve : +0,132 sur 6 prompts en LOO, variance élevée. À confirmer sur une 3ᵉ carte.
 
+## 5c. Plafond avant ou après la troncature (13/08)
+
+Question posée : ne récupérer que 1 000 candidats *déjà* sous le plafond, au lieu d'en
+prendre 1 000 puis d'en jeter. Mesuré avec un classement exact du top-2000
+(`--exact-retrieval`), artefacts dans `{map}/benchmark/depth-stage-2026-08-13/`.
+
+| configuration | vinci mAP / LOO / pair F1 | bbhotel mAP / LOO / pair F1 |
+|---|---|---|
+| k 1000, sans plafond | 0,397 / 0,324 / 0,808 | 0,705 / 0,639 / 0,508 |
+| **k 2000, sans plafond** *(contrôle)* | 0,423 / **0,290** / **0,788** | 0,723 / 0,638 / **0,496** |
+| plafond 20 m, après troncature | 0,397 / 0,330 / 0,808 | 0,703 / 0,641 / 0,510 |
+| **plafond 20 m, avant troncature** | 0,398 / **0,330** / 0,809 | 0,703 / **0,641** / 0,508 |
+| multicut + kNN, plafond après | 0,499 / 0,393 / 0,857 | 0,754 / 0,706 / 0,522 |
+| multicut + kNN, plafond avant | 0,501 / 0,384 / 0,857 | 0,754 / 0,706 / 0,520 |
+
+- **Les deux étapes sont indiscernables** à 20 m : même LOO à trois décimales sur les deux
+  cartes. Le rappel de candidats proches restaure le *nombre* (564 → 613 clusters sur
+  vinci) sans restaurer quoi que ce soit que les métriques voient.
+- **Le contrôle est la ligne instructive** : passer de 1 000 à 2 000 candidats monte la
+  mAP (+0,026) et **baisse** le F1 transférable (−0,034) et le pair F1 (−0,020). Les
+  candidats supplémentaires sont ceux de la queue de classement : ils ajoutent des
+  clusters au lieu d'améliorer ceux qui existent. C'est aussi pourquoi le rappel ne peut
+  pas aider — c'est exactement cette queue qu'il fait entrer.
+- **Un filtre en production serait donc pour la latence et la taille d'index, pas pour la
+  qualité.**
+
+Deux faits sur le chemin de retrieval, découverts en route : le service en ligne **ne
+peut pas répondre à k > 1000** (`hnsw.ef_search = max(k, 1000)`, plafonné à 1000 par
+pgvector), et le classement exact ne vaut que ~+0,01 de LOO contre le HNSW — l'index
+approché ne perd presque rien.
+
 ## 6. Ce qu'il reste à faire
 
 1. Corriger les défauts `feedback_alpha`/`feedback_beta` du toolbox (0,2 / 0,5) : ils
