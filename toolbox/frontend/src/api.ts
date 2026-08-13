@@ -25,8 +25,6 @@ export type MapsResponse = {
   maps: MapSummary[];
 };
 
-export type SearchType = "auto" | "cutout" | "object";
-
 export async function fetchMaps(): Promise<MapSummary[]> {
   const data = await fetchJson("/ui/api/maps", {
     headers: { "Content-Type": "application/json" },

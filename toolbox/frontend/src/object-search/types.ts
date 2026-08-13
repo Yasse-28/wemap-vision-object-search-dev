@@ -1,4 +1,3 @@
-import type { SearchType } from "../api";
 import type { FeedbackNormalization } from "../benchmark/types";
 
 export type { FeedbackNormalization };
@@ -146,7 +145,6 @@ export type RunObjectSearchParams = {
   text: string;
   imageFile: File | null;
   numResults: number;
-  searchType: SearchType;
   maxObservationsPerCluster: number;
   onlineOverrides: OnlineLocalizeOverrides;
   remoteUrl: string | null;

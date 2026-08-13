@@ -273,7 +273,6 @@ export async function runObjectSearch(
       body: JSON.stringify({
         text: params.text,
         num_results: params.numResults,
-        search_type: params.searchType,
       }),
     });
     const { routerObjectType } = parseTextPairs(raw);

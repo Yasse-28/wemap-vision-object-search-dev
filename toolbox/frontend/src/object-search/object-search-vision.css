@@ -309,8 +309,7 @@ body.prompt-box-dragging * {
 }
 
 .object-search-input,
-.object-search-num-results,
-.object-search-inline-select {
+.object-search-num-results {
   min-height: 42px;
   padding: 11px 14px;
   border: 1px solid var(--c-border);
@@ -328,15 +327,13 @@ body.prompt-box-dragging * {
 }
 
 .object-search-input:focus,
-.object-search-num-results:focus,
-.object-search-inline-select:focus {
+.object-search-num-results:focus {
   border-color: var(--c-accent);
   box-shadow: 0 0 0 3px rgba(11, 110, 253, 0.15);
 }
 
 .object-search-input:disabled,
-.object-search-num-results:disabled,
-.object-search-inline-select:disabled {
+.object-search-num-results:disabled {
   background: #f5f7fa;
   cursor: not-allowed;
 }
@@ -473,23 +470,6 @@ body.prompt-box-dragging * {
   color: var(--c-text-muted);
   font-size: 11px;
   line-height: 1.35;
-}
-
-.object-search-inline-field {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--c-text-soft);
-  width: auto;
-}
-
-.object-search-inline-field .object-search-inline-select,
-.object-search-inline-field .object-search-num-results {
-  min-height: 36px;
-  padding: 6px 10px;
-  font-size: 13px;
 }
 
 .object-search-error-banner {
@@ -1169,11 +1149,6 @@ body.object-search-dock-resizing * {
   font-size: 11px;
 }
 
-.object-search-localize-mode-row {
-  gap: 8px;
-  align-items: center;
-}
-
 .object-search-localize-mode-toggle {
   display: inline-flex;
   gap: 4px;
@@ -1359,7 +1334,7 @@ body.object-search-dock-resizing * {
 }
 
 .os-panel {
-  --os-col-w: 55%;
+  --os-col-w: var(--os-user-col-w, 55%);
   --os-row-h: 45%;
   display: grid;
   grid-template-columns: var(--os-col-w) 8px 1fr;
@@ -1404,8 +1379,12 @@ body.object-search-dock-resizing * {
 
 /* Expanded panorama keeps the existing split state intact while presenting
    the map as an inset over the full workspace. */
+.os-panel--panorama-expanded {
+  --os-col-w: 85%;
+}
+
 .os-panel--panorama-expanded .os-cell-left {
-  grid-area: 1 / 1 / 2 / 4;
+  grid-area: 1 / 1;
   position: relative;
   display: block;
   z-index: 4;
@@ -1438,7 +1417,6 @@ body.object-search-dock-resizing * {
   display: none;
 }
 
-.os-panel--panorama-expanded .os-cell-results,
 .os-panel--panorama-expanded > .os-v-divider,
 .os-panel--panorama-expanded .os-h-divider {
   display: none;
@@ -1511,221 +1489,151 @@ body.os-resizing-v * {
   cursor: inherit !important;
 }
 
-body.os-dragging {
-  cursor: move !important;
-  user-select: none;
-}
+/* ── Search card ──────────────────────────────────────────── */
 
-body.os-dragging * {
-  cursor: inherit !important;
-}
-
-/* ── Floating search controls ─────────────────────────────── */
-
-.os-floating-controls {
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 6;
-  width: min(460px, calc(100% - 24px));
-  max-height: calc(100% - 24px);
-  display: flex;
-  flex-direction: column;
-  background: rgba(255, 255, 255, 0.97);
-  backdrop-filter: blur(4px);
-  border: 1px solid var(--c-border-strong);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.22);
-  overflow: hidden;
-}
-
-.os-floating-controls.is-dragged {
-  transform: none;
-}
-
-.os-floating-controls-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px 6px 12px;
-  background: #f1f5f9;
-  border-bottom: 1px solid var(--c-border-subtle);
-  cursor: move;
-  touch-action: none;
-  user-select: none;
-}
-
-.os-floating-controls-title {
-  font-weight: 600;
-  font-size: 12px;
-  flex: 1;
-}
-
-.os-floating-controls-collapse {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--c-border-strong);
+.os-search-card {
+  min-width: 0;
   background: var(--c-surface);
-  border-radius: 6px;
-  width: 22px;
-  height: 22px;
+  border-bottom: 1px solid var(--c-border-subtle);
+}
+
+.os-search-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 32px;
+  padding: var(--s-1) var(--s-2);
+  background: var(--c-surface-raised);
+}
+
+.os-search-card-title {
+  flex: 0 0 auto;
+  color: var(--c-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+}
+
+.os-search-card-summary {
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.os-search-card-collapse {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  place-items: center;
   padding: 0;
-  font-size: 12px;
-  line-height: 1;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-soft);
   cursor: pointer;
-  color: #334155;
 }
 
-.os-floating-controls-collapse:hover {
-  background: var(--c-border-subtle);
+.os-search-card-collapse:hover {
+  background: var(--c-surface-muted);
 }
 
-.os-floating-controls-body {
-  flex: 1 1 auto;
-  overflow: auto;
-  min-height: 0;
+.os-search-card-body {
+  min-width: 0;
 }
 
-/* Resize handles on the card edges/corners. */
-.os-rz {
-  position: absolute;
-  z-index: 4;
-  touch-action: none;
+.os-search-card .os-search-form {
+  gap: var(--s-2);
+  padding: var(--s-2);
+  overflow: visible;
 }
 
-.os-rz-e {
-  top: 8px;
-  bottom: 8px;
-  right: 0;
-  width: 6px;
-  cursor: ew-resize;
+.os-search-card .object-search-toolbar-row {
+  gap: var(--s-2);
 }
 
-.os-rz-w {
-  top: 8px;
-  bottom: 8px;
-  left: 0;
-  width: 6px;
-  cursor: ew-resize;
-}
-
-.os-rz-s {
-  left: 8px;
-  right: 8px;
-  bottom: 0;
-  height: 6px;
-  cursor: ns-resize;
-}
-
-.os-rz-n {
-  left: 8px;
-  right: 8px;
-  top: 0;
-  height: 6px;
-  cursor: ns-resize;
-}
-
-.os-rz-se {
-  right: 0;
-  bottom: 0;
-  width: 12px;
-  height: 12px;
-  cursor: nwse-resize;
-}
-
-.os-rz-sw {
-  left: 0;
-  bottom: 0;
-  width: 12px;
-  height: 12px;
-  cursor: nesw-resize;
-}
-
-.os-rz-ne {
-  right: 0;
-  top: 0;
-  width: 12px;
-  height: 12px;
-  cursor: nesw-resize;
-}
-
-.os-rz-nw {
-  left: 0;
-  top: 0;
-  width: 12px;
-  height: 12px;
-  cursor: nwse-resize;
-}
-
-.os-floating-controls.is-collapsed {
-  width: min(280px, calc(100% - 24px));
-}
-
-.os-floating-controls.is-collapsed .os-floating-controls-body {
-  display: none;
-}
-
-.os-floating-controls.is-collapsed .os-floating-controls-header {
-  border-bottom: none;
-}
-
-/* Compact fonts & spacing inside the floating controls to save space. */
-.os-floating-controls .os-search-form {
-  gap: 6px;
-  padding: 8px;
-}
-
-.os-floating-controls .object-search-toolbar-row {
-  gap: 6px;
-}
-
-.os-floating-controls .object-search-input,
-.os-floating-controls .object-search-num-results,
-.os-floating-controls .object-search-inline-select {
+.os-search-card .object-search-input,
+.os-search-card .object-search-num-results {
   min-height: 30px;
-  padding: 5px 8px;
-  border-radius: 7px;
-  font-size: 12px;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-xs);
 }
 
-.os-floating-controls .object-search-input {
+.os-search-card .object-search-input {
   min-width: 140px;
 }
 
-.os-floating-controls .object-search-button,
-.os-floating-controls .object-search-secondary-button {
+.os-search-card .object-search-button,
+.os-search-card .object-search-secondary-button {
   min-height: 30px;
-  padding: 5px 9px;
-  font-size: 12px;
-  border-radius: 7px;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-xs);
 }
 
-.os-floating-controls .object-search-num-results {
+.os-search-card .object-search-num-results {
   min-width: 56px;
 }
 
-.os-floating-controls .object-search-slider-header,
-.os-floating-controls .object-search-slider-help,
-.os-floating-controls .object-search-inline-field,
-.os-floating-controls .checkbox-row--compact,
-.os-floating-controls .object-search-online-checkbox,
-.os-floating-controls .object-search-online-input {
-  font-size: 11px;
+.os-search-card .object-search-slider-header,
+.os-search-card .object-search-slider-help,
+.os-search-card .checkbox-row--compact,
+.os-search-card .object-search-online-checkbox,
+.os-search-card .object-search-online-input {
+  font-size: var(--fs-xs);
 }
 
-.os-floating-controls .object-search-slider-control {
-  gap: 2px;
+.os-search-card .object-search-slider-control {
+  gap: var(--s-1);
 }
 
-.os-floating-controls .object-search-online-overrides {
-  gap: 4px;
+.os-search-card .object-search-error-banner {
+  margin: var(--s-2) var(--s-2) 0;
+  font-size: var(--fs-xs);
 }
 
-.os-floating-controls .object-search-error-banner {
-  font-size: 11px;
-  margin: 6px 8px 0 !important;
+.os-search-modes-row {
+  justify-content: space-between;
+}
+
+.os-advanced-toggle {
+  margin-left: auto;
+}
+
+.os-search-advanced {
+  display: grid;
+  gap: var(--s-2);
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--c-border-subtle);
+}
+
+.os-search-card .object-search-online-overrides {
+  gap: var(--s-2);
+  padding: var(--s-2);
+  border-radius: var(--r-sm);
+}
+
+.object-search-online-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  padding: var(--s-1) var(--s-2);
+  border-left: 2px solid var(--c-border-strong);
+}
+
+.object-search-online-group-title {
+  flex: 1 0 100%;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.object-search-online-normalization {
+  margin-left: var(--s-2);
 }
 
 /* ── Pane layout ──────────────────────────────────────────── */
@@ -1869,11 +1777,13 @@ body.os-dragging * {
 /* ── Results pane ──────────────────────────────────────────── */
 
 .os-results-pane {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
   background: var(--c-surface);
 }
 
 .os-results-scroll {
-  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -2058,4 +1968,46 @@ body.os-dragging * {
   flex: 1;
   min-width: 0;
   font-size: 11px !important;
+}
+
+@media (max-width: 1100px) {
+  .os-panel {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 55%) minmax(0, 45%);
+  }
+
+  .os-cell-left,
+  .os-panel--panorama-expanded .os-cell-left {
+    grid-area: 1 / 1;
+  }
+
+  .os-cell-results {
+    grid-area: 2 / 1;
+  }
+
+  .os-v-divider {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .os-panel {
+    grid-template-rows: minmax(0, 52%) minmax(0, 48%);
+  }
+
+  .os-search-card-header {
+    gap: var(--s-1);
+  }
+
+  .os-search-card-summary {
+    max-width: 42%;
+  }
+
+  .os-search-modes-row {
+    justify-content: flex-start;
+  }
+
+  .os-advanced-toggle {
+    margin-left: 0;
+  }
 }
