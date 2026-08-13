@@ -23,6 +23,7 @@ import {
 import type { ByPromptRow, PromptScore } from "../benchmark/types";
 import { DEFAULT_MATCH_ACCURACY_M, FEEDBACK_NORMALIZATIONS } from "../benchmark/types";
 import { configSummary as scoreConfigSummary } from "../benchmark/config-summary";
+import { projectKeyframeToLocalFloor } from "../geo";
 import {
   fetchKeyframeGraph,
   fetchMetadataMarkers,
@@ -32,6 +33,15 @@ import type {
   KeyframeGraphResponse,
   KeyframeMarker,
 } from "../index-explorer/types";
+import {
+  KEYFRAME_GRAPH_COLOR,
+  KEYFRAME_MARKER_COLOR,
+  KEYFRAME_MARKER_RADIUS,
+  KEYFRAME_MARKER_SELECTED_COLOR,
+  KEYFRAME_MARKER_SELECTED_RADIUS,
+  VIEW_CONE_COLOR,
+  VIEW_CONE_HALF_ANGLE_DEG,
+} from "../theme";
 import { runObjectSearch } from "./api";
 import type {
   EnrichedResult,
@@ -60,16 +70,10 @@ const EquirectPhotoSphereViewer = lazy(
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const KEYFRAME_MARKER_COLOR = "#9ca3af";
-const KEYFRAME_MARKER_SELECTED_COLOR = "#16a34a";
-const KEYFRAME_GRAPH_COLOR = "#64748b";
-const VIEW_CONE_HALF_ANGLE_DEG = 25;
-const VIEW_CONE_COLOR = KEYFRAME_MARKER_SELECTED_COLOR;
 const COL_MIN = 25;
 const COL_MAX = 75;
 const ROW_MIN = 20;
 const ROW_MAX = 80;
-const EARTH_RADIUS_M = 6378137;
 const EMPTY_LOCALIZATIONS: ObjectLocalization[] = [];
 
 function normalizeBenchmarkPrompt(prompt: string): string {
@@ -119,23 +123,6 @@ function promptCountsSummary(row: ByPromptRow): string {
     `${row.accepted_predictions} kept · ${row.rejected_predictions} rejected`
     + ` · ${row.ground_truth} ground truth`
   );
-}
-
-function projectKeyframeToLocalFloor(
-  source: { latitude: number; longitude: number; heading_deg: number },
-  destination: { latitude: number; longitude: number },
-): Pick<NavigationCandidate, "localX" | "localZ"> {
-  const latitudeRad = (source.latitude * Math.PI) / 180;
-  const east =
-    ((destination.longitude - source.longitude) * Math.PI) / 180 *
-    EARTH_RADIUS_M *
-    Math.cos(latitudeRad);
-  const north =
-    ((destination.latitude - source.latitude) * Math.PI) / 180 * EARTH_RADIUS_M;
-  const distance = Math.hypot(east, north);
-  const bearing = Math.atan2(east, north);
-  const localYaw = bearing - (source.heading_deg * Math.PI) / 180;
-  return { localX: distance * Math.sin(localYaw), localZ: -distance * Math.cos(localYaw) };
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -685,7 +672,7 @@ function ObjectSearchPanel(props: Props) {
           longitude: m.longitude,
           level: m.level,
           color: isActive ? KEYFRAME_MARKER_SELECTED_COLOR : KEYFRAME_MARKER_COLOR,
-          radius: isActive ? 8 : 6,
+          radius: isActive ? KEYFRAME_MARKER_SELECTED_RADIUS : KEYFRAME_MARKER_RADIUS,
           scaleWithZoom: true,
         });
       }

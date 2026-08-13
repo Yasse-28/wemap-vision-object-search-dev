@@ -22,6 +22,7 @@ import {
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
 import type { LivemapMarker, LivemapPolygon, LivemapSegment } from "../annotations/types";
 import DismissibleAlert from "../DismissibleAlert";
+import { bearingDegrees, projectKeyframeToLocalFloor } from "../geo";
 import {
   fetchKeyframeGraph,
   fetchMetadataKeyframes,
@@ -47,6 +48,18 @@ import type {
   MetadataStatusResponse,
   MetadataSummary,
 } from "../index-explorer/types";
+import {
+  KEYFRAME_GRAPH_COLOR,
+  KEYFRAME_LINK_COLOR,
+  KEYFRAME_MARKER_COLOR,
+  KEYFRAME_MARKER_PRUNED_COLOR,
+  KEYFRAME_MARKER_RADIUS,
+  KEYFRAME_MARKER_SELECTED_COLOR,
+  KEYFRAME_MARKER_SELECTED_RADIUS,
+  KEYFRAME_MARKER_UNKNOWN_COLOR,
+  VIEW_CONE_COLOR,
+  VIEW_CONE_HALF_ANGLE_DEG,
+} from "../theme";
 import BboxPostProcessControls from "./BboxPostProcessControls";
 import { bboxArea, postProcessDetections } from "./bboxPostProcess";
 import { useBboxPostProcessParams } from "./useBboxPostProcessParams";
@@ -93,41 +106,12 @@ type PhotosphereNavigationCandidate = {
 // [6, 12, 24, 48] would have put well over a thousand thumbnails in one grid.
 const PAGE_SIZE_OPTIONS = [1, 2, 4, 8];
 const COLUMN_OPTIONS = [1, 2, 3, 4, 5];
-const KEYFRAME_MARKER_COLOR = "#9ca3af";
-const KEYFRAME_MARKER_SELECTED_COLOR = "#16a34a";
-const KEYFRAME_MARKER_RADIUS = 6;
-const KEYFRAME_MARKER_SELECTED_RADIUS = 8;
-/** Keyframes with rows in the parquet but pruned from pgvector at ingest time. */
-const KEYFRAME_MARKER_PRUNED_COLOR = "#f97316";
-/** No summary is available for this marker on the server-paged current page. */
-const KEYFRAME_MARKER_UNKNOWN_COLOR = "#8b5cf6";
 const EquirectPhotoSphereViewer = lazy(() => import("./EquirectPhotoSphereViewer"));
 const DEPTH_PIN_MIN_DEPTH_M = 0.25;
-const VIEW_CONE_HALF_ANGLE_DEG = 25;
-const VIEW_CONE_COLOR = KEYFRAME_MARKER_SELECTED_COLOR;
 const VISUAL_SPLIT_MIN_PERCENT = 25;
 const VISUAL_SPLIT_MAX_PERCENT = 75;
 const KEYFRAME_GRAPH_STORAGE_KEY = "object-search-gui.showKeyframeGraph";
-const KEYFRAME_GRAPH_COLOR = "#64748b";
-const KEYFRAME_LINK_COLOR = "#9333ea";
 const PHOTOSPHERE_NAVIGATION_MAX_DISTANCE_M = 40;
-
-/** Initial compass bearing (degrees, 0 = north, clockwise) from one lng/lat to another. */
-function bearingDegrees(
-  from: { latitude: number; longitude: number },
-  to: { latitude: number; longitude: number },
-): number {
-  const toRad = Math.PI / 180;
-  const lat1 = from.latitude * toRad;
-  const lat2 = to.latitude * toRad;
-  const dLon = (to.longitude - from.longitude) * toRad;
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x =
-    Math.cos(lat1) * Math.sin(lat2) -
-    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
-}
-const EARTH_RADIUS_M = 6378137;
 
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   try {
@@ -136,39 +120,6 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
   } catch {
     return fallback;
   }
-}
-
-function projectKeyframeToLocalFloor(
-  source: {
-    latitude: number;
-    longitude: number;
-    heading_deg: number;
-  },
-  destination: {
-    latitude: number;
-    longitude: number;
-  },
-): Pick<PhotosphereNavigationCandidate, "localX" | "localZ"> & {
-  distanceM: number;
-} {
-  const latitudeRad = source.latitude * Math.PI / 180;
-  const east =
-    (destination.longitude - source.longitude) *
-    Math.PI / 180 *
-    EARTH_RADIUS_M *
-    Math.cos(latitudeRad);
-  const north =
-    (destination.latitude - source.latitude) *
-    Math.PI / 180 *
-    EARTH_RADIUS_M;
-  const distance = Math.hypot(east, north);
-  const bearing = Math.atan2(east, north);
-  const localYaw = bearing - source.heading_deg * Math.PI / 180;
-  return {
-    localX: distance * Math.sin(localYaw),
-    localZ: -distance * Math.cos(localYaw),
-    distanceM: distance,
-  };
 }
 
 /**
