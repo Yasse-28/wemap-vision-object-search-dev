@@ -1,0 +1,10 @@
+[
+  {"label": "1-baseline-eps3", "clustering_eps_m": 3.0},
+  {"label": "2-multicut", "association": "multicut", "multicut_geo_pivot": 2.5},
+  {"label": "3-multicut+cap20", "association": "multicut", "multicut_geo_pivot": 2.5, "max_depth_m": 20.0},
+  {"label": "4-multicut+cap20+knn", "association": "multicut", "multicut_geo_pivot": 2.5, "max_depth_m": 20.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}},
+  {"label": "5-full+gate-detection", "association": "multicut", "multicut_geo_pivot": 2.5, "max_depth_m": 20.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}, "vlm_gate": "detection", "vlm_alpha": 1.0},
+  {"label": "6-full+gate-cluster", "association": "multicut", "multicut_geo_pivot": 2.5, "max_depth_m": 20.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}, "vlm_gate": "cluster", "vlm_alpha": 0.5},
+  {"label": "7-knn-alone", "clustering_eps_m": 3.0, "rescorer": "knn_cache", "rescorer_params": {"k": 15, "gamma": 0.2}},
+  {"label": "8-gate-alone", "clustering_eps_m": 3.0, "vlm_gate": "detection", "vlm_alpha": 1.0}
+]

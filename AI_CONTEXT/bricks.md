@@ -620,6 +620,41 @@ Conclusion, and it is why no rescorer was built: negative prompts are a **target
 instrument for a named confusion**, best exposed as a per-query "exclude" field, not an
 automatic mechanism to switch on.
 
+### The composed stack, and where the gate flips sign
+
+The ablation ladder (`toolbox/benchmark/grids/stack-ablation-*.json`, artefacts in
+`{map}/benchmark/stack-2026-08-13/`), reading LOO macro F1 against each map's baseline:
+
+| step | vinci ΔLOO | bbhotel ΔLOO | pair F1 |
+|---|---|---|---|
+| multicut | **−0.042** | +0.001 | 0.820 → 0.856 / 0.508 → 0.521 |
+| + depth cap 20 m | −0.036 | +0.003 | 0.857 / 0.521 |
+| + `knn_cache` reviews | **+0.081** | **+0.069** | unchanged |
+| + VLM gate, detection | +0.086 | +0.030 | unchanged |
+| + VLM gate, **cluster** | **+0.132** | +0.030 | unchanged |
+| `knn_cache` alone | +0.097 | **+0.072** | unchanged |
+
+Three readings, and the first corrects an earlier one on this page.
+
+- **The cluster-level gate is not universally worse.** Applied alone on the baseline it
+  loses on both maps; applied *on top of* multicut + cap + reviews it is the best point
+  on vinci (LOO 0.445 against 0.400 for the detection level). It gets there while
+  *lowering* mAP (0.462 vs 0.500), i.e. it improves cross-prompt comparability rather
+  than within-prompt ranking — which is exactly the property a shared acceptance
+  threshold needs, and what aggregating several views of one cluster would be expected
+  to buy.
+- **Whether the gate belongs in the stack is a per-map decision**: +0.051 on vinci over
+  reviews alone, −0.038 on bbhotel. The apparent criterion is the VLM cue's strength
+  *relative to review coverage* — weak cue and thin reviews (vinci) leaves room, strong
+  cue and dense reviews (bbhotel) is redundant. Both are measurable in advance with
+  `vlm_cue_separability`.
+- **Multicut lowers LOO while improving the partition**, because it moves granularity
+  (median spread 0.518 → 0.441). Read the association step on pair F1 and the scoring
+  steps on LOO; mixing them is the confound this whole file warns about.
+
+Caveat on the headline: vinci's +0.132 rests on **6 prompts** in leave-one-out, so its
+variance is large. Confirm on a third map before treating it as an architecture decision.
+
 **Converted v1 indexes need their cutouts rendered first.** Their `thumbnail_key` is
 virtual (`{outputs}/rows/{row}.png`, re-rendered from the ERP by the toolbox on demand),
 so there is no file to show the model. `toolbox/bricks/render_cutouts.py` inverts the

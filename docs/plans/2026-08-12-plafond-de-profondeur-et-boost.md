@@ -228,6 +228,32 @@ Conforme au 12/08 : sur vinci multicut `pivot` 2,5 domine en pair F1 (0,856 cont
 pour le défaut), incremental somme 1,2 fait aussi bien à granularité plus fine, et les
 deux se composent avec le plafond sans interférence.
 
+## 5b. L'échelle d'ablation du stack complet (13/08)
+
+`toolbox/benchmark/grids/stack-ablation-*.json`, artefacts dans
+`{map}/benchmark/stack-2026-08-13/`. Écart de F1 macro LOO contre la ligne de base :
+
+| étape | vinci ΔLOO | bbhotel ΔLOO |
+|---|---|---|
+| multicut | **−0,042** | +0,001 |
+| + plafond 20 m | −0,036 | +0,003 |
+| + kNN des reviews | **+0,081** | **+0,069** |
+| + gate VLM, détection | +0,086 | +0,030 |
+| + gate VLM, **cluster** | **+0,132** | +0,030 |
+| kNN seul | +0,097 | **+0,072** |
+
+- **Correction d'un résultat antérieur** : la gate au niveau cluster perd appliquée seule,
+  mais devient le meilleur point de vinci empilée sur multicut + plafond + kNN (0,445 de
+  LOO contre 0,400 au niveau détection). Elle y arrive en *baissant* la mAP, donc elle
+  améliore la comparabilité entre prompts, pas le classement interne.
+- **La dernière brique est un choix par carte** : +0,051 sur vinci contre le kNN seul,
+  −0,038 sur bbhotel. Critère apparent : la force de l'indice VLM relative à la couverture
+  des reviews, mesurable à l'avance.
+- **Multicut baisse le LOO en améliorant la partition** (spread 0,518 → 0,441, pair F1
+  0,820 → 0,856) : l'étape d'association se lit sur le pair F1, pas sur le LOO.
+
+Réserve : +0,132 sur 6 prompts en LOO, variance élevée. À confirmer sur une 3ᵉ carte.
+
 ## 6. Ce qu'il reste à faire
 
 1. Corriger les défauts `feedback_alpha`/`feedback_beta` du toolbox (0,2 / 0,5) : ils
