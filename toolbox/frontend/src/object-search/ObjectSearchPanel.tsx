@@ -2,10 +2,8 @@ import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { NavigationCandidate } from "../object-search-explorer/EquirectPhotoSphereViewer";
-import {
-  ReviewAnnotationList,
-  ReviewButtons,
-} from "../object-search-review/ReviewControls";
+import { ReviewButtons } from "../object-search-review/ReviewControls";
+import { ReviewSummaryBar } from "../object-search-review/ReviewSummaryBar";
 import {
   type ObjectSearchReviews,
   useObjectSearchReviews,
@@ -22,7 +20,6 @@ import {
 } from "../benchmark/api";
 import type { ByPromptRow, PromptScore } from "../benchmark/types";
 import { DEFAULT_MATCH_ACCURACY_M, FEEDBACK_NORMALIZATIONS } from "../benchmark/types";
-import { configSummary as scoreConfigSummary } from "../benchmark/config-summary";
 import { projectKeyframeToLocalFloor } from "../geo";
 import {
   fetchKeyframeGraph,
@@ -80,58 +77,12 @@ function normalizeBenchmarkPrompt(prompt: string): string {
   return prompt.trim().toLocaleLowerCase();
 }
 
-function promptMetricSummary(row: ByPromptRow): string {
-  // A failed prompt still gets a row, with `error` set and every count at zero. Left
-  // formatted as metrics it reads as a legitimate "found nothing" — the one reading
-  // the exit-2 path exists to prevent. Same handling as BenchmarkPanel's tables.
-  if (row.error) {
-    return `not measured: ${row.error}`;
-  }
-  return (
-    `P ${row.precision.toFixed(2)} · R ${row.recall.toFixed(2)} · F1 ${row.f1.toFixed(2)}`
-    + ` · ${row.true_positives}/${row.false_positives}/${row.false_negatives} (TP/FP/FN)`
-  );
-}
-
-/** The populations behind TP/FP/FN, which the three numbers alone do not reveal.
- *
- * TP+FP counts *predictions* the benchmark kept, TP+FN counts *ground-truth
- * annotations*: adding all three together totals nothing, and `kept` is well below the
- * cluster count on screen because the benchmark accepts only `match_score >
- * acceptance_threshold` (0.9) while the list is filtered by the Sensitivity slider.
- * `kept + rejected` is the identity that does hold — it equals the clusters returned.
- */
-/** The threshold-free half: what to read when comparing two feedback settings.
- *
- * P/R/F1 above are one operating point, and the review-feedback gains *shift the score
- * distribution* — so a change there conflates "the ranking improved" with "the fixed
- * threshold now sits somewhere else on the same curve". AP does not move under a
- * monotone rescaling of the scores, so it isolates the ranking.
- */
-function promptCurveSummary(row: ByPromptRow): string | null {
-  if (row.average_precision == null) {
-    return null;
-  }
-  const best = row.best_f1 == null ? "" : ` · best F1 ${row.best_f1.toFixed(2)}`;
-  const at =
-    row.best_f1_threshold == null ? "" : ` @ ${row.best_f1_threshold.toFixed(3)}`;
-  return `AP ${row.average_precision.toFixed(3)}${best}${at}`;
-}
-
-function promptCountsSummary(row: ByPromptRow): string {
-  return (
-    `${row.accepted_predictions} kept · ${row.rejected_predictions} rejected`
-    + ` · ${row.ground_truth} ground truth`
-  );
-}
-
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type Props = {
   map: MapSummary | null;
   mapId: string;
   isMapKnown: boolean;
-  reviewMode?: boolean;
 };
 
 type BboxDraft = { left: number; top: number; width: number; height: number };
@@ -285,6 +236,7 @@ function ObjectSearchPanel(props: Props) {
   const [isPromptScoring, setIsPromptScoring] = useState(false);
   const [promptScoreMissing, setPromptScoreMissing] = useState(false);
   const [promptScoreError, setPromptScoreError] = useState<string | null>(null);
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
   const [promptBaseline, setPromptBaseline] = useState<{
     runId: string;
     row: ByPromptRow;
@@ -421,7 +373,7 @@ function ObjectSearchPanel(props: Props) {
   // `inResults` flag, whose whole job is to say whether an annotation is still
   // reachable on screen. A cluster the sensitivity slider filters out is not.
   const reviews = useObjectSearchReviews({
-    enabled: props.reviewMode === true,
+    enabled: true,
     mapId: props.mapId,
     query: result?.mode === "localize-online" ? resultQuery : "",
     localizations,
@@ -452,7 +404,7 @@ function ObjectSearchPanel(props: Props) {
   useEffect(() => {
     let cancelled = false;
     setPromptBaseline(null);
-    if (!props.reviewMode || result?.mode !== "localize-online" || !resultQuery) {
+    if (!isReviewOpen || result?.mode !== "localize-online" || !resultQuery) {
       return () => {
         cancelled = true;
       };
@@ -481,7 +433,7 @@ function ObjectSearchPanel(props: Props) {
     return () => {
       cancelled = true;
     };
-  }, [props.mapId, props.reviewMode, result?.mode, resultQuery]);
+  }, [isReviewOpen, props.mapId, result?.mode, resultQuery]);
 
   async function handleScorePrompt(): Promise<void> {
     if (!resultQuery || isPromptScoring) return;
@@ -1268,7 +1220,7 @@ function ObjectSearchPanel(props: Props) {
         >
           <div className="os-floating-controls-header" onPointerDown={startControlsDrag}>
             <span className="os-floating-controls-title">
-              {props.reviewMode ? "Annotation" : "Object Search"}
+              Object Search
             </span>
             {result ? (
               <span className="os-pane-subtitle">
@@ -1629,134 +1581,6 @@ function ObjectSearchPanel(props: Props) {
             <span className="os-pane-title">Results</span>
           </div>
           <div className="os-results-scroll">
-            {props.reviewMode &&
-            (result?.mode === "localize-online" || reviews.annotations.length > 0) ? (
-              <div className="object-search-review-toolbar">
-                <span>
-                  {reviews.isLoading
-                    ? "Loading reviews…"
-                    : `${reviews.reviewedCount} reviewed · ${reviews.truePositiveCount} correct · ${reviews.falsePositiveCount} incorrect`}
-                </span>
-                <span className="object-search-review-score">
-                  <button
-                    type="button"
-                    className="object-search-secondary-button"
-                    disabled={reviews.isLoading || isPromptScoring || !resultQuery}
-                    onClick={() => void handleScorePrompt()}
-                  >
-                    {isPromptScoring ? "Scoring…" : "Score this prompt"}
-                  </button>
-                  {promptScore ? (
-                    <span
-                      className={
-                        promptScore.row.error
-                          ? "object-search-review-score-error"
-                          : undefined
-                      }
-                      title={
-                        `Scored with ${scoreConfigSummary(promptScore.config)}. The `
-                        + "acceptance threshold follows the Sensitivity slider and "
-                        + "min_similarity is sent from these controls, so the scored "
-                        + "clusters are the ones listed."
-                      }
-                    >
-                      {promptMetricSummary(promptScore.row)}
-                    </span>
-                  ) : null}
-                  {promptScore && promptCurveSummary(promptScore.row) ? (
-                    <span
-                      className="object-search-review-score-curve"
-                      title={
-                        "Threshold-free. Compare two feedback settings on AP, not on "
-                        + "F1: the gains shift the score distribution, so the fixed "
-                        + "threshold lands elsewhere on the curve even when the "
-                        + "ranking is unchanged. The full sweep is in the run's "
-                        + "raw_results.json."
-                      }
-                    >
-                      {promptCurveSummary(promptScore.row)}
-                    </span>
-                  ) : null}
-                  {promptScore && !promptScore.row.error ? (
-                    <span
-                      className="object-search-review-score-muted"
-                      title={
-                        "TP+FP counts kept predictions, TP+FN counts ground-truth "
-                        + "annotations — the three do not sum to anything. "
-                        + "kept + rejected equals the clusters returned."
-                      }
-                    >
-                      {promptCountsSummary(promptScore.row)}
-                    </span>
-                  ) : null}
-                  {promptScoreMissing ? (
-                    <span className="object-search-review-score-muted">
-                      no benchmark ground truth for &quot;{resultQuery}&quot; — ✓/× reviews
-                      only tune feedback; they do not create benchmark ground truth
-                    </span>
-                  ) : null}
-                  {promptScoreError ? (
-                    <span className="object-search-review-score-error" role="alert">
-                      Score: {promptScoreError}
-                    </span>
-                  ) : null}
-                  {promptBaseline ? (
-                    <span
-                      className="object-search-review-score-muted"
-                      title={
-                        "The newest benchmark run that covers this prompt — not "
-                        + "necessarily an unboosted one, and not necessarily measured "
-                        + "at the current sensitivity. Compare F1 only against a run "
-                        + `whose parameters match. Run parameters: ${scoreConfigSummary(
-                          promptBaseline.config,
-                        )}.`
-                      }
-                    >
-                      last run {promptBaseline.runId}: F1{" "}
-                      {promptBaseline.row.f1.toFixed(2)} ({
-                        scoreConfigSummary(promptBaseline.config)
-                      })
-                    </span>
-                  ) : null}
-                </span>
-                <span className="object-search-review-history-actions">
-                  <button
-                    type="button"
-                    className="object-search-secondary-button"
-                    disabled={!reviews.canUndo}
-                    onClick={reviews.undo}
-                    title={
-                      reviews.annotations[0]
-                        ? `Undo review of #${reviews.annotations[0].targetId} (Ctrl/Cmd+Z)`
-                        : "Undo review (Ctrl/Cmd+Z)"
-                    }
-                  >
-                    Undo
-                  </button>
-                  <button
-                    type="button"
-                    className="object-search-secondary-button"
-                    disabled={!reviews.canRedo}
-                    onClick={reviews.redo}
-                    title="Redo review (Ctrl/Cmd+Shift+Z)"
-                  >
-                    Redo
-                  </button>
-                </span>
-              </div>
-            ) : null}
-            {props.reviewMode &&
-            (result?.mode === "localize-online" || reviews.annotations.length > 0) ? (
-              <ReviewAnnotationList
-                annotations={reviews.annotations}
-                onClear={reviews.clearAnnotation}
-              />
-            ) : null}
-            {props.reviewMode && reviews.error ? (
-              <div className="object-search-error-banner" role="alert">
-                <span>Annotations: {reviews.error}</span>
-              </div>
-            ) : null}
             {!result ? (
               <p className="os-results-empty">Run a search to see results here.</p>
             ) : result.mode === "text" ? (
@@ -1787,7 +1611,7 @@ function ObjectSearchPanel(props: Props) {
                     onSelectIdx={focusLocalization}
                     selectedObsIdx={selectedObsIdx}
                     onSelectObservation={selectLocalizationObservation}
-                    reviews={props.reviewMode ? reviews : null}
+                    reviews={reviews}
                   />
                 </section>
                 <section className="object-search-localize-detail">
@@ -1809,6 +1633,21 @@ function ObjectSearchPanel(props: Props) {
                 </section>
               </div>
             )}
+            {result?.mode === "localize-online"
+            || reviews.annotations.length > 0 ? (
+              <ReviewSummaryBar
+                reviews={reviews}
+                promptScore={promptScore}
+                promptBaseline={promptBaseline}
+                promptScoreError={promptScoreError}
+                promptScoreMissing={promptScoreMissing}
+                isPromptScoring={isPromptScoring}
+                resultQuery={resultQuery}
+                onScorePrompt={handleScorePrompt}
+                open={isReviewOpen}
+                onToggle={() => setIsReviewOpen((current) => !current)}
+              />
+            ) : null}
           </div>
         </div>
       </div>

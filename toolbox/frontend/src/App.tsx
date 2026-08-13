@@ -6,11 +6,7 @@ import FeaturePanel from "./FeaturePanel";
 import ObjectSearchExplorerPanel from "./object-search-explorer/ObjectSearchExplorerPanel";
 import ObjectSearchPanel from "./object-search/ObjectSearchPanel";
 
-type Feature =
-  | "object-search"
-  | "object-search-explorer"
-  | "annotation"
-  | "benchmark";
+type Feature = "object-search" | "object-search-explorer" | "benchmark";
 
 function getPathMapId(): string | null {
   return parseMapRoute().mapId;
@@ -31,7 +27,8 @@ function parseMapRoute(): { mapId: string | null; feature: Feature } {
   }
   let feature: Feature = "object-search";
   if (segments[1] === "annotation") {
-    feature = "annotation";
+    const base = `/ui/maps/${encodeURIComponent(mapId)}`;
+    window.history.replaceState(null, "", base);
   } else if (segments[1] === "object-search-explorer") {
     feature = "object-search-explorer";
   } else if (segments[1] === "benchmark") {
@@ -44,9 +41,6 @@ function mapExplorerPath(mapId: string, feature: Feature): string {
   const base = `/ui/maps/${encodeURIComponent(mapId)}`;
   if (feature === "object-search-explorer") {
     return `${base}/object-search-explorer`;
-  }
-  if (feature === "annotation") {
-    return `${base}/annotation`;
   }
   if (feature === "benchmark") {
     return `${base}/benchmark`;
@@ -239,16 +233,7 @@ function MapExplorer(props: {
             type="button"
             onClick={() => selectFeature("object-search-explorer")}
           >
-            Object Search Explorer
-          </button>
-          <button
-            className={`feature-button${
-              activeFeature === "annotation" ? " is-active" : ""
-            }`}
-            type="button"
-            onClick={() => selectFeature("annotation")}
-          >
-            Annotation
+            Explorer
           </button>
           <button
             className={`feature-button${
@@ -273,13 +258,6 @@ function MapExplorer(props: {
           map={props.map}
           mapId={props.mapId}
           isMapKnown={Boolean(props.map)}
-        />
-      ) : activeFeature === "annotation" ? (
-        <ObjectSearchPanel
-          map={props.map}
-          mapId={props.mapId}
-          isMapKnown={Boolean(props.map)}
-          reviewMode
         />
       ) : activeFeature === "benchmark" ? (
         <BenchmarkPanel
