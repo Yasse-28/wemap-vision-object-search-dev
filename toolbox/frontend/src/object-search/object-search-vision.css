@@ -1721,6 +1721,80 @@ body.os-resizing-v * {
   display: block;
 }
 
+/* Deliberately quiet until it carries an annotation: an empty picker on every
+   detection card would drown the list it sits in. */
+.partition-score {
+  margin-left: auto;
+  margin-right: 8px;
+  color: var(--c-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.group-picker {
+  max-width: 160px;
+  padding: 1px 4px;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  background: var(--c-surface);
+  color: var(--c-text-faint);
+  font-size: 11px;
+}
+
+.group-picker.is-annotated {
+  border-color: var(--c-accent, #11b5ae);
+  color: var(--c-text);
+}
+
+.group-picker--compact {
+  max-width: 118px;
+}
+
+.group-picker:disabled {
+  opacity: 0.5;
+}
+
+.os-basket-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding: 2px 6px;
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  color: var(--c-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.os-basket-chip button {
+  border: 0;
+  padding: 0 2px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1;
+}
+
+/* Follows the cursor, so it must never eat the pointer events the viewer needs. */
+.os-bbox-tooltip {
+  position: absolute;
+  z-index: 5;
+  display: grid;
+  gap: 2px;
+  max-width: 260px;
+  padding: 6px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-surface-raised);
+  box-shadow: 0 2px 8px rgb(15 23 42 / 18%);
+  color: var(--c-text);
+  font-size: 12px;
+  line-height: 1.35;
+  pointer-events: none;
+}
+
 .os-photosphere-loading {
   display: grid;
   place-items: center;

@@ -3,10 +3,11 @@ import { useEffect, useMemo, useState } from "react";
 import { fetchMaps, MapSummary } from "./api";
 import BenchmarkPanel from "./benchmark/BenchmarkPanel";
 import FeaturePanel from "./FeaturePanel";
+import MatchingPanel from "./matching/MatchingPanel";
 import ObjectSearchExplorerPanel from "./object-search-explorer/ObjectSearchExplorerPanel";
 import ObjectSearchPanel from "./object-search/ObjectSearchPanel";
 
-type Feature = "object-search" | "object-search-explorer" | "benchmark";
+type Feature = "object-search" | "object-search-explorer" | "matching" | "benchmark";
 
 function getPathMapId(): string | null {
   return parseMapRoute().mapId;
@@ -31,6 +32,8 @@ function parseMapRoute(): { mapId: string | null; feature: Feature } {
     window.history.replaceState(null, "", base);
   } else if (segments[1] === "object-search-explorer") {
     feature = "object-search-explorer";
+  } else if (segments[1] === "matching") {
+    feature = "matching";
   } else if (segments[1] === "benchmark") {
     feature = "benchmark";
   }
@@ -41,6 +44,9 @@ function mapExplorerPath(mapId: string, feature: Feature): string {
   const base = `/ui/maps/${encodeURIComponent(mapId)}`;
   if (feature === "object-search-explorer") {
     return `${base}/object-search-explorer`;
+  }
+  if (feature === "matching") {
+    return `${base}/matching`;
   }
   if (feature === "benchmark") {
     return `${base}/benchmark`;
@@ -237,6 +243,15 @@ function MapExplorer(props: {
           </button>
           <button
             className={`feature-button${
+              activeFeature === "matching" ? " is-active" : ""
+            }`}
+            type="button"
+            onClick={() => selectFeature("matching")}
+          >
+            Matching
+          </button>
+          <button
+            className={`feature-button${
               activeFeature === "benchmark" ? " is-active" : ""
             }`}
             type="button"
@@ -255,6 +270,12 @@ function MapExplorer(props: {
         />
       ) : activeFeature === "object-search-explorer" ? (
         <ObjectSearchExplorerPanel
+          map={props.map}
+          mapId={props.mapId}
+          isMapKnown={Boolean(props.map)}
+        />
+      ) : activeFeature === "matching" ? (
+        <MatchingPanel
           map={props.map}
           mapId={props.mapId}
           isMapKnown={Boolean(props.map)}

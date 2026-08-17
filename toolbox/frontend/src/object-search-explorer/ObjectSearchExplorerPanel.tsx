@@ -61,7 +61,7 @@ import {
   VIEW_CONE_HALF_ANGLE_DEG,
 } from "../theme";
 import BboxPostProcessControls from "./BboxPostProcessControls";
-import { bboxArea, postProcessDetections } from "./bboxPostProcess";
+import { bboxArea, bboxPolygonRatios, postProcessDetections } from "./bboxPostProcess";
 import { useBboxPostProcessParams } from "./useBboxPostProcessParams";
 import { useEquirectFrameHeight } from "./useEquirectFrameHeight";
 import { useLivemapFrameHeight } from "./useLivemapFrameHeight";
@@ -120,24 +120,6 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
   } catch {
     return fallback;
   }
-}
-
-/**
- * The four corners of a row's reconstructed ERP box, in texture ratios.
- *
- * The box arrives ready-made in `erp_bbox_ratios`, so there is no geometry here any
- * more — the 45 lines of cubemap algebra this replaces lived in two copies (here and
- * in the backend) and had to agree. `u` is intentionally left unwrapped: the viewer
- * reads it as a yaw, where 1.02 and 0.02 are the same direction.
- */
-function bboxPolygonRatios(row: MetadataRowRecord): Array<[number, number]> {
-  const [u0, v0, u1, v1] = row.erp_bbox_ratios;
-  return [
-    [u0, v0],
-    [u1, v0],
-    [u1, v1],
-    [u0, v1],
-  ];
 }
 
 /**

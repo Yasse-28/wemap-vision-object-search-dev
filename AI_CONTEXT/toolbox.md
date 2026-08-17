@@ -20,7 +20,7 @@ The annotation ownership boundary is recorded in
 | `main.ts` | Entry: HTTP server; routes `/ui/api/...`, serves UI, proxies `/{map_id}/object-search/…` to the bricks service | `server.listen(options.port…)`, `isObjectSearchRoute`, `mapSummaries`, `proxyRequest` |
 | `http-utils.ts` | Options/args, static serving, proxy | `parseArgs`, `WorkbenchOptions`; `pythonApiBaseUrl` = **bricks** service (`OBJECT_SEARCH_PYTHON_API`, :45678), `annApiBaseUrl` = **mirrored online** service (`OBJECT_SEARCH_ANN_URL`, :45677), `repoRoot`, `OBJECT_SEARCH_WORKBENCH_PORT=45700` |
 | `config.ts` | Load map config | `loadMapEntries`, `loadGlobalObjectSearch`, `MapEntry` (`id, path, emmid, geo_ref_id, object_search`) |
-| `annotation-store.ts` | Integrated per-map SQLite annotation CRUD, legacy migration, one-shot benchmark GeoJSON import, and ground-truth assembly | `annotationDatabasePath`, `listAnnotations`, `upsertDetectionReview`, `deleteDetectionReview`, `buildGroundTruth` |
+| `annotation-store.ts` | Integrated per-map SQLite annotation CRUD, legacy migration, one-shot benchmark GeoJSON import, ground-truth assembly, and the reference detection partition | `annotationDatabasePath`, `listAnnotations`, `upsertDetectionReview`, `deleteDetectionReview`, `buildGroundTruth`, `listDetectionGroups`, `upsertDetectionGroupLabel`, `deleteDetectionGroupLabel` |
 | `object-search-metadata.ts` | **Reads `{map}/object-search/metadata.parquet` natively** (`hyparquet`, pure JS) into typed numeric columns and dictionary-coded strings; rows are materialised only on demand. Replaces the retired `object-search.db` reader: no cutout→objects hierarchy, one row *is* one proposal and one detection. Caches two maps by mtime and **drops the entry when the read fails**. | `resolveMetadataPath`, `loadMetadata`, `requireMetadata`, `rowsForKeyframe`, `rowSlice`, `rowByIndex`, `MetadataRow`, `LoadedMetadata`, `MetadataError` |
 | `erp-geometry.ts` | The only place the four stored angle columns become something drawable. Replaces the cubemap algebra. | `erpBboxRatios`, `erpRectsWrapped`, `cutoutRatioToErpUv`, `assertEquirect2to1`, `gnomonicFfmpegFilter`, `paddingMask`, `isRenderableGnomonic`, `angularAreaDeg2` |
 | `workbench-index.ts` | Manifest-backed routes (keyframe markers, depth pin, view cone, world-point projection, ERP + depth previews, `previewFromPathPng`) **plus** the parquet-backed row routes. The manifest half needs no metadata and must never be gated on it. | `objectSearchMetadataStatusPayload`, `metadataRowsPayload`, `metadataRowPayload`, `metadataRowRenderPng`, `indexKeyframeEquirectPreviewPng`, `indexDepthPinPayload`, `indexViewConePayload`, `indexProjectWorldPointPayload`, `keyframeMetadataPayload`, `previewFromPathPng`, `rowFilterParamsFromQuery`, `keyframeHeadingDegreesFromPose`; shells to a Python interp for uint16-TIFF depth decode (`OBJECT_SEARCH_WORKBENCH_PYTHON`) and to `ffmpeg`/`convert` for renders |
@@ -46,6 +46,7 @@ The annotation ownership boundary is recorded in
 | `GET /object-search-metadata/keyframe-graph` | From `360-viewer/graph.geojson`. |
 | `GET /preview.png?preview_path=` | Serves a file from the map directory. **The default preview** for a proposal (`thumbnail_key`) and for a search result. `object-search/rows/{row_index}.png` is a **virtual** key with no file behind it: a v1-converted index has no crops, so the route re-renders that row from the ERP instead (`VIRTUAL_ROW_PREVIEW`). |
 | `GET /review-annotations`, `POST\|DELETE /review-annotations/detection-review` | Integrated review annotations in `{map}/object-search-annotations.db`; no external service. |
+| `GET /group-annotations`, `POST\|DELETE /group-annotations/label` | The **reference partition**: which detections are one physical object, in `detection_group_label` of the same DB. Query-independent (unlike a review), keyed by `(keyframe_id, theta_center, phi_center)` at 6 decimals, `group_name` NULL = "not an object". Exists to score an association algorithm's partition against a human's — pair F1, not mAP. Not part of the benchmark's ground truth. |
 | `POST /benchmark/score-prompt` | Runs the existing Python evaluator for one ground-truth prompt with the Annotation panel's current localization parameters; returns 404 when that prompt has no benchmark ground truth. |
 
 The prefix was `/object-search-index`, which promised a database that no longer
@@ -58,6 +59,15 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   (`enrichedFromCandidates`), so it no longer touches the retired SQLite index.
   `localize-offline` is gone: the mode toggle no longer offers it, and the bricks
   service answers 501 for anything still calling the path. `ObjectSearchPanel.tsx`.
+  Its panorama pane has a "Bounding boxes" checkbox that overlays the keyframe's
+  parquet detections (rows fetched only while it is on, raw — no post-process
+  controls here); the ERP corner helper `bboxPolygonRatios` lives in
+  `object-search-explorer/bboxPostProcess.ts` and is shared with the explorer.
+  Hovering a box names its cluster and its rank inside it. The join is angular —
+  `theta_center`/`phi_center` matched within 1e-3 rad against the observation, because
+  pgvector carries no `row_index` and the observation `bbox` is a placeholder. It
+  needs the two angles `toolbox/bricks/localize.py` adds to each observation, so it
+  stays empty against a remote production endpoint.
 - `object-search-explorer/` — proposals, keyframes, previews; livemap + photosphere
   side-by-side; bbox post-process controls; depth-based annotation. Reads the parquet
   rows through `/object-search-metadata/*`. Pagination is **keyframe-major** (one ERP
@@ -67,6 +77,37 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
 - `index-explorer/` — `api.ts` + `types.ts` only, shared by both panels. The
   directory name is a leftover of `IndexExplorerPanel.tsx`/`LatentScatter.tsx`, which
   were never mounted and were deleted with this migration.
+- `matching/` — the **Matching tab** (`MatchingPanel.tsx`, route `/ui/maps/:mapId/matching`),
+  the reference partition and the matching basket. The panel posts the basket to
+  `/{map_id}/object-search/matching` and shows the two readings side by side: the
+  cosine matrix and the triangulation's inlier/outlier split, with the parallax
+  flagged below 10°, plus a livemap of the keyframes, their rays (fixed 30 m
+  segments, coloured by inlier status), the depth-based positions and the
+  triangulated point — the rays are what makes a weak parallax visible rather than
+  merely reported. Its "Load group" picker pulls an annotated group's members into
+  the basket — annotating and filling the basket are otherwise two unrelated
+  gestures, and "does the group I just annotated hold up?" is the main question.
+  The basket lives in `localStorage` (per map): `sessionStorage` is per browser tab
+  and made it look empty on arrival. The panel scrolls as a whole — a fixed-height
+  layout with only the basket scrolling was tried and reverted. `pairScore.ts` scores a
+  partition against the annotated one (pair P/R/F1, over annotated detections only). It
+  backs the Object Search cluster sidebar (clusters vs annotations). The Matching tab
+  scores its partition with `partitionScore.ts` instead — **object level** (an object is
+  recovered when some hypothesis carries its majority-vote label; duplicates cost
+  precision) as the headline, **detection level** (majority-vote label per hypothesis)
+  beside it, and a per-object table (recovered / split / merged / lost).
+  Pair counting sits beside them again — not as a headline (it weights an error by the
+  square of the blocks it mixes) but for `falseMergePairs`, the count to minimise
+  first — together with VI split/merge in bits and the impure-cluster / split-object
+  counts. Each headline score hides one failure: the detection score barely charges
+  fragmentation, and a majority vote hides an impure cluster. The two metrics fail in
+  opposite directions on purpose — a split leaves the detection score perfect and
+  costs the object score. `groupAnnotations.ts`
+  (client + `useGroupAnnotations`, key = `keyframe:theta:phi` rounded to **6**
+  decimals, matching the backend) and `GroupPicker.tsx` drive `/group-annotations`;
+  `basket.ts` holds the session-scoped set of detections an inspection runs over
+  (item = a keyframe direction with a `rays` list, so a SAM2 mask fits later). Both
+  are filled from the Object Search cluster list, which is why they live outside it.
 - `annotations/` — point/polygon annotations → `annotations/annotations.geojson`
   (`ExplorerAnnotationWorkspace.tsx`, `geojson.ts`, `LivemapAnnotation.tsx`,
   `livemapHost.ts`).

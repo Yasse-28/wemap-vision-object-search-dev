@@ -193,6 +193,11 @@ export type LivemapAnnotationProps = {
   focusTarget: FocusTarget | null;
   onMapClick: (event: MapClickEvent) => void;
   onMarkerClick?: (markerId: string) => void;
+  /**
+   * Marker under the cursor, or null when it leaves. Hover rather than click because
+   * the information it carries is a read-out, not a selection.
+   */
+  onMarkerHover?: (markerId: string | null) => void;
   onMarkerContextMenu?: (
     markerId: string,
     position: { x: number; y: number },
@@ -246,6 +251,7 @@ function LivemapAnnotation(props: LivemapAnnotationProps) {
   useEffect(() => {
     callbacks.onMapClick = props.onMapClick;
     callbacks.onMarkerClick = props.onMarkerClick;
+    callbacks.onMarkerHover = props.onMarkerHover;
     callbacks.onMarkerContextMenu = props.onMarkerContextMenu;
     callbacks.onSegmentHover = props.onSegmentHover;
     callbacks.onSegmentClick = props.onSegmentClick;
@@ -696,18 +702,26 @@ function LivemapAnnotation(props: LivemapAnnotationProps) {
       };
       map.on("contextmenu", POINT_CIRCLE_LAYER_ID, emitFeatureContextMenu);
       map.on("contextmenu", POINT_LABEL_LAYER_ID, emitFeatureContextMenu);
+      // `mousemove` rather than `mouseenter`: markers overlap, and entering the
+      // layer once would pin the read-out to whichever one was hit first.
+      const emitFeatureHover = (event: MapboxPointerEvent) => {
+        const markerId = event?.features?.[0]?.properties?.id;
+        callbacksRef.current.onMarkerHover?.(markerId ? String(markerId) : null);
+      };
+      const clearFeatureHover = () => {
+        map.getCanvas().style.cursor = "";
+        callbacksRef.current.onMarkerHover?.(null);
+      };
       map.on("mouseenter", POINT_CIRCLE_LAYER_ID, () => {
         map.getCanvas().style.cursor = "pointer";
       });
-      map.on("mouseleave", POINT_CIRCLE_LAYER_ID, () => {
-        map.getCanvas().style.cursor = "";
-      });
+      map.on("mousemove", POINT_CIRCLE_LAYER_ID, emitFeatureHover);
+      map.on("mouseleave", POINT_CIRCLE_LAYER_ID, clearFeatureHover);
       map.on("mouseenter", POINT_LABEL_LAYER_ID, () => {
         map.getCanvas().style.cursor = "pointer";
       });
-      map.on("mouseleave", POINT_LABEL_LAYER_ID, () => {
-        map.getCanvas().style.cursor = "";
-      });
+      map.on("mousemove", POINT_LABEL_LAYER_ID, emitFeatureHover);
+      map.on("mouseleave", POINT_LABEL_LAYER_ID, clearFeatureHover);
       map.on("mousemove", SEGMENT_HIT_LAYER_ID, (event: MapboxPointerEvent) => {
         const properties = event?.features?.[0]?.properties ?? {};
         const position = {

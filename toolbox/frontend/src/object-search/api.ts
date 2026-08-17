@@ -79,6 +79,11 @@ function parseBbox(item: Record<string, unknown>): [number, number, number, numb
   return bbox.every(Number.isFinite) ? bbox : null;
 }
 
+function finiteOrNull(value: unknown): number | null {
+  const parsed = Number(value);
+  return value != null && Number.isFinite(parsed) ? parsed : null;
+}
+
 function parseObservation(item: Record<string, unknown>): ObjectObservation | null {
   const coordinates = Array.isArray(item.coordinates) ? item.coordinates : null;
   const bbox = parseBbox(item);
@@ -106,6 +111,8 @@ function parseObservation(item: Record<string, unknown>): ObjectObservation | nu
         ? [Number(coordinates[0]), Number(coordinates[1]), Number(coordinates[2])]
         : null,
     bbox,
+    thetaCenter: finiteOrNull(item.theta_center),
+    phiCenter: finiteOrNull(item.phi_center),
     similarityScore: Number(item.similarity_score ?? 0),
     quaternion,
     heading: heading == null || Number.isFinite(heading) ? heading : null,

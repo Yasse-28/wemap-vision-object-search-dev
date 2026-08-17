@@ -33,6 +33,13 @@ type CursorPoint = {
   y: number;
 };
 
+/** A hovered detection box, with the cursor position that hit it (container-relative). */
+export type HoveredDetection = {
+  rowIndex: number;
+  x: number;
+  y: number;
+};
+
 type Props = {
   keyframeId: string;
   imageSrc: string;
@@ -51,6 +58,12 @@ type Props = {
   allowDepthPinOnMarker?: boolean;
   navigationCandidates?: NavigationCandidate[];
   onNavigate?: (keyframeId: string) => void;
+  /**
+   * Fires as the cursor enters and leaves a detection box. Hit-testing happens in
+   * texture-ratio space rather than by raycasting the overlay: the boxes are line
+   * loops, so a raycast only ever hits their border.
+   */
+  onHoverDetection?: (hovered: HoveredDetection | null) => void;
   onViewChange?: (keyframeId: string, yawRad: number, textureYRatio: number) => void;
 };
 
@@ -162,6 +175,12 @@ export default function EquirectPhotoSphereViewer(props: Props) {
   const allowDepthPinOnMarkerRef = useRef(props.allowDepthPinOnMarker ?? false);
   const navigationCandidatesRef = useRef(props.navigationCandidates ?? []);
   const onNavigateRef = useRef(props.onNavigate);
+  const onHoverDetectionRef = useRef(props.onHoverDetection);
+  // Boxes in texture-ratio space, smallest first, so the innermost box wins a hit.
+  const hoverTargetsRef = useRef<
+    Array<{ rowIndex: number; u0: number; v0: number; u1: number; v1: number }>
+  >([]);
+  const hoveredRowIndexRef = useRef<number | null>(null);
   const initialYawRadRef = useRef(props.initialYawRad);
   const initialTextureYRatioRef = useRef(props.initialTextureYRatio);
   const textureKeyframeIdRef = useRef<string | null>(null);
@@ -178,6 +197,7 @@ export default function EquirectPhotoSphereViewer(props: Props) {
   allowDepthPinOnMarkerRef.current = props.allowDepthPinOnMarker ?? false;
   navigationCandidatesRef.current = props.navigationCandidates ?? [];
   onNavigateRef.current = props.onNavigate;
+  onHoverDetectionRef.current = props.onHoverDetection;
   initialYawRadRef.current = props.initialYawRad;
   initialTextureYRatioRef.current = props.initialTextureYRatio;
 
@@ -449,6 +469,55 @@ export default function EquirectPhotoSphereViewer(props: Props) {
       return directionToTextureRatio(runtime.raycaster.ray.direction);
     };
 
+    const reportHover = (hovered: HoveredDetection | null) => {
+      const nextRowIndex = hovered?.rowIndex ?? null;
+      if (nextRowIndex === null && hoveredRowIndexRef.current === null) {
+        return;
+      }
+      hoveredRowIndexRef.current = nextRowIndex;
+      onHoverDetectionRef.current?.(hovered);
+    };
+
+    const updateHoveredDetection = (clientX: number, clientY: number) => {
+      if (!onHoverDetectionRef.current || !hoverTargetsRef.current.length) {
+        reportHover(null);
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) {
+        reportHover(null);
+        return;
+      }
+      runtime.pointer.set(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      runtime.raycaster.setFromCamera(runtime.pointer, camera);
+      const { xRatio, yRatio } = directionToTextureRatio(
+        runtime.raycaster.ray.direction,
+      );
+      for (const target of hoverTargetsRef.current) {
+        if (yRatio < target.v0 || yRatio > target.v1) {
+          continue;
+        }
+        // The stored `u` is unwrapped, so a box near the seam has to be met halfway.
+        const inU = [xRatio - 1, xRatio, xRatio + 1].some(
+          (u) => u >= target.u0 && u <= target.u1,
+        );
+        if (inU) {
+          const container = containerRef.current;
+          const containerRect = container?.getBoundingClientRect() ?? rect;
+          reportHover({
+            rowIndex: target.rowIndex,
+            x: clientX - containerRect.left,
+            y: clientY - containerRect.top,
+          });
+          return;
+        }
+      }
+      reportHover(null);
+    };
+
     const onMouseDown = (event: MouseEvent) => {
       if (isTouchActive) {
         return;
@@ -460,8 +529,12 @@ export default function EquirectPhotoSphereViewer(props: Props) {
     const onMouseMove = (event: MouseEvent) => {
       updateDepthProjectionCursor(event);
       if (isDragging) {
+        reportHover(null);
         updateView(event.clientX, event.clientY);
-      } else if (event.ctrlKey) {
+        return;
+      }
+      updateHoveredDetection(event.clientX, event.clientY);
+      if (event.ctrlKey) {
         hideFloorNavigation();
       } else {
         updateFloorSnap(event.clientX, event.clientY);
@@ -494,6 +567,7 @@ export default function EquirectPhotoSphereViewer(props: Props) {
       if (!isDragging) {
         hideFloorNavigation();
       }
+      reportHover(null);
       setDepthProjectionCursor(null);
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -699,11 +773,26 @@ export default function EquirectPhotoSphereViewer(props: Props) {
       disposeObject(child);
     }
 
+    const hoverTargets: Array<{
+      rowIndex: number;
+      u0: number;
+      v0: number;
+      u1: number;
+      v1: number;
+    }> = [];
+
     for (const item of props.detections) {
       const ratios = props.polygonForDetection(item);
       if (ratios.length < 2) {
         continue;
       }
+      hoverTargets.push({
+        rowIndex: item.row_index,
+        u0: Math.min(...ratios.map(([u]) => u)),
+        u1: Math.max(...ratios.map(([u]) => u)),
+        v0: Math.min(...ratios.map(([, v]) => v)),
+        v1: Math.max(...ratios.map(([, v]) => v)),
+      });
       const points: THREE.Vector3[] = [];
       for (let index = 0; index < ratios.length; index += 1) {
         points.push(
@@ -727,6 +816,13 @@ export default function EquirectPhotoSphereViewer(props: Props) {
       line.renderOrder = selected ? 20 : 10;
       runtime.overlayGroup.add(line);
     }
+
+    // Smallest first: a box fully inside another must win the hit, or it could never
+    // be hovered at all.
+    hoverTargets.sort(
+      (a, b) => (a.u1 - a.u0) * (a.v1 - a.v0) - (b.u1 - b.u0) * (b.v1 - b.v0),
+    );
+    hoverTargetsRef.current = hoverTargets;
 
     if (props.depthPin) {
       const color =

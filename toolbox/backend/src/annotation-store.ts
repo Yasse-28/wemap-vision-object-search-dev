@@ -111,6 +111,37 @@ const SCHEMA = `
     created_at TEXT NOT NULL
   );
 
+  /**
+   * The *true* grouping of detections, as a human reads it — the reference partition
+   * that says which detections are one physical object.
+   *
+   * Deliberately query-independent, unlike 'detection_review': "these two detections
+   * are the same extinguisher" is a fact about the map, not about a prompt. The
+   * unique index over the detection key is the partition constraint itself — a
+   * detection belongs to exactly one group, and re-labelling moves it.
+   *
+   * 'group_name' NULL means "not an object" (a box on a wall, two objects at once):
+   * an explicit reject, so junk does not have to be filed into some group to be
+   * annotated. 'row_index' is resolved at write time when the parquet can answer,
+   * because offline scripts join on it; '(keyframe_id, theta, phi)' stays
+   * authoritative since pgvector cannot produce a row index.
+   *
+   * Not wired into the benchmark's ground truth — that stays 'ground_truth_point'.
+   */
+  CREATE TABLE IF NOT EXISTS detection_group_label (
+    detection_group_label_id INTEGER PRIMARY KEY,
+    keyframe_id TEXT NOT NULL,
+    theta_center REAL NOT NULL,
+    phi_center REAL NOT NULL,
+    row_index INTEGER,
+    group_name TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    created_by TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_detection_group_label_key
+    ON detection_group_label (keyframe_id, theta_center, phi_center);
+
   CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 `;
 
@@ -515,6 +546,150 @@ export function deleteDetectionReview(map: MapEntry, review: ReviewMutation): vo
         WHERE target_type = 'object' AND target_id = ? AND query = ?
       `)
       .run(review.targetId, review.query);
+  });
+}
+
+export type DetectionGroupLabel = {
+  keyframeId: string;
+  thetaCenter: number;
+  phiCenter: number;
+  rowIndex: number | null;
+  /** null = "not an object": an explicit reject, not an absence of annotation. */
+  groupName: string | null;
+  note: string | null;
+};
+
+/**
+ * Angles are the key, so they must be compared the way they are stored. 6 decimals is
+ * far below the float16 precision the angles carry, and matches what the frontend
+ * rounds to before sending — an exact SQL equality on a REAL is only safe because
+ * both sides round first.
+ */
+function roundAngle(value: number): number {
+  return Number(value.toFixed(6));
+}
+
+export function parseDetectionGroupLabel(
+  body: Record<string, unknown>,
+  requireGroup: boolean,
+): DetectionGroupLabel {
+  const keyframeId = typeof body.keyframe_id === "string" ? body.keyframe_id.trim() : "";
+  const thetaCenter = Number(body.theta_center);
+  const phiCenter = Number(body.phi_center);
+  if (!keyframeId || !Number.isFinite(thetaCenter) || !Number.isFinite(phiCenter)) {
+    throw new WorkbenchRouteError(422, "Invalid detection group label payload.");
+  }
+  // `Number(null)` is 0, and 0 is a perfectly valid row index — the coercion would
+  // file every angle-only annotation against the parquet's first row.
+  const rowIndex = body.row_index == null ? Number.NaN : Number(body.row_index);
+  const groupName =
+    typeof body.group_name === "string" && body.group_name.trim()
+      ? body.group_name.trim()
+      : null;
+  if (requireGroup && groupName === null && body.group_name !== null) {
+    throw new WorkbenchRouteError(
+      422,
+      "A group name is required; send null explicitly to mark a detection as 'not an object'.",
+    );
+  }
+  return {
+    keyframeId,
+    thetaCenter: roundAngle(thetaCenter),
+    phiCenter: roundAngle(phiCenter),
+    rowIndex: Number.isInteger(rowIndex) ? rowIndex : null,
+    groupName,
+    note: typeof body.note === "string" && body.note.trim() ? body.note.trim() : null,
+  };
+}
+
+export function upsertDetectionGroupLabel(
+  map: MapEntry,
+  label: DetectionGroupLabel,
+): number {
+  return withDatabase(map, (database) => {
+    const result = database
+      .prepare(`
+        INSERT INTO detection_group_label
+          (keyframe_id, theta_center, phi_center, row_index, group_name, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (keyframe_id, theta_center, phi_center) DO UPDATE SET
+          row_index = COALESCE(excluded.row_index, row_index),
+          group_name = excluded.group_name,
+          note = excluded.note,
+          created_at = excluded.created_at
+      `)
+      .run(
+        label.keyframeId,
+        label.thetaCenter,
+        label.phiCenter,
+        label.rowIndex,
+        label.groupName,
+        label.note,
+        nowIso(),
+      );
+    return Number(result.lastInsertRowid);
+  });
+}
+
+export function deleteDetectionGroupLabel(
+  map: MapEntry,
+  label: DetectionGroupLabel,
+): void {
+  withDatabase(map, (database) => {
+    database
+      .prepare(`
+        DELETE FROM detection_group_label
+        WHERE keyframe_id = ? AND theta_center = ? AND phi_center = ?
+      `)
+      .run(label.keyframeId, label.thetaCenter, label.phiCenter);
+  });
+}
+
+/**
+ * The reference partition, grouped and ready to be scored against an algorithm's.
+ *
+ * Rejected detections come back under `not_an_object` rather than being dropped:
+ * "annotated as junk" and "never looked at" are different states, and a scoring pass
+ * that confuses them will count its own blind spots as agreement.
+ */
+export function listDetectionGroups(map: MapEntry): Record<string, unknown> {
+  return withDatabase(map, (database) => {
+    const rows = database
+      .prepare(`
+        SELECT keyframe_id, theta_center, phi_center, row_index, group_name, note, created_at
+        FROM detection_group_label
+        ORDER BY group_name IS NULL, group_name, keyframe_id
+      `)
+      .all() as Array<{
+      keyframe_id: string;
+      theta_center: number;
+      phi_center: number;
+      row_index: number | null;
+      group_name: string | null;
+      note: string | null;
+      created_at: string;
+    }>;
+    const groups = new Map<string, typeof rows>();
+    const notAnObject: typeof rows = [];
+    for (const row of rows) {
+      if (row.group_name === null) {
+        notAnObject.push(row);
+        continue;
+      }
+      const members = groups.get(row.group_name) ?? [];
+      members.push(row);
+      groups.set(row.group_name, members);
+    }
+    return {
+      labelled_count: rows.length,
+      groups: [...groups].map(([name, members]) => ({
+        group_name: name,
+        member_count: members.length,
+        keyframe_count: new Set(members.map((member) => member.keyframe_id)).size,
+        members,
+      })),
+      not_an_object: notAnObject,
+    };
   });
 }
 

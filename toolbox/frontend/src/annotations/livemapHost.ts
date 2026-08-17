@@ -311,6 +311,8 @@ export type LivemapHostCallbacks = {
   // Props of the mounted component.
   onMapClick?: (event: MapClickEvent) => void;
   onMarkerClick?: (markerId: string) => void;
+  /** Marker under the cursor, or null when it leaves. */
+  onMarkerHover?: (markerId: string | null) => void;
   onMarkerContextMenu?: (
     markerId: string,
     position: { x: number; y: number },

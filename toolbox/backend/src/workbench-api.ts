@@ -3,9 +3,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 
 import {
+  deleteDetectionGroupLabel,
   deleteDetectionReview,
   listAnnotations,
+  listDetectionGroups,
+  parseDetectionGroupLabel,
   parseReviewMutation,
+  upsertDetectionGroupLabel,
   upsertDetectionReview,
 } from "./annotation-store.js";
 import {
@@ -217,6 +221,28 @@ export async function handleWorkbenchUiMapRoute(
       deleteDetectionReview(
         map,
         parseReviewMutation(await requestJson(request), false),
+      );
+      response.writeHead(204);
+      response.end();
+      return true;
+    }
+    if (method === "GET" && suffix === "/group-annotations") {
+      sendJson(response, 200, listDetectionGroups(map));
+      return true;
+    }
+    if (method === "POST" && suffix === "/group-annotations/label") {
+      sendJson(response, 201, {
+        detection_group_label_id: upsertDetectionGroupLabel(
+          map,
+          parseDetectionGroupLabel(await requestJson(request), true),
+        ),
+      });
+      return true;
+    }
+    if (method === "DELETE" && suffix === "/group-annotations/label") {
+      deleteDetectionGroupLabel(
+        map,
+        parseDetectionGroupLabel(await requestJson(request), false),
       );
       response.writeHead(204);
       response.end();

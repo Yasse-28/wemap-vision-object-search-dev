@@ -1,7 +1,10 @@
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from "react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { NavigationCandidate } from "../object-search-explorer/EquirectPhotoSphereViewer";
+import type {
+  HoveredDetection,
+  NavigationCandidate,
+} from "../object-search-explorer/EquirectPhotoSphereViewer";
 import { ReviewSummaryBar } from "../object-search-review/ReviewSummaryBar";
 import { useObjectSearchReviews } from "../object-search-review/useObjectSearchReviews";
 
@@ -20,12 +23,18 @@ import { projectKeyframeToLocalFloor } from "../geo";
 import {
   fetchKeyframeGraph,
   fetchMetadataMarkers,
+  fetchMetadataRows,
   indexKeyframeEquirectPreviewUrl,
 } from "../index-explorer/api";
 import type {
   KeyframeGraphResponse,
   KeyframeMarker,
+  MetadataRowRecord,
 } from "../index-explorer/types";
+import { bboxPolygonRatios } from "../object-search-explorer/bboxPostProcess";
+import { basketKey, useMatchingBasket } from "../matching/basket";
+import type { BasketItem } from "../matching/basket";
+import { useGroupAnnotations } from "../matching/groupAnnotations";
 import {
   KEYFRAME_GRAPH_COLOR,
   KEYFRAME_MARKER_COLOR,
@@ -46,6 +55,7 @@ import type {
   EnrichedResult,
   KeyframeGroup,
   ObjectLocalization,
+  ObjectObservation,
   ObjectSearchRunResult,
   OnlineLocalizeOverrides,
   QueryInputMode,
@@ -72,6 +82,12 @@ const COL_MAX = 75;
 const ROW_MIN = 20;
 const ROW_MAX = 80;
 const EMPTY_LOCALIZATIONS: ObjectLocalization[] = [];
+/**
+ * Both sides of the box ↔ observation join read the same float16 angles, so this is a
+ * rounding margin (~0.06°), not a search radius — two distinct detections that close
+ * together would be the same proposal twice.
+ */
+const ANGLE_MATCH_TOL_RAD = 1e-3;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -133,6 +149,9 @@ function ObjectSearchPanel(props: Props) {
   const [photosphereYawRad, setPhotosphereYawRad] = useState<number | null>(null);
   const [photosphereViewKeyframeId, setPhotosphereViewKeyframeId] = useState<string | null>(null);
   const [bboxMode, setBboxMode] = useState(false);
+  const [showPanoramaBoxes, setShowPanoramaBoxes] = useState(false);
+  const [panoramaDetections, setPanoramaDetections] = useState<MetadataRowRecord[]>([]);
+  const [hoveredDetection, setHoveredDetection] = useState<HoveredDetection | null>(null);
   const [panoramaExpanded, setPanoramaExpanded] = useState(false);
   const [panoramaViewRequestId, setPanoramaViewRequestId] = useState(0);
   const preservedCompassBearingDegRef = useRef<number | null>(null);
@@ -202,6 +221,27 @@ function ObjectSearchPanel(props: Props) {
     };
   }, [props.mapId, props.isMapKnown]);
 
+  // Detection boxes for the panorama overlay: fetched only while the checkbox is on,
+  // and only for the keyframe on screen — this panel shows one keyframe at a time.
+  useEffect(() => {
+    setHoveredDetection(null);
+    if (!props.isMapKnown || !showPanoramaBoxes || !activeKeyframeId) {
+      setPanoramaDetections([]);
+      return;
+    }
+    let cancelled = false;
+    fetchMetadataRows(props.mapId, { keyframeIds: [activeKeyframeId] })
+      .then((payload) => {
+        if (!cancelled) setPanoramaDetections(payload.rows);
+      })
+      .catch(() => {
+        if (!cancelled) setPanoramaDetections([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.mapId, props.isMapKnown, showPanoramaBoxes, activeKeyframeId]);
+
   // ── Existing: detections for selected cutout ───────────────────────────────
   const keyframeGroups = useMemo(() => {
     if (!result || result.mode !== "text") return {} as Record<string, KeyframeGroup>;
@@ -230,6 +270,138 @@ function ObjectSearchPanel(props: Props) {
       ),
     [allLocalizations, localizationDisplayThreshold],
   );
+  /**
+   * Which cluster each drawn box belongs to, and its rank inside that cluster.
+   *
+   * The join is angular, not by id: pgvector carries no `row_index`, so a cluster
+   * observation and its parquet row can only be recognized as the same detection by
+   * their `(theta, phi)` centre — the same float16 values on both sides, hence the
+   * very tight tolerance. Observations arrive sorted by similarity, so their position
+   * *is* their rank. Empty when the answer came from a remote endpoint that does not
+   * send the angles.
+   */
+  const clusterByRowIndex = useMemo(() => {
+    const byRow = new Map<
+      number,
+      { clusterRank: number; obsRank: number; obsCount: number; similarity: number }
+    >();
+    if (!activeKeyframeId || !panoramaDetections.length) {
+      return byRow;
+    }
+    localizations.forEach((loc, locIndex) => {
+      loc.observations.forEach((obs, obsIndex) => {
+        if (obs.keyframeId !== activeKeyframeId) return;
+        if (obs.thetaCenter === null || obs.phiCenter === null) return;
+        const row = panoramaDetections.find(
+          (candidate) =>
+            Math.abs(candidate.theta_center - obs.thetaCenter!) < ANGLE_MATCH_TOL_RAD &&
+            Math.abs(candidate.phi_center - obs.phiCenter!) < ANGLE_MATCH_TOL_RAD,
+        );
+        // First match wins: clusters are ranked, so the best one owns the box.
+        if (!row || byRow.has(row.row_index)) return;
+        byRow.set(row.row_index, {
+          clusterRank: locIndex + 1,
+          obsRank: obsIndex + 1,
+          obsCount: loc.observations.length,
+          similarity: obs.similarityScore,
+        });
+      });
+    });
+    return byRow;
+  }, [localizations, panoramaDetections, activeKeyframeId]);
+
+  const basket = useMatchingBasket(props.mapId);
+  const groupAnnotations = useGroupAnnotations(props.mapId);
+
+  /**
+   * Observations reach the basket as directions, and the ones without angles cannot:
+   * a remote endpoint does not send them, and there is no other key back to the
+   * detection. Silently dropping them would show a basket that lies about its size,
+   * so the caller reports what was skipped.
+   */
+  const addObservationsToBasket = useCallback(
+    (
+      observations: ObjectObservation[],
+      clusterRank: number,
+      cluster?: ObjectLocalization,
+    ) => {
+      const items: BasketItem[] = [];
+      let skipped = 0;
+      for (const obs of observations) {
+        if (obs.thetaCenter === null || obs.phiCenter === null) {
+          skipped += 1;
+          continue;
+        }
+        const ray = { thetaCenter: obs.thetaCenter, phiCenter: obs.phiCenter };
+        items.push({
+          key: basketKey(obs.keyframeId, ray),
+          keyframeId: obs.keyframeId,
+          rays: [ray],
+          source: "cluster",
+          clusterRank,
+          clusterPosition: cluster
+            ? {
+                lat: cluster.lat,
+                lng: cluster.lng,
+                alt: cluster.alt,
+                level: cluster.level,
+              }
+            : undefined,
+          label: null,
+          thumbnail: obs.thumbnail,
+          similarity: obs.similarityScore,
+        });
+      }
+      basket.add(items);
+      setError(
+        skipped
+          ? `${skipped} detection(s) skipped: the service did not send their angles.`
+          : null,
+      );
+    },
+    [basket],
+  );
+
+  const hoveredRow =
+    hoveredDetection === null
+      ? null
+      : (panoramaDetections.find(
+          (row) => row.row_index === hoveredDetection.rowIndex,
+        ) ?? null);
+  const hoveredCluster =
+    hoveredDetection === null ? null : clusterByRowIndex.get(hoveredDetection.rowIndex);
+
+  // "C1 6 · C2 13 · panorama 1" — the composition is the whole point of the basket:
+  // it says which clusters are being asked to merge, and how much each brought.
+  const basketSummary = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of basket.items) {
+      const bucket = item.clusterRank === null ? "panorama" : `C${item.clusterRank}`;
+      counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    }
+    return [...counts].map(([bucket, count]) => `${bucket} ${count}`).join(" · ");
+  }, [basket.items]);
+
+  const addHoveredRowToBasket = useCallback(() => {
+    if (!hoveredRow || !activeKeyframeId) return;
+    const ray = {
+      thetaCenter: hoveredRow.theta_center,
+      phiCenter: hoveredRow.phi_center,
+    };
+    basket.add([
+      {
+        key: basketKey(activeKeyframeId, ray),
+        keyframeId: activeKeyframeId,
+        rays: [ray],
+        source: "panorama",
+        clusterRank: hoveredCluster?.clusterRank ?? null,
+        label: hoveredRow.label,
+        thumbnail: hoveredRow.thumbnail_key,
+        similarity: null,
+      },
+    ]);
+  }, [activeKeyframeId, basket, hoveredCluster, hoveredRow]);
+
   // The *displayed* localizations, not `allLocalizations`: this feeds the hook's
   // `inResults` flag, whose whole job is to say whether an annotation is still
   // reachable on screen. A cluster the sensitivity slider filters out is not.
@@ -909,6 +1081,31 @@ function ObjectSearchPanel(props: Props) {
                   &gt;
                 </button>
               </div>
+              <div className="checkbox-row--compact" style={{ marginLeft: 8 }}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={showPanoramaBoxes}
+                    onChange={(e) => setShowPanoramaBoxes(e.target.checked)}
+                  />
+                  Bounding boxes
+                </label>
+              </div>
+              {basket.items.length ? (
+                <span
+                  className="os-basket-chip"
+                  title={`Matching basket: ${basketSummary}`}
+                >
+                  Basket {basket.items.length} · {basketSummary}
+                  <button
+                    type="button"
+                    aria-label="Empty the matching basket"
+                    onClick={basket.clear}
+                  >
+                    ×
+                  </button>
+                </span>
+              ) : null}
               <div className="os-pane-header-actions">
                 <button
                   type="button"
@@ -935,7 +1132,15 @@ function ObjectSearchPanel(props: Props) {
                 </button>
               </div>
             </div>
-            <div ref={photosphereWrapRef} className="os-photosphere-wrap">
+            <div
+              ref={photosphereWrapRef}
+              className="os-photosphere-wrap"
+              onContextMenu={(event) => {
+                if (!hoveredRow) return;
+                event.preventDefault();
+                addHoveredRowToBasket();
+              }}
+            >
               <Suspense
                 fallback={<div className="os-photosphere-loading">Loading viewer…</div>}
               >
@@ -946,16 +1151,40 @@ function ObjectSearchPanel(props: Props) {
                   height={1000}
                   initialYawRad={initialPhotosphereView.yawRad}
                   initialTextureYRatio={initialPhotosphereView.textureYRatio}
-                  detections={[]}
+                  detections={showPanoramaBoxes ? panoramaDetections : []}
                   selectedRowIndex={null}
                   depthPin={null}
-                  polygonForDetection={() => []}
+                  polygonForDetection={bboxPolygonRatios}
                   onDepthPin={() => {}}
                   onViewChange={handleViewChange}
                   navigationCandidates={photosphereNavigationCandidates}
                   onNavigate={navigateToKeyframe}
+                  onHoverDetection={showPanoramaBoxes ? setHoveredDetection : undefined}
                 />
               </Suspense>
+              {hoveredDetection && hoveredRow ? (
+                <div
+                  className="os-bbox-tooltip"
+                  style={{ left: hoveredDetection.x + 14, top: hoveredDetection.y + 14 }}
+                >
+                  <strong>{hoveredRow.label ?? "unlabelled"}</strong>
+                  <span>
+                    {hoveredRow.detector_source}
+                    {hoveredRow.detection_score === null
+                      ? ""
+                      : ` · ${hoveredRow.detection_score.toFixed(2)}`}
+                  </span>
+                  {hoveredCluster ? (
+                    <span>
+                      Cluster #{hoveredCluster.clusterRank} · rank{" "}
+                      {hoveredCluster.obsRank}/{hoveredCluster.obsCount} · sim{" "}
+                      {hoveredCluster.similarity.toFixed(3)}
+                    </span>
+                  ) : (
+                    <span className="muted">No cluster</span>
+                  )}
+                </div>
+              ) : null}
               {bboxMode ? (
                 <BboxDrawOverlay
                   photosphereWrapRef={photosphereWrapRef}
@@ -1056,7 +1285,7 @@ function ObjectSearchPanel(props: Props) {
           <SearchControlsCard
             isMapKnown={props.isMapKnown}
             isLoading={isLoading}
-            error={error}
+            error={error ?? groupAnnotations.error}
             resultSummary={
               result
                 ? result.mode === "text"
@@ -1124,6 +1353,8 @@ function ObjectSearchPanel(props: Props) {
                     selectedObsIdx={selectedObsIdx}
                     onSelectObservation={selectLocalizationObservation}
                     reviews={reviews}
+                    onAddToBasket={addObservationsToBasket}
+                    groups={groupAnnotations}
                   />
                 </section>
                 <section className="object-search-localize-detail">

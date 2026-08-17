@@ -1,13 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 
+import { GroupPicker } from "../matching/GroupPicker";
+import type { GroupAnnotations, GroupName } from "../matching/groupAnnotations";
+import { scoreLocalizations } from "../matching/pairScore";
 import { ReviewButtons } from "../object-search-review/ReviewControls";
 import type { ObjectSearchReviews } from "../object-search-review/useObjectSearchReviews";
-import type { ObjectLocalization } from "./types";
+import type { ObjectLocalization, ObjectObservation } from "./types";
 import {
   cutoutPreviewUrl,
   formatNumber,
   localizationScoreSymbol,
 } from "./utils";
+
+/** Sentinel for a cluster whose detections do not all sit in the same group. */
+const MIXED = Symbol("mixed");
 
 function LocalizeInspector(props: {
   mapId: string;
@@ -18,7 +24,41 @@ function LocalizeInspector(props: {
   selectedObsIdx: number;
   onSelectObservation: (locIdx: number, obsIdx: number) => void;
   reviews: ObjectSearchReviews | null;
+  /**
+   * Right-click adds to the matching basket — a whole cluster from its header, one
+   * detection from its card. Asking "are these two clusters one object?" starts by
+   * putting both clusters in, so the header is the primary gesture, not the card.
+   */
+  onAddToBasket: (
+    observations: ObjectObservation[],
+    clusterRank: number,
+    cluster: ObjectLocalization,
+  ) => void;
+  /**
+   * The reference partition. Null while the map has none loaded; observations with no
+   * angles cannot be annotated at all, and their picker is disabled rather than
+   * hidden — an annotation you cannot make is worth saying out loud.
+   */
+  groups: GroupAnnotations | null;
 }) {
+  // Recomputed on every annotation, which is the point: the score is meant to move
+  // as you label, so you can see a re-grouping land.
+  const partitionScore = props.groups
+    ? scoreLocalizations(props.localizations, props.groups)
+    : null;
+
+  const annotationTargets = (observations: ObjectObservation[]) =>
+    observations.flatMap((obs) =>
+      obs.thetaCenter === null || obs.phiCenter === null
+        ? []
+        : [
+            {
+              keyframeId: obs.keyframeId,
+              thetaCenter: obs.thetaCenter,
+              phiCenter: obs.phiCenter,
+            },
+          ],
+    );
   const [collapsedClusters, setCollapsedClusters] = useState<Set<number>>(() => new Set());
   const selectedClusterRef = useRef<HTMLElement | null>(null);
 
@@ -70,6 +110,23 @@ function LocalizeInspector(props: {
     <>
       <div className="object-search-cluster-sidebar-header">
         <h3>Clusters</h3>
+        {partitionScore && partitionScore.annotatedCount > 1 ? (
+          <span
+            className="partition-score"
+            title={
+              `Pair score over the ${partitionScore.annotatedCount} annotated detections: ` +
+              `${partitionScore.agreedPairs} agreed of ${partitionScore.predictedPairs} clustered ` +
+              `and ${partitionScore.truthPairs} true pairs. Low precision = over-merging, ` +
+              "low recall = fragmentation."
+            }
+          >
+            pair F1 {partitionScore.f1 === null ? "—" : partitionScore.f1.toFixed(2)}
+            {" · P "}
+            {partitionScore.precision === null ? "—" : partitionScore.precision.toFixed(2)}
+            {" · R "}
+            {partitionScore.recall === null ? "—" : partitionScore.recall.toFixed(2)}
+          </span>
+        ) : null}
         <button
           type="button"
           className="object-search-secondary-button object-search-collapse-all-button"
@@ -83,11 +140,30 @@ function LocalizeInspector(props: {
           Collapse all
         </button>
       </div>
+      {props.groups?.error ? (
+        // Loud on purpose: a failed write leaves the picker showing "unannotated"
+        // again, which reads as "it did not save" only if you are told why.
+        <p className="error-box">Annotation not saved — {props.groups.error}</p>
+      ) : null}
       <div className="object-search-cluster-list">
         {props.localizations.map((loc, locIndex) => {
           const isSelectedCluster = locIndex === props.selectedIdx;
           const isCollapsed = collapsedClusters.has(locIndex);
           const clusterReviewStatus = props.reviews?.clusterStatus(loc) ?? null;
+          const clusterTargets = annotationTargets(loc.observations);
+          // A cluster shows one group only when its members agree. Disagreement is
+          // the interesting state — it *is* the fragmentation being recorded — so it
+          // must not be hidden behind whichever member happens to come first.
+          const clusterGroup = props.groups
+            ? clusterTargets.reduce<GroupName | undefined | typeof MIXED>(
+                (accumulator, target, index) => {
+                  const label = props.groups?.labelFor(target);
+                  if (accumulator === MIXED) return MIXED;
+                  return index === 0 || accumulator === label ? label : MIXED;
+                },
+                undefined,
+              )
+            : undefined;
           return (
             <article
               className={`object-search-cluster-group${
@@ -96,7 +172,14 @@ function LocalizeInspector(props: {
               key={`cluster-${locIndex}`}
               ref={isSelectedCluster ? selectedClusterRef : null}
             >
-              <div className="object-search-cluster-header">
+              <div
+                className="object-search-cluster-header"
+                title="Right-click: add this cluster to the matching basket"
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  props.onAddToBasket(loc.observations, locIndex + 1, loc);
+                }}
+              >
                 <button
                   type="button"
                   className="object-search-cluster-collapse-button"
@@ -140,6 +223,22 @@ function LocalizeInspector(props: {
                     onChange={(status) => props.reviews?.setClusterStatus(loc, status)}
                   />
                 ) : null}
+                {props.groups ? (
+                  <GroupPicker
+                    ariaLabel={
+                      clusterGroup === MIXED
+                        ? `Cluster ${locIndex + 1}: members are in different groups`
+                        : `Group of every detection in cluster ${locIndex + 1}`
+                    }
+                    value={clusterGroup === MIXED ? undefined : clusterGroup}
+                    names={props.groups.names}
+                    disabled={!clusterTargets.length}
+                    onAssign={(groupName) =>
+                      void props.groups?.setLabel(clusterTargets, groupName)
+                    }
+                    onClear={() => void props.groups?.clearLabel(clusterTargets)}
+                  />
+                ) : null}
               </div>
               <div className="object-search-cluster-meta">
                 <span>sim {formatNumber(loc.similarityScore)}</span>
@@ -155,12 +254,18 @@ function LocalizeInspector(props: {
                     const isSelectedDetection =
                       isSelectedCluster && obsIndex === props.selectedObsIdx;
                     const reviewStatus = props.reviews?.observationStatus(obs) ?? null;
+                    const detectionTargets = annotationTargets([obs]);
                     return (
                       <div
                         key={`${locIndex}-${obs.objectIdx}-${obsIndex}`}
                         className={`object-search-detection-card${
                           isSelectedDetection ? " is-selected" : ""
                         }${reviewStatus ? ` is-review-${reviewStatus}` : ""}`}
+                        title="Right-click: add this detection to the matching basket"
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          props.onAddToBasket([obs], locIndex + 1, loc);
+                        }}
                       >
                         <button
                           type="button"
@@ -192,6 +297,27 @@ function LocalizeInspector(props: {
                             onChange={(status) =>
                               props.reviews?.setObservationStatus(obs, status)
                             }
+                          />
+                        ) : null}
+                        {props.groups ? (
+                          <GroupPicker
+                            compact
+                            ariaLabel={
+                              detectionTargets.length
+                                ? `Group of detection ${obsIndex + 1} in cluster ${locIndex + 1}`
+                                : "This detection has no angles, so it cannot be annotated"
+                            }
+                            value={
+                              detectionTargets.length
+                                ? props.groups.labelFor(detectionTargets[0])
+                                : undefined
+                            }
+                            names={props.groups.names}
+                            disabled={!detectionTargets.length}
+                            onAssign={(groupName) =>
+                              void props.groups?.setLabel(detectionTargets, groupName)
+                            }
+                            onClear={() => void props.groups?.clearLabel(detectionTargets)}
                           />
                         ) : null}
                       </div>

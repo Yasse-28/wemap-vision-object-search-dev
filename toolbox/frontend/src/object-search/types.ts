@@ -43,6 +43,13 @@ export type ObjectObservation = {
   thumbnail: string | null;
   coordinates: [number, number, number] | null;
   bbox: [number, number, number, number];
+  /**
+   * Angular centre of the detection, in radians — the only way back to the parquet
+   * row it came from, since pgvector does not carry `row_index`. Null when the
+   * service does not send it (a remote production endpoint).
+   */
+  thetaCenter: number | null;
+  phiCenter: number | null;
   similarityScore: number;
   quaternion: [number, number, number, number] | null;
   heading: number | null;
