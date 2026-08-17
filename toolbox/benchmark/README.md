@@ -118,3 +118,59 @@ grouped, each with its own fitted shared threshold and leave-one-prompt-out esti
 plus granularity controls — cluster counts, median observation count, median spread.
 Those controls are not decoration: the bench cannot rank two granularities, so a change
 in split/merge behaviour has to be read off them rather than off the metric.
+
+Every row also carries `mean_clusters_per_annotation`: over the annotations with at
+least two labelled detections, how many distinct clusters hold them. 1.0 means every
+well-covered object came out whole. The JSON adds `fragmentation_by_class`, and with
+it `mean_detections_per_annotation` — **the number is not readable without that
+control**, since an annotation seen forty times has more chances of being cut than one
+seen twice. Like `pair_precision` it only sees well-covered objects; it ranks
+associations, it does not measure recall of the map.
+
+## Two diagnostics that run before an association is written
+
+`pair_cue_separability.py` reports rank AUC for every pairwise cue (depth-point
+distance, ray distance, cutout cosine, `|Δ video_keyframe_id|`, same-keyframe angular
+gap) both raw and **conditionally on the geometry** — restricted to pairs already
+within `--conditional-m` of each other. The conditional column is the one that
+decides: any cue correlated with spatial proximity scores well raw while adding
+nothing to an association that starts from depth distance. It also reports median
+metric distance by `|Δ id|` band, which is how you check a map was captured in one
+pass before reading anything temporal.
+
+`extent_baskets.py` is the gate for changing the merge criterion itself. It builds
+*solo* baskets (one annotation's detections; right answer: one cluster) and *pair*
+baskets (two annotations within 4 m; right answer: two clusters) from the benchmark
+annotations, then partitions them with `gasp1v2`. Two families, because one number
+cannot tell a fix from a coarser granularity.
+
+Both read the same candidate cache as the sweep (`--cache-dir`), so a session that has
+run one sweep can run every diagnostic offline — no postgres, no ANN service.
+
+Results of the 2026-08-15 fragmentation study, including why the "estimate the object
+extent" diagnosis was refuted, are in
+`docs/plans/2026-08-15-fragmentation-resultats-E0-a-E4.md`.
+
+## The hand-labelled baskets, and the depth-point refinements
+
+`extent_baskets.py` attaches detections to the nearest annotation, which conditions on
+the result: the detections that fail to reach their annotation are exactly the ones a
+fragmentation study is about. The five modules below take their ground truth from
+`detection_group_label` instead — a human grouping boxes in the panorama — and share
+one harness. All of them take the same `--map-path` / `--cache-dir` pair and run
+offline.
+
+| module | what it answers |
+|---|---|
+| `matching_baskets.py` | T0/T1. Resolves the hand labels against the cache, builds solo/pair/mixed baskets, replays the matching tab's seven methods, and splits each group's spread into **radial** (wrong depth), **tangential** (box centre sliding) and per-keyframe **bias** — the last one against a shuffled null, since a keyframe holding `n` residuals scores about `1/sqrt(n)` on pure noise. Also emits the co-visibility matrix (`--covisibility-out`). |
+| `covisibility_cue.py` | T1b. AUC of "no view saw both fragments although the views of one covered the other", with the depth maps used as visibility oracles rather than as position estimates. Reports a bootstrap interval next to the point estimate. |
+| `depth_policies.py` | T2. Re-reads each box's depth as `center` / `median` / `nearest_mode` / `trimmed` and re-scores. |
+| `ray_refinement.py` | T4. Associates, triangulates each cluster from its members' rays, slides every member to the foot of that point, re-associates. One pass. |
+| `pose_offsets.py` | T8. One translation per keyframe, ridge-regularised, **cross-validated by group** — the training-set number is meaningless here and is printed only to show the gap. |
+| `sigma_calibration.py` | T3. Fits `merge_score._sigmas` on the measured radial residuals, one point per detection. `--refine` fits on the positions T4 leaves. |
+
+A basket set must be **fixed before a comparison**: every module that moves the
+detections passes the baseline's `confusable_pairs`, so two policies are not scored on
+two different populations.
+
+Results, gates and verdicts: `docs/plans/2026-08-17-resultats-T0-a-T8.md`.
