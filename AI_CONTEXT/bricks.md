@@ -26,7 +26,7 @@ diverge, production wins. A "small improvement" here is a bug.
 | `ingest_cli.py` | `object_search_ingest.py` | `run_ingest`, `_compute_object_positions`, `_ingest_capture`, `_upsert_geokeyframes`, `discover_capture_dirs`, `EMBEDDING_DIM=1024`, `DEFAULT_MIN_DISTANCE=1.5` |
 | `candidates.py` | `candidates.py` | `EnrichedCandidate`, `load_enriched_candidates`, `_prefilter_hnsw_results`, `apply_feedback_boost`, `normalize_prototype_similarities`, `_parse_embedding`, `FEEDBACK_NORMALIZATIONS`, `K_INTERNAL=1000`, `LOOSE_ALPHA=0.3` |
 | `feedback.py` | *(dev-only — no production counterpart)* | `ReviewFeedback`, `load_review_feedback`, `normalize_query`, `DB_FILENAME` — reads the toolbox's `object-search-annotations.db` |
-| `localize.py` | `v1_5_logic.py` | `cluster_detections_leader_canopy`, `compute_cluster_statistics`, `rank_localization_clusters`, `_similarity_ratio_scores`, `filter_clusters_by_geometry`, `localize_from_enriched_candidates`, `build_localize_response`, `LocalizationParams`, `UNRESOLVED_LEVEL=-9999`, `PLACEHOLDER_BBOX` |
+| `localize.py` | `v1_5_logic.py` | `cluster_detections_leader_canopy`, `compute_cluster_statistics`, `rank_localization_clusters`, `_similarity_ratio_scores`, `filter_clusters_by_geometry`, `localize_from_enriched_candidates`, `build_localize_response`, `LocalizationParams`, `angular_gap_ratio` (dev-only, shared with `matching.py`), `UNRESOLVED_LEVEL=-9999`, `PLACEHOLDER_BBOX` |
 | `prepare_runner.py` | `object_search_prepare.py` (its `image_entries` construction) | `collect_image_entries`, `run` |
 | `prepare_postprocess.py` | `object_search_prepare.py::_sample_depths` | `postprocess_metadata`, `sample_depths` |
 | `map_manifest.py` | *(no counterpart — replaces the ORM)* | `load_map_manifest`, `find_manifest`, `MapManifest`, `ManifestKeyframe` |
@@ -35,6 +35,10 @@ diverge, production wins. A "small improvement" here is a bug.
 | `georef_source.py` | *(no counterpart — replaces the ORM)* | `load_pose_source`, `PoseSource`, `KeyframePose` — a thin façade over `map_manifest` |
 | `db_schema.py` | `api/models.py` + migrations | `ensure_schema`, `CREATE_CANDIDATE`, `CREATE_GEOKEYFRAME` |
 | `db.py` | — | `build_dsn`, `connect` (reads the mirror's `DATABASE_*`) |
+| `matching.py` | *(none — dev-only)* | `build_matching_response`, `resolve_items`, `similarity_matrix`, `triangulate_items`. Serves `POST /{map_id}/object-search/matching`: a hand-picked set of detections `(keyframe_id, theta_center, phi_center)` in, MetaCLIP cosine matrix + robust triangulation out. Resolves each item against pgvector by angle (1e-3 rad) since there is no `row_index` there, and keeps unresolved items in the response rather than dropping them. Ranks nothing. `partition_method` also accepts `"gasp"` (signed-graph average linkage on depth-point log-odds, the AUC-0.879 cue), and `"gasp1v2"` swaps average linkage for the `merge_score` criterion evaluated on the whole cluster pair, `covisibility_weight` adds the conflict cost, and `cannot_link_same_keyframe` turns two angularly disjoint boxes of one panorama into a hard cannot-link (its `g_ij` now comes from the shared `localize.angular_gap_ratio`; `observed_extent` swaps `gasp1v2`'s constant extent for the measured one, default off and measured negative) — overlapping boxes are exempt, those being the duplicate proposals the association exists to merge. The blocked pairs come back in `cannot_link_pairs` so the cue's precision can be measured against annotations before it is trusted. |
+| `triangulate.py` | *(none — dev-only)* | `triangulate_rays`, `TriangulationResult`, `triangulate_multi`, `triangulate_linkage`, `Hypothesis`, `DEFAULT_INLIER_THRESHOLD_DEG`. RANSAC over seeds + IRLS refit, EUS. The cost is **angular** (reprojection), not metric: the noise is the bbox centre wobbling (median 5.3 deg), and a metric threshold has to be retuned per venue (1.25-1.5 m hotel vs ~3 m airport) where an angular one does not. IRLS = `1/range^2` weights (metric solve -> angular to first order) x Huber. Depth-map points seed the RANSAC and can hold the solve (`depth_weight`), which is the only thing that makes a near-zero-parallax set answerable. `max_depth_m` on the endpoint drops detections whose depth point is beyond it. **Hand-rolled deliberately**: `poselib` 2.0.5 exposes pose estimators only and no multi-view point triangulation, and pycolmap would drag in an SfM pipeline for one solve. Rays pointing away from the solution are rejected, not clipped; `max_parallax_deg` is reported because a low-baseline consensus proves nothing. `triangulate_multi` is sequential RANSAC (fit → drop the consensus → refit), which is what turns "one point plus rejects" into a partition when a basket holds two objects; it is order-dependent by construction, so a partition is *a* reading, not a proof. `triangulate_linkage` adds the order-free alternatives — J-linkage (binary preference sets, Jaccard) and T-linkage (continuous, Tanimoto); merged clusters take the element-wise **minimum** of their preferences, which is what prevents the chaining that killed the graph approaches of 2026-08-11 §3.6/3.7. The endpoint picks one via `partition_method` (`PARTITION_METHODS`). |
+| `merge_score.py` | *(none — dev-only)* | `latent_cost`, `score_1v2`, `covisibility_conflict`, `observed_extent_m`, `cluster_extent_m`, `EXTENT_BOUNDS_M`. Model selection instead of a distance threshold: `[L(A)+L(B)+pen(2)] - [L(A∪B)+pen(1)]`, robust (Huber) fit of one latent centre with scale `sigma_i^2 + extent_i^2` — the extent is held **fixed** during merges, or two neighbours grow into one plausible big object, and each side keeps its own value inside the union for the same reason. `object_extent_m` accepts one value per point; a scalar is the previous behaviour bit for bit (`test_merge_score.py`). `observed_extent_m` = `0.5·range·hypot(aw, ah)` clipped to `[0.2, 5]` — measured and **negative**, see below. `covisibility_conflict` scores the unused negative evidence (a keyframe that saw A and looks elsewhere for B); **no occlusion test**, so it is a cost and never a veto. |
+| `signed_clustering.py` | *(none — dev-only)* | `average_linkage_clusters`. GASP-style agglomeration of the same signed graph the association uses, with the cost between two clusters as the **mean** of their edges instead of GAEC's **sum** — the sum is what lets one bridge edge chain a partition, since a bigger cluster accumulates a bigger total. Cannot-link pairs are absolute and inherited through merges, so repulsive evidence survives transitivity. |
 | `service.py` | `v1_5_views.py` | `create_app`, `query_by_text`, `query_by_image`, `LocalizeParams` (query-less half, also validates the multipart form so both branches share one set of defaults), `LocalizeRequest`, `load_map_entries`, `index_coverage` (**dev-only, no production counterpart**: per-keyframe `ingested`/`no_position` counts, so the toolbox can tell prepared-but-pruned keyframes from indexed ones without a `pg` client of its own) |
 | `vendored/` | `utils/`, `depth/service/decode.py`, `viewer360/`, `v1_legacy.py` | Copies — see its `PROVENANCE.md` |
 
@@ -290,11 +294,18 @@ or out-of-range approaches create no edge. Level incompatibility is a hard canno
 constraint outside the weighted graph, never a large negative cost that summed positive
 parallel edges could overwhelm during contraction.
 
+`multicut_layout_weight` adds `1 - g_ij` on **same-keyframe pairs only**, where `g_ij`
+is `localize.angular_gap_ratio` — the angular separation in units of the two boxes'
+own extent, the quantity `matching.cannot_link_pairs` thresholds at 1.5. Attractive
+below 1 (duplicate proposals), repulsive above, and exactly inert at weight zero. Only
+multicut has same-keyframe edges, so the knob is meaningless in `leader_canopy`.
+
 GAEC repeatedly contracts the maximum positive edge and sums parallel costs after each
 merge. It uses a lazy heap with node-index tie-breaking and has no Kernighan–Lin pass.
 Run `python -m toolbox.benchmark.pair_cue_separability --map-path ...
---ann-base-url ... --prompts ...` to reproduce the depth/ray/cosine percentile and AUC
-diagnostic before adding another pairwise term.
+--ann-base-url ... --prompts ...` to reproduce the percentile and AUC diagnostic before
+adding another pairwise term — and read its **conditional** AUC column, not the raw
+one: every negative cue below was predicted by it.
 
 ### Minimum-cost multicut — neutral, and that is the informative part
 
@@ -396,6 +407,88 @@ anyone leans on the last digit.
 Caveat on the proxy: only a few hundred detections per prompt fall within `--near-m` of
 an annotation, so this metric sees the well-covered objects, not the missed ones. It
 ranks associations; it does not measure recall of the map.
+
+### Fragmentation, and why "estimate the object's size" was the wrong fix
+
+`association_sweep.py` also reports `mean_clusters_per_annotation` — over annotations
+with ≥ 2 labelled detections, how many distinct clusters hold them — with a per-class
+split in the JSON. At the production granularity that is **1.31 on vinci and 2.57 on
+bbhotel**: over half of bbhotel's well-covered objects come out shattered. Real
+symptom, and it now has a number.
+
+The 2026-08-15 study (`docs/plans/2026-08-15-fragmentation-resultats-E0-a-E4.md`)
+tested the natural explanation — a bbox centre slides on an extended object, so
+estimate the extent instead of assuming 1 m — and **refuted it**. Spearman over the
+classes with ≥ 5 covered annotations:
+
+| | vinci | bbhotel |
+|---|---|---|
+| fragmentation ~ implied object size | **+0.90** | **−0.43** |
+| fragmentation ~ depth-point scatter | +0.60 / +0.97 | +0.77 |
+| fragmentation ~ detection count (control) | +0.00 | −0.16 |
+
+On bbhotel the classes that shatter are the *small* ones — `extincteur` 4.35, `cctv`
+3.48, `detecteur de fumée` 2.91 — while `chaise` 1.43 and `table` 1.62 hold together.
+Object size changes sign between the two maps; **depth-point scatter does not**, and it
+is largest on objects seen from close up (1.4–2.5 m), not on large ones. Three negatives
+follow from the same cause, and all three are cheap to re-derive:
+
+- **temporal adjacency** (`|Δ video_keyframe_id|`): raw AUC 0.649/0.640, but only
+  0.523/0.560 conditionally on depth ≤ 2 m. Below the 0.55 stop. Not implemented;
+- **intra-panorama layout** (`multicut_layout_weight`, default `0.0` = off and not
+  computed): the best cue ever measured here — AUC 0.909/0.955 raw, 0.824/0.890
+  conditional, the only one that survives conditioning — and worth −0.014 to +0.013 of
+  pair F1 at matched granularity, opposite signs per map. It only concerns the 7–9 % of
+  same-object pairs that share a keyframe, and geometry already had those right;
+- **observed extent** (`observed_extent_m`, `matching`'s `observed_extent`, default
+  `False`): fails its own basket gate. `score_1v2` with the 1 m constant already puts
+  97.8 % of vinci's solo baskets in one cluster, so there was nothing to fix there, and
+  the observed extent then fuses neighbouring objects (44 % → 24 % of pair baskets
+  correctly split) while *increasing* fragmentation on bbhotel (50.5 % → 46.1 %).
+  `e_i` is dominated by range, and range is what drives depth scatter, so the estimator
+  is anti-correlated with the need on both maps. **`association="gasp1v2"` was
+  therefore not ported.**
+
+The open question this left — `merge_score._sigmas` grows with range (`0.5 + 0.05·r`)
+while the measured scatter *shrinks* with range on bbhotel (ρ = −0.44) — was measured
+on 2026-08-17 against the hand-labelled baskets of `detection_group_label`
+(`toolbox/benchmark/matching_baskets.py` and its four companions; results in
+`docs/plans/2026-08-17-resultats-T0-a-T8.md`). On vinci:
+
+- the spread is **radial**, not tangential (0.87 m vs 0.57 m): the depth value is
+  wrong, the bbox centre is not sliding. The control confirms it — the tangential part
+  does not grow with a box's angular extent (ρ = +0.02);
+- aggregating the depth over the whole box buys **9 %** of the radial part, and the
+  expected winner (`nearest_mode`) is the worst policy of the four. The depth map is
+  locally consistent and wrong, so no per-pixel policy rescues it;
+- re-placing each detection on its **own ray** at its cluster's triangulated depth cuts
+  the radial spread by **53 %** and leaves the tangential part alone — the one
+  intervention that worked (`ray_refinement.py`). The gain comes from the triangulation
+  *ignoring* the depth, not from correcting it;
+- a per-keyframe pose offset explains 39 % of the spread in training and **nothing**
+  held out. The per-view lean is aligned with the viewing ray (|cos| = 0.82 median), so
+  it is depth error shared within a view, not a pose error;
+- σ measured on the detections is `0.80 + 0.028·r` before the ray pass and
+  `0.46 + 0.007·r` after — **roughly constant**. The slope in place is too steep either
+  way, and the base too small before the pass.
+
+**Superseded the same day.** Read on **pair F1** rather than on cluster counts, the ray
+pass is *not* the lead: `matching`'s T-linkage at a 20° inlier threshold reaches 94.7 %
+pair F1 where `gasp1v2` reaches 69.3 %, and the ray pass then *degrades* it to 92.1 %.
+The two are substitutes. The reading that matters is that the association in place has
+97.6 % pair precision for 53.7 % recall — it under-merges — and that a permissive
+linkage loses precision as the neighbourhood densifies (90.5 % at two objects, 72.8 % at
+three, on one pool). Hence the proposed second-stage merge over clusters-as-atoms:
+`docs/plans/2026-08-17-passe-de-fusion-apres-multicut.md`. Note that
+`PARTITION_METHODS` (`matching.py`, the inspection path) and
+`LocalizationParams.association` (`localize.py`, the production path) are **disjoint
+families** — T-linkage is not an association option, so none of this is reachable from
+`association_sweep` until the pass is written.
+
+**Beware:** stored `theta_center`/`phi_center` are exactly float16, ~0.9 px at ERP
+width 5760. Re-reading a single depth pixel offline therefore lands up to a pixel away
+from what ingestion read, which moves the point by a median 8 cm and up to 1.3 m at a
+depth edge. Any offline replay of `sample_depths` must be read against that floor.
 
 ### Other divergences from production
 

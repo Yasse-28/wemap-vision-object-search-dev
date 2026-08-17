@@ -11,7 +11,7 @@ import statistics
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -69,6 +69,20 @@ class PromptDetail:
     strict_ap: float
     grouped_ap: float
     cluster_count: int
+    mean_clusters_per_annotation: float = 0.0
+    covered_annotations: int = 0
+
+
+@dataclass(frozen=True)
+class ClassFragmentation:
+    """Fragmentation of one annotation class, pooled over the prompts using it."""
+
+    mean_clusters_per_annotation: float
+    covered_annotations: int
+    # The control the fragmentation number cannot be read without: an annotation with
+    # forty labelled detections has more opportunities to be split than one with two,
+    # so a class that is merely detected more often looks fragmented for free.
+    mean_detections_per_annotation: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -95,6 +109,13 @@ class ConfigMetrics:
     median_spread_m: float
     median_clusters_per_prompt: float
     per_prompt: dict[str, PromptDetail]
+    # Fragmentation of well-covered annotations, pooled over every prompt: how many
+    # distinct clusters hold the detections of one annotation. 1.0 means every such
+    # annotation ended up whole. See `fragmentation_metrics`.
+    mean_clusters_per_annotation: float = 0.0
+    covered_annotations: int = 0
+    # Same quantity per annotation class, JSON only — the CSV stays one row wide.
+    fragmentation_by_class: dict[str, ClassFragmentation] = field(default_factory=dict)
     elapsed_s: float = 0.0
 
 
@@ -212,6 +233,53 @@ def partition_metrics(
         rand_index=rand_index,
         labelled_detections=labelled_count,
     )
+
+
+def fragmentation_counts(
+    cluster_labels: np.ndarray, annotation_labels: np.ndarray
+) -> dict[int, tuple[int, int]]:
+    """Count the distinct clusters holding each well-covered annotation's detections.
+
+    Reuses the labelling that feeds `partition_metrics`: a detection belongs to the
+    nearest annotation within ``near_m``. Only annotations with at least two labelled
+    detections are reported — a single detection is one cluster by construction and
+    would dilute the mean towards 1. Negative cluster labels (detections dropped by a
+    post-association filter) count as one distinct cluster each, as in
+    `partition_metrics`, so a filter that shatters an object is not rewarded.
+
+    Args:
+        cluster_labels: Association labels aligned with the detections.
+        annotation_labels: Nearest-annotation labels, negative when out of range.
+
+    Returns:
+        Annotation index mapped to its distinct-cluster and labelled-detection counts.
+
+    Raises:
+        ValueError: If the two label vectors have different shapes.
+    """
+    clusters = np.asarray(cluster_labels, dtype=np.int64)
+    annotations = np.asarray(annotation_labels, dtype=np.int64)
+    if clusters.shape != annotations.shape:
+        raise ValueError("Cluster and annotation labels must have the same shape")
+
+    labelled_mask = annotations >= 0
+    clusters = clusters[labelled_mask].copy()
+    annotations = annotations[labelled_mask]
+    negative_indices = np.flatnonzero(clusters < 0)
+    if negative_indices.size:
+        next_label = int(np.max(clusters, initial=-1)) + 1
+        clusters[negative_indices] = next_label + np.arange(negative_indices.size)
+
+    counts: dict[int, tuple[int, int]] = {}
+    for annotation_index in np.unique(annotations):
+        members = clusters[annotations == annotation_index]
+        if members.size < 2:
+            continue
+        counts[int(annotation_index)] = (
+            int(np.unique(members).size),
+            int(members.size),
+        )
+    return counts
 
 
 def _prompt_annotations(
@@ -510,6 +578,11 @@ def evaluate_config(
     strict_aps: list[float] = []
     grouped_aps: list[float] = []
     partitions: list[PartitionMetrics] = []
+    # Pooled over annotations, not averaged over prompts: one fragmented annotation
+    # weighs the same wherever it is, which is what makes the per-class split below
+    # comparable with the overall figure.
+    fragmentation_all: list[int] = []
+    fragmentation_by_class: dict[str, list[tuple[int, int]]] = {}
 
     for prompt, prompt_annotations in annotations_by_prompt.items():
         localizations, selected, cluster_labels = localize_from_enriched_candidates(
@@ -522,6 +595,12 @@ def evaluate_config(
             selected, prompt_annotations, near_m
         )
         partitions.append(partition_metrics(cluster_labels, annotation_labels))
+        counts = fragmentation_counts(cluster_labels, annotation_labels)
+        for annotation_index, entry in counts.items():
+            fragmentation_all.append(entry[0])
+            fragmentation_by_class.setdefault(
+                prompt_annotations[annotation_index].class_name, []
+            ).append(entry)
         predictions = parse_predictions({"localizations": localizations}, "match_score")
         predictions_by_prompt[prompt] = predictions
         groups = group_annotations(prompt_annotations, group_radius_m)
@@ -541,6 +620,12 @@ def evaluate_config(
             strict_ap=strict_curve.average_precision,
             grouped_ap=grouped_curve.average_precision,
             cluster_count=len(localizations),
+            mean_clusters_per_annotation=(
+                statistics.fmean(entry[0] for entry in counts.values())
+                if counts
+                else 0.0
+            ),
+            covered_annotations=len(counts),
         )
 
     strict = shared_threshold_metrics(
@@ -600,6 +685,22 @@ def evaluate_config(
             else 0.0
         ),
         per_prompt=details,
+        mean_clusters_per_annotation=(
+            statistics.fmean(fragmentation_all) if fragmentation_all else 0.0
+        ),
+        covered_annotations=len(fragmentation_all),
+        fragmentation_by_class={
+            class_name: ClassFragmentation(
+                mean_clusters_per_annotation=statistics.fmean(
+                    entry[0] for entry in values
+                ),
+                covered_annotations=len(values),
+                mean_detections_per_annotation=statistics.fmean(
+                    entry[1] for entry in values
+                ),
+            )
+            for class_name, values in sorted(fragmentation_by_class.items())
+        },
     )
 
 
@@ -621,6 +722,7 @@ def _csv_row(metrics: ConfigMetrics) -> dict[str, Any]:
     row = asdict(metrics)
     row["params"] = json.dumps(row["params"], ensure_ascii=False, sort_keys=True)
     row.pop("per_prompt")
+    row.pop("fragmentation_by_class")
     return row
 
 

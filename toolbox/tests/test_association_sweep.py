@@ -12,6 +12,7 @@ from toolbox.benchmark import association_sweep
 from toolbox.benchmark.association_sweep import (
     _params_from_grid_entry,
     fetch_prompt_candidates,
+    fragmentation_counts,
     nearest_annotation_labels,
     partition_metrics,
     shared_threshold_metrics,
@@ -143,6 +144,27 @@ def test_partition_metrics_penalize_over_merging_and_over_splitting() -> None:
     assert over_split.pair_recall == pytest.approx(1.0 / 3.0)
     assert over_merged.pair_f1 == pytest.approx(4.0 / 7.0)
     assert over_split.pair_f1 == pytest.approx(0.5)
+
+
+def test_fragmentation_counts_report_clusters_per_covered_annotation() -> None:
+    # Annotation 0 is split in two, annotation 1 is whole, annotation 2 has a single
+    # detection and is not reported at all.
+    counts = fragmentation_counts(
+        np.asarray([0, 1, 2, 2, 3], dtype=np.int32),
+        np.asarray([0, 0, 1, 1, 2], dtype=np.int64),
+    )
+
+    assert counts == {0: (2, 2), 1: (1, 2)}
+
+
+def test_fragmentation_counts_charge_filtered_detections_as_own_clusters() -> None:
+    # Two detections of one annotation, both dropped by a filter: they are not one
+    # shared noise cluster, so the annotation reads as fragmented.
+    counts = fragmentation_counts(
+        np.asarray([-1, -1], dtype=np.int32), np.asarray([0, 0], dtype=np.int64)
+    )
+
+    assert counts == {0: (2, 2)}
 
 
 def test_partition_metrics_exclude_unlabelled_detections() -> None:

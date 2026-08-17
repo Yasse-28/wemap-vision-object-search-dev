@@ -64,6 +64,8 @@ from toolbox.bricks.candidates import (
 from toolbox.bricks.feedback import load_review_feedback
 from toolbox.bricks.georef_source import load_pose_source
 from toolbox.bricks.localize import LocalizationParams, build_localize_response
+from toolbox.bricks.matching import PARTITION_METHODS, build_matching_response
+from toolbox.bricks.triangulate import DEFAULT_INLIER_THRESHOLD_DEG
 from toolbox.bricks.vendored.geo_transform import GeoTransform
 from toolbox.logging import logger
 
@@ -654,6 +656,83 @@ def create_app() -> FastAPI:
         # that always returned "cutout" and went to legacy/ with the rest.
         response["router_object_type"] = None
         return response
+
+    @app.post("/{map_id}/object-search/matching")
+    async def matching(map_id: str, request: Request) -> dict:
+        """Inspect a hand-picked set of detections: cosine matrix + triangulation.
+
+        Dev-only, and deliberately *not* part of `/localize`: nothing here ranks or
+        clusters anything. It answers "do these N detections describe one object?"
+        for a set a human assembled, which is a question the retrieval path never
+        asks.
+        """
+        entry = _entry(map_id)
+        body = await request.json()
+        raw_items = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(raw_items, list) or not raw_items:
+            raise HTTPException(
+                status_code=422, detail="'items' must be a non-empty list."
+            )
+        requested: list[tuple[str, float, float]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=422, detail="Each item must be an object."
+                )
+            try:
+                requested.append(
+                    (
+                        str(item["keyframe_id"]),
+                        float(item["theta_center"]),
+                        float(item["phi_center"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Each item needs keyframe_id, theta_center and phi_center.",
+                ) from exc
+        def _number(key: str, default: float | None) -> float | None:
+            raw = body.get(key, default)
+            if raw is None:
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"'{key}' must be a number."
+                ) from exc
+
+        # Degrees, not metres: the residual minimised is angular (see triangulate.py).
+        inlier_threshold_deg = _number(
+            "inlier_threshold_deg", DEFAULT_INLIER_THRESHOLD_DEG
+        )
+        max_depth_m = _number("max_depth_m", None)
+        use_cannot_link = bool(body.get("cannot_link_same_keyframe", False))
+        covis_weight = _number("covisibility_weight", 0.0)
+        depth_weight = _number("depth_weight", 0.0)
+        partition_method = str(body.get("partition_method", "sequential"))
+        if partition_method not in PARTITION_METHODS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"'partition_method' must be one of {PARTITION_METHODS}.",
+            )
+        with db.connect() as conn:
+            return build_matching_response(
+                conn,
+                entry.geo_ref_id,
+                state.geo_transform(entry),
+                requested,
+                inlier_threshold_deg=(
+                    inlier_threshold_deg or DEFAULT_INLIER_THRESHOLD_DEG
+                ),
+                partition_method=partition_method,
+                max_depth_m=max_depth_m,
+                depth_weight=depth_weight or 0.0,
+                use_cannot_link=use_cannot_link,
+                covis_weight=covis_weight or 0.0,
+                observed_extent=bool(body.get("observed_extent", False)),
+            )
 
     @app.post("/{map_id}/object-search/localize-offline")
     async def localize_offline(map_id: str) -> dict:

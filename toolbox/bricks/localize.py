@@ -70,6 +70,10 @@ class LocalizationParams:
     multicut_geo_pivot: float = 1.0
     multicut_sem_weight: float = 0.0
     multicut_sem_pivot: float = 0.8
+    # Intra-panorama layout, on same-keyframe pairs only. Exact zero = off, and off
+    # is exact: the term is not computed at all. Multicut is the only association
+    # that has same-keyframe edges, so this knob is meaningless anywhere else.
+    multicut_layout_weight: float = 0.0
     multicut_geo_source: Literal["depth", "ray"] = "depth"
     # Independent of association so ray triangulation can be measured without
     # changing which detections belong to each cluster.
@@ -689,6 +693,45 @@ def _ray_closest_approach_pairs(
     return distances, t_i, t_j
 
 
+def angular_gap_ratio(
+    theta: np.ndarray,
+    phi: np.ndarray,
+    angular_width: np.ndarray,
+    angular_height: np.ndarray,
+    index_i: np.ndarray,
+    index_j: np.ndarray,
+) -> np.ndarray:
+    """Angular separation of two boxes in units of their own combined half-extent.
+
+    The quantity `matching.cannot_link_pairs` thresholds at
+    `SAME_KEYFRAME_MARGIN`: above 1 the two boxes do not touch, below 1 they overlap
+    and are the duplicate proposals an association exists to merge. It is a property
+    of one panorama, so callers must restrict it to same-keyframe pairs themselves;
+    computing it across keyframes is meaningless, not merely unhelpful.
+
+    Args:
+        theta: Per-detection horizontal angles in radians.
+        phi: Per-detection vertical angles in radians.
+        angular_width: Per-detection angular widths in radians.
+        angular_height: Per-detection angular heights in radians.
+        index_i: Left index of every pair.
+        index_j: Right index of every pair.
+
+    Returns:
+        One ratio per pair; ``inf`` where the combined half-extent is zero, so a
+        missing extent never reads as an overlap.
+    """
+    cos_phi = np.cos(phi)
+    directions = np.stack(
+        (cos_phi * np.sin(theta), np.sin(phi), -cos_phi * np.cos(theta)), axis=1
+    )
+    cosines = np.einsum("ij,ij->i", directions[index_i], directions[index_j])
+    separation = np.arccos(np.clip(cosines, -1.0, 1.0))
+    extents = np.hypot(angular_width, angular_height)
+    half = 0.5 * (extents[index_i] + extents[index_j])
+    return np.where(half > 0.0, separation / np.where(half > 0.0, half, 1.0), np.inf)
+
+
 def cluster_detections_multicut(
     positions_local: np.ndarray,
     ray_origins: np.ndarray,
@@ -702,10 +745,12 @@ def cluster_detections_multicut(
     geo_pivot: float = 1.0,
     sem_weight: float = 0.0,
     sem_pivot: float = 0.8,
+    layout_weight: float = 0.0,
     geo_source: Literal["depth", "ray"] = "depth",
     range_m: tuple[float, float] = (0.3, 30.0),
     min_keyframes_per_cluster: int = 2,
     embeddings: np.ndarray | None = None,
+    box_angles: np.ndarray | None = None,
 ) -> np.ndarray:
     """Associate detections with a sparse signed graph and GAEC.
 
@@ -731,10 +776,14 @@ def cluster_detections_multicut(
         geo_pivot: Metres at which the geometric log-odds term changes sign.
         sem_weight: Coefficient of ``cosine - sem_pivot``; zero disables semantics.
         sem_pivot: Cosine at which the semantic term changes sign.
+        layout_weight: Coefficient of ``1 - angular gap ratio`` on same-keyframe
+            pairs; zero disables the term and computes none of it.
         geo_source: ``"depth"`` for point distance or ``"ray"`` for ray distance.
         range_m: Inclusive valid closest-approach interval for ray geometry.
         min_keyframes_per_cluster: Minimum distinct-keyframe support after clustering.
         embeddings: Cutout embeddings, required only when ``sem_weight`` is nonzero.
+        box_angles: ``(theta, phi, angular_width, angular_height)`` per detection,
+            required only when ``layout_weight`` is nonzero.
 
     Returns:
         Compact labels aligned with inputs, with filtered detections labelled ``-1``.
@@ -828,6 +877,32 @@ def cluster_detections_multicut(
         normalized = subset_embeddings / norms
         cosines = np.einsum("ij,ij->i", normalized[local_i], normalized[local_j])
         costs += float(sem_weight) * (cosines - float(sem_pivot))
+
+    if layout_weight != 0.0:
+        if box_angles is None:
+            raise ValueError("multicut layout weight requires box angles")
+        angles = np.asarray(box_angles, dtype=np.float64)
+        if angles.shape != (detection_count, 4):
+            raise ValueError("multicut box angles must have shape (n, 4)")
+        subset_angles = angles[valid_indices]
+        gaps = angular_gap_ratio(
+            subset_angles[:, 0],
+            subset_angles[:, 1],
+            subset_angles[:, 2],
+            subset_angles[:, 3],
+            local_i,
+            local_j,
+        )
+        # Only two boxes of one panorama are arranged on a common sphere; across
+        # keyframes the ratio has no meaning, so those pairs receive nothing rather
+        # than a neutral value that would still shift the contraction order.
+        same_keyframe = keyframes[valid_indices][local_i] == (
+            keyframes[valid_indices][local_j]
+        )
+        applicable = same_keyframe & np.isfinite(gaps)
+        costs = costs + float(layout_weight) * np.where(
+            applicable, 1.0 - np.where(applicable, gaps, 0.0), 0.0
+        )
 
     edges = [
         (int(i), int(j), float(cost))
@@ -1479,10 +1554,27 @@ def localize_from_enriched_candidates(
             geo_pivot=params.multicut_geo_pivot,
             sem_weight=params.multicut_sem_weight,
             sem_pivot=params.multicut_sem_pivot,
+            layout_weight=params.multicut_layout_weight,
             geo_source=params.multicut_geo_source,
             range_m=params.cdog_range_m,
             min_keyframes_per_cluster=params.min_keyframes_per_cluster,
             embeddings=embeddings,
+            box_angles=(
+                None
+                if params.multicut_layout_weight == 0.0
+                else np.array(
+                    [
+                        (
+                            c.theta_center,
+                            c.phi_center,
+                            c.angular_width,
+                            c.angular_height,
+                        )
+                        for c in selected
+                    ],
+                    dtype=np.float64,
+                )
+            ),
         )
     else:
         raise ValueError(f"Unknown association mode: {params.association!r}")
@@ -1565,6 +1657,13 @@ def localize_from_enriched_candidates(
                     "thumbnail": cand.thumbnail,
                     "coordinates": [cand.lat, cand.lng, cand.alt],
                     "bbox": list(PLACEHOLDER_BBOX),
+                    # Dev-only, and the join key `row_index` cannot be: with the
+                    # keyframe id, this angular centre identifies the parquet row the
+                    # candidate came from (same values, float16-rounded at ingest), so
+                    # the toolbox can name the cluster a drawn box belongs to. Both in
+                    # radians, `prepare/convention.py`.
+                    "theta_center": float(cand.theta_center),
+                    "phi_center": float(cand.phi_center),
                     # Raw retrieval similarity — unchanged, and what the HTTP
                     # benchmark reads. The feedback terms sit beside it rather
                     # than replacing it, so a tuning session can see both.
