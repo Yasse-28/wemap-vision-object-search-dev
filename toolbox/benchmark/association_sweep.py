@@ -18,6 +18,11 @@ from typing import Any, TypeAlias
 import numpy as np
 
 from toolbox.benchmark import vlm_scores as vlm_scores_module
+from toolbox.benchmark.error_decomposition import (
+    Decomposition,
+    decompose,
+    report_lines,
+)
 from toolbox.benchmark.object_search_http_benchmark import (
     Annotation,
     AnnotationGroup,
@@ -213,6 +218,9 @@ class ConfigMetrics:
     segmentation_quality: float = 0.0
     recognition_quality: float = 0.0
     panoptic_quality: float = 0.0
+    # Typed error contributions, JSON only and only under `--decompose`. See
+    # `toolbox/benchmark/error_decomposition.py`.
+    error_decomposition: Decomposition | None = None
     elapsed_s: float = 0.0
 
 
@@ -1563,6 +1571,7 @@ def evaluate_config(
     near_m: float = DEFAULT_NEAR_M,
     prototypes_by_prompt: Mapping[str, PromptPrototypes] | None = None,
     vlm_scores_by_prompt: Mapping[str, Mapping[int, float]] | None = None,
+    with_decomposition: bool = False,
 ) -> ConfigMetrics:
     """Evaluate one in-process localization configuration on all prompts.
 
@@ -1576,6 +1585,9 @@ def evaluate_config(
         near_m: Maximum distance for assigning an annotation proxy to a detection.
         prototypes_by_prompt: Reviewed embeddings, needed only by a rescorer.
         vlm_scores_by_prompt: `p(yes)` per candidate, needed only by a VLM gate.
+        with_decomposition: Also type every returned cluster and price each error type.
+            Off by default: it costs roughly as much again as the rest of the
+            evaluation, and it answers "what do I fix" rather than "is this better".
 
     Returns:
         Strict/grouped metrics, shared-threshold estimates, and granularity controls.
@@ -1698,6 +1710,9 @@ def evaluate_config(
         group_radius_m=group_radius_m,
     )
     calibration = calibration_metrics(predictions_by_prompt, annotations_by_prompt)
+    breakdown = (
+        decompose(predictions_by_prompt, annotations) if with_decomposition else None
+    )
     recall = recall_breakdown(
         candidate_reach, predictions_by_prompt, annotations_by_prompt
     )
@@ -1789,6 +1804,7 @@ def evaluate_config(
         segmentation_quality=_quality("segmentation_quality"),
         recognition_quality=_quality("recognition_quality"),
         panoptic_quality=_quality("panoptic_quality"),
+        error_decomposition=breakdown,
         det_a=statistics.fmean(item.det_a for item in hotas) if hotas else 0.0,
         ass_a=statistics.fmean(item.ass_a for item in hotas) if hotas else 0.0,
         hota=statistics.fmean(item.hota for item in hotas) if hotas else 0.0,
@@ -1816,6 +1832,7 @@ def _csv_row(metrics: ConfigMetrics) -> dict[str, Any]:
     row.pop("fragmentation_by_class")
     row.pop("reliability")
     row.pop("recall_at")
+    row.pop("error_decomposition")
     return row
 
 
@@ -1844,6 +1861,7 @@ def sweep(
     near_m: float = DEFAULT_NEAR_M,
     prototypes_by_prompt: Mapping[str, PromptPrototypes] | None = None,
     vlm_scores_by_prompt: Mapping[str, Mapping[int, float]] | None = None,
+    with_decomposition: bool = False,
 ) -> list[ConfigMetrics]:
     """Evaluate a parameter grid and write one summary CSV plus detailed JSON.
 
@@ -1858,6 +1876,7 @@ def sweep(
         base_params: Base parameters before grid overrides.
         near_m: Maximum distance for assigning an annotation proxy to a detection.
         prototypes_by_prompt: Reviewed embeddings, needed only by a rescorer.
+        with_decomposition: Type the errors of every configuration too.
 
     Returns:
         Metrics in grid order.
@@ -1877,6 +1896,7 @@ def sweep(
             near_m=near_m,
             prototypes_by_prompt=prototypes_by_prompt,
             vlm_scores_by_prompt=vlm_scores_by_prompt,
+            with_decomposition=with_decomposition,
         )
         elapsed = time.perf_counter() - started
         metrics = replace(metrics, label=label, elapsed_s=elapsed)
@@ -1887,6 +1907,8 @@ def sweep(
             f"F1={metrics.macro_f1_strict:.3f}",
             flush=True,
         )
+        if metrics.error_decomposition is not None:
+            print("\n".join(report_lines(metrics.error_decomposition)), flush=True)
     _write_sweep_outputs(results, Path(out_dir).expanduser().resolve())
     return results
 
@@ -2040,6 +2062,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             "feedback_beta and feedback_normalization. Uses its own cache entries."
         ),
     )
+    parser.add_argument(
+        "--decompose",
+        action="store_true",
+        help="Type every returned cluster and price each error type. Roughly doubles "
+        "the cost of a configuration; answers what to fix, not which is better.",
+    )
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--bricks-base-url", default="http://127.0.0.1:45679")
     return parser.parse_args(argv)
@@ -2131,6 +2159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         near_m=args.near_m,
         prototypes_by_prompt=prototypes,
         vlm_scores_by_prompt=vlm_scores,
+        with_decomposition=args.decompose,
     )
     return 0
 

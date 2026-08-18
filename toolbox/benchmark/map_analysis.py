@@ -33,6 +33,12 @@ import numpy as np
 import pyarrow.parquet as pq
 from scipy.spatial import cKDTree
 
+from toolbox.benchmark.label_set_metrics import (
+    DEFAULT_TOP_N,
+    evaluate_label_sets,
+    has_label_sets,
+)
+from toolbox.benchmark.label_set_metrics import report_lines as label_set_report_lines
 from toolbox.benchmark.object_search_http_benchmark import Annotation, load_annotations
 from toolbox.bricks.georef_source import PoseSource
 from toolbox.bricks.ingest_cli import EMBEDDING_DIM
@@ -120,6 +126,9 @@ class GroundTruth:
     erp_uv: np.ndarray
     depth_m: np.ndarray
     level: np.ndarray
+    #: The annotations these arrays were built from, in the same order. Kept because
+    #: the ADR 0009 label sets are lists, which no aligned array can hold.
+    annotations: tuple[Annotation, ...] = ()
 
     def __len__(self) -> int:
         return int(self.class_name.size)
@@ -280,6 +289,7 @@ def load_ground_truth(map_path: Path, pose_source: PoseSource) -> GroundTruth:
         erp_uv=np.asarray(uv, dtype=np.float64),
         depth_m=np.asarray(depths, dtype=np.float64),
         level=np.array([item.level or "" for item in annotations]),
+        annotations=tuple(annotations),
     )
 
 
@@ -815,8 +825,7 @@ def embedding_neighbourhood_purity(
             )
             same_class += float(
                 (
-                    attachment.nearest_class[picked]
-                    == attachment.nearest_class[query]
+                    attachment.nearest_class[picked] == attachment.nearest_class[query]
                 ).mean()
             )
             counted += 1
@@ -1095,9 +1104,7 @@ def section_ground_truth(
 
     attachment = attach_to_ground_truth(detections, ground_truth)
     report.say()
-    report.say(
-        "  --- rattachement 3D par rayon (secondaire : dépend de la profondeur)"
-    )
+    report.say("  --- rattachement 3D par rayon (secondaire : dépend de la profondeur)")
     for radius in radii:
         attached = detections.placed & attachment.attached(radius)
         reached = np.unique(attachment.nearest[attached])
@@ -1168,9 +1175,7 @@ def section_ground_truth(
     looked_missed = unseen & (profile.available_keyframes > 0)
     not_indexed = unseen & ~indexed
     report.say()
-    report.say(
-        f"  --- annotations sans détection à {radius:g} m : {int(unseen.sum())}"
-    )
+    report.say(f"  --- annotations sans détection à {radius:g} m : {int(unseen.sum())}")
     report.say(
         f"    jamais regardées (aucun keyframe à {MAX_TRUSTED_RANGE_M:g} m) : "
         f"{int(never_looked.sum())}"
@@ -1297,9 +1302,7 @@ def section_counting(
         f"({cross_source / max(overlapping, 1):.1%})"
     )
     if cosines:
-        report.say(
-            _percentile_line("cosinus des recouvrantes", np.asarray(cosines))
-        )
+        report.say(_percentile_line("cosinus des recouvrantes", np.asarray(cosines)))
         report.say(
             "  (proche de 1 = la même chose proposée deux fois ; c'est ce qui doit"
             " être retiré avant de compter)"
@@ -1329,9 +1332,7 @@ def section_counting(
                 view = np.flatnonzero(rows & (detections.keyframe_id == keyframe))
                 left, _ = _overlapping_pairs(detections, view)
                 best = max(best, view.size - left.size)
-            report.say(
-                f"    {name[:26]:26s} borne {best:4d}   annotations {truth:4d}"
-            )
+            report.say(f"    {name[:26]:26s} borne {best:4d}   annotations {truth:4d}")
     report.data["s5"] = {
         "sampled_keyframes": int(chosen.size),
         "overlapping_pairs": overlapping,
@@ -1392,12 +1393,12 @@ def _stratified_pairs(
     mixed_left = generator.choice(holders, third) if holders.size else empty
     mixed_right = generator.choice(free, third) if free.size else empty
     size = min(mixed_left.size, mixed_right.size)
-    left = np.concatenate(
-        [*same_left, different_left, mixed_left[:size]]
-    ).astype(np.int64)
-    right = np.concatenate(
-        [*same_right, different_right, mixed_right[:size]]
-    ).astype(np.int64)
+    left = np.concatenate([*same_left, different_left, mixed_left[:size]]).astype(
+        np.int64
+    )
+    right = np.concatenate([*same_right, different_right, mixed_right[:size]]).astype(
+        np.int64
+    )
     return left, right
 
 
@@ -1424,8 +1425,7 @@ def _pair_cues(
             np.float64
         ),
         "range_ratio": (
-            detections.range_m[left]
-            / np.maximum(detections.range_m[right], 1e-6)
+            detections.range_m[left] / np.maximum(detections.range_m[right], 1e-6)
         ),
     }
     if embeddings is not None:
@@ -1697,6 +1697,62 @@ def section_hubness(
     }
 
 
+def section_label_sets(
+    data: MapData, report: Report, radius_m: float = 2.0, top_n: int = DEFAULT_TOP_N
+) -> None:
+    """S7 — the free labels against the annotation's *set* of acceptable ones.
+
+    The proposals are the map's own detector labels, ordered by detector score, not a
+    text-embedding ranking: this tool loads no model, and keeping that property is worth
+    more than the sharper ranking a MetaCLIP pass would give. `gdino_labels.py` is where
+    the embedding route lives when it is wanted, and `label_set_metrics.rank_labels`
+    consumes its vectors.
+
+    Until the annotations carry label sets this section reports that they do not, rather
+    than a table of zeros — the same rule `s0` applies to everything else.
+    """
+    report.head("S7 — labels contre les ensembles annotés (ADR 0009)")
+    ground_truth = data.ground_truth
+    annotations = list(ground_truth.annotations)
+    if not annotations:
+        report.say("  aucune vérité terrain")
+        return
+    scored = [item for item in annotations if has_label_sets(item)]
+    if not scored:
+        report.say(
+            f"  0/{len(annotations)} annotations portent des ensembles de labels —"
+            " rien à mesurer (voir ADR 0009)"
+        )
+        report.data["s7"] = {"coverage": 0.0, "annotations": len(annotations)}
+        return
+
+    detections = data.detections
+    attachment = attach_to_ground_truth(detections, ground_truth)
+    attached = detections.placed & attachment.attached(radius_m)
+    proposals: dict[str, list[str]] = {}
+    for index, annotation in enumerate(annotations):
+        rows = np.flatnonzero(attached & (attachment.nearest == index))
+        if rows.size == 0:
+            continue
+        order = rows[np.argsort(-detections.score[rows])]
+        seen: dict[str, None] = {}
+        for label in detections.label[order].tolist():
+            seen.setdefault(str(label), None)
+        proposals[annotation.id] = list(seen)[:top_n]
+
+    result = evaluate_label_sets(proposals, annotations, top_n)
+    for line in label_set_report_lines(result):
+        report.say(line)
+    report.data["s7"] = {
+        "coverage": result.coverage,
+        "scored": result.scored,
+        "annotations": result.annotations,
+        "unproposed": result.unproposed,
+        "top_n": result.top_n,
+        "mean_set_ranking": result.mean_set_ranking,
+    }
+
+
 #: Every section, in the order the report prints them.
 SECTIONS = {
     "s0": section_inventory,
@@ -1706,6 +1762,7 @@ SECTIONS = {
     "s4": section_pairs,
     "s5": section_counting,
     "s6": section_hubness,
+    "s7": section_label_sets,
 }
 
 

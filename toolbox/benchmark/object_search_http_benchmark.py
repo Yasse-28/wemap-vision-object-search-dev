@@ -8,6 +8,7 @@ import math
 import re
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,12 @@ REFERENCE_COLOR = "#2563eb"
 
 @dataclass(frozen=True)
 class Annotation:
+    """One ground-truth object. See `docs/adr/0009-*` for the fields below `level`.
+
+    Everything after `level` is optional to *read*: a map annotated before ADR 0009
+    keeps working, and each metric needing one of them reports what it had to skip.
+    """
+
     id: str
     class_name: str
     lat: float
@@ -32,6 +39,57 @@ class Annotation:
     accuracy_m: float
     prompt: str = ""  # properties.prompt if set, otherwise class_name
     level: str | None = None
+    #: Object identity. Two annotations sharing it are one object recorded twice, which
+    #: is what tells a duplicated click from a genuine pair of adjacent objects.
+    object_id: str | None = None
+    #: Largest horizontal footprint in metres. `match_radius_m` derives the matching
+    #: radius from it; annotators judge extents, not thresholds.
+    extent_m: float | None = None
+    #: Region within which the ground truth is complete. Outside a declared zone a
+    #: prediction on an unannotated object is not an error.
+    exhaustive_zone: str | None = None
+    #: Labels naming this object exactly. Empty means "fall back to `class_name`".
+    synonyms: tuple[str, ...] = ()
+    #: Labels describing an image *of* the object rather than the object.
+    depictions: tuple[str, ...] = ()
+    #: Labels for objects that merely look like this one.
+    visually_similar: tuple[str, ...] = ()
+    #: Labels induced by an imprecise crop — what else is in the box.
+    clutter: tuple[str, ...] = ()
+    #: This annotation is itself a printed image of its class, not the class.
+    is_depiction: bool = False
+
+    @property
+    def accepted_labels(self) -> tuple[str, ...]:
+        """Labels a prediction may carry and still be correct, `class_name` included.
+
+        Blanks are dropped rather than kept as an empty label: an annotation with no
+        class name has no acceptable label, and pretending it accepts `""` would let a
+        prediction carrying nothing score as a synonym.
+        """
+        candidates = (self.class_name, *self.synonyms)
+        return tuple(dict.fromkeys(item for item in candidates if item.strip()))
+
+
+#: How far past its own extent a prediction may sit and still count as a localisation
+#: error rather than a background one — the role IoU 0.1 plays in TIDE. Twice the
+#: radius: near enough that the prediction is plainly about this object, far enough
+#: that it did not find it.
+LOCALISATION_FACTOR = 2.0
+
+
+def match_radius_m(annotation: Annotation) -> float:
+    """The radius a prediction must land within to match this annotation.
+
+    Derived from `extent_m` when the annotation carries one — half the footprint, so a
+    prediction inside the object's own outline matches and one beside it does not — and
+    falling back to the flat `accuracy_m` otherwise. The fallback is why the two cannot
+    be compared across the change: `accuracy_m` is 5 m on every annotation of both
+    maps, which is what made classification errors unattributable on bbhotel.
+    """
+    if annotation.extent_m is not None and annotation.extent_m > 0.0:
+        return annotation.extent_m / 2.0
+    return annotation.accuracy_m
 
 
 @dataclass(frozen=True)
@@ -199,9 +257,50 @@ def load_annotations(path: Path, default_accuracy_m: float) -> list[Annotation]:
                     if properties.get("level") is not None
                     else None
                 ),
+                object_id=_optional_str(properties.get("object_id")),
+                extent_m=_optional_float(properties.get("extent_m")),
+                exhaustive_zone=_optional_str(properties.get("exhaustive_zone")),
+                synonyms=_label_set(properties, "synonyms"),
+                depictions=_label_set(properties, "depictions"),
+                visually_similar=_label_set(properties, "visually_similar"),
+                clutter=_label_set(properties, "clutter"),
+                is_depiction=bool(properties.get("is_depiction", False)),
             )
         )
     return annotations
+
+
+def _optional_str(value: Any) -> str | None:
+    """A non-empty string, or None for anything else including an empty one."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_float(value: Any) -> float | None:
+    """A finite float, or None when the property is absent or unparseable."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _label_set(properties: Mapping[str, Any], name: str) -> tuple[str, ...]:
+    """One ADR 0009 label category, read from `labels.<name>` or a flat `<name>`.
+
+    Both spellings are accepted because the GeoJSON export flattens nested properties
+    inconsistently depending on which side wrote the file. Duplicates and blanks are
+    dropped, order is kept: a set ranking reads it as the annotator wrote it.
+    """
+    labels = properties.get("labels")
+    raw = labels.get(name) if isinstance(labels, Mapping) else properties.get(name)
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
 
 
 def build_localize_url(base_url: str, map_id: str, api_style: str, online: bool) -> str:

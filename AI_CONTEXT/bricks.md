@@ -406,6 +406,31 @@ literature reports. `panoptic_quality` and its two factors are also on every row
 `recognition_quality` is the half with no equivalent elsewhere ("how many objects came
 out whole"), the rest duplicates `hota`. Dropped detections are excluded from the
 panoptic false positives — otherwise filtering an outlier scores worse than keeping it.
+
+### Typed errors, and the ground truth they need
+
+`toolbox/benchmark/error_decomposition.py` (`--decompose` on the sweep) types every
+returned cluster the way TIDE does and prices each type in **recall, never mAP** — strict
+mAP is paid for fragmentation here, so a delta-mAP on the *duplicate* type would read as
+zero. Two axes: `dR@10` (rank-aware, where the loss is) and `dR` over all clusters. The
+pair is the diagnosis. On vinci's baseline: *missed* 108 clusters at +0.252 on both axes,
+*background* 161 at +0.095/+0.000, *duplicate* 96 at +0.037/+0.000, *localisation* 44 at
++0.029/+0.063. So 13 of the 36 ranking points are junk and duplicates holding top-10
+slots — objects that are returned — and 25 are objects never found.
+
+*classification* and *classification+localisation* are **withheld by measurement**:
+`separability` computes the share of annotations with another class inside their own
+matching radius and refuses above a third, printing the number. With no `extent_m` the
+radius is the flat 5 m and that share is 60.5 % on vinci, so both columns are withheld on
+both maps today. Derived from plausible extents it is 0.8–25 % on vinci and 7–58 % on
+bbhotel, so **`extent_m` is the annotation field to produce first** — see
+[`../docs/adr/0009-ground-truth-annotation-contract.md`](../docs/adr/0009-ground-truth-annotation-contract.md),
+which is the whole contract between the annotation tool and the measurement code.
+
+`toolbox/benchmark/label_set_metrics.py` implements OpenLex3D's top-N frequency and set
+ranking over those label sets, model-free: it consumes a ranked label list per object,
+whoever produced it. `map_analysis` `s7` feeds it the detector labels; the embedding route
+is `gdino_labels.encode_classes` plus `rank_labels`.
 | **multicut `geo_pivot` 1.5** | 0.270 | 0.596 | 0.533 | **0.523** | 0.702 | 0.710 |
 
 Three things follow.
@@ -993,10 +1018,11 @@ we do not. The index restarts at zero in every manifest, so only the composite
 its own directory: the whole `metadata.parquet` re-placed in EUS, the manifest poses,
 the annotations, and `embeddings.npy` (a headerless raw float16 dump — `np.load`
 rejects it, which is why `ingest_cli` reads it with `fromfile`). No database, no ANN
-service, no candidate cache. Seven sections (`s0` inventory and what is *missing*, `s1`
+service, no candidate cache. Eight sections (`s0` inventory and what is *missing*, `s1`
 per-detection distributions by detector, `s2` free labels and conditional PDFs, `s3`
 ground truth **and observability**, `s4` pairwise cues, `s5` co-visible counting, `s6`
-embedding hubness), a JSON payload, and GeoJSON layers for the livemap. Details and traps in
+embedding hubness, `s7` labels against the annotated label sets), a JSON payload, and
+GeoJSON layers for the livemap. Details and traps in
 [`../toolbox/benchmark/README.md`](../toolbox/benchmark/README.md).
 
 Three facts it established that constrain any pipeline work (2026-08-18, both maps):

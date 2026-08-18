@@ -243,6 +243,7 @@ PYTHONPATH=.:third_party/object_search python -m toolbox.benchmark.map_analysis 
 | `s4` | pairwise cues over three deliberately drawn populations, raw and conditional AUC, with the share of pairs each cue applies to |
 | `s5` | intra-view duplicates split by detector and settled by embedding, and the co-visible lower bound on the number of objects |
 | `s6` | hubness of the embedding space, with **no ground truth at all** — how unevenly the index shares out the role of nearest neighbour, and what a plain recentring would change |
+| `s7` | detector labels against the annotation's *set* of acceptable labels (ADR 0009); reports that no annotation carries sets rather than a table of zeros |
 
 **Two readings this tool exists to protect.** A label or a cue is only informative
 above the **base rate** — on a densely annotated map half of all detections sit within
@@ -279,6 +280,68 @@ Hub labels are printed against their base rate, per the reading rule above.
 **Known limit.** `detection_review` verdicts cannot be joined here: their `target_id` is
 a pgvector candidate id, not a parquet `row_index`. `s0` says so rather than printing an
 empty table.
+
+## Typing the errors, and pricing each one
+
+`error_decomposition.py` types every returned cluster — *correct*, *duplicate*,
+*classification*, *localisation*, *classification+localisation*, *background* — plus the
+objects no cluster reached, *missed*, and then measures what recall would be if that one
+type of mistake had not happened. Run it from the sweep:
+
+```bash
+python -m toolbox.benchmark.association_sweep --map-path ... --decompose
+```
+
+**The base is recall, not mAP, and that is deliberate.** Strict mAP is paid for
+fragmentation here, so "suppress the duplicates" would come out near zero — the tool
+would mislead exactly where it is most useful. Two axes are reported instead: `dR@10`,
+which is rank-aware (needed for *duplicate* to be definable at all) and is where the
+pipeline loses, and `dR tous`, the same fix with every cluster allowed. **The pair is the
+diagnosis**: a type that costs `dR@10` and nothing overall is purely a ranking problem, a
+type that costs both loses the object. On vinci's baseline:
+
+| type | count | dR@10 | dR all |
+|---|---|---|---|
+| missed | 108 | +0.252 | +0.252 |
+| background | 161 | +0.095 | +0.000 |
+| duplicate | 96 | +0.037 | +0.000 |
+| localisation | 44 | +0.029 | +0.063 |
+
+So 13 points of the ranking loss are junk and duplicates occupying top-10 slots — objects
+that *are* returned — and 25 points are objects never found at all.
+
+**Two columns are withheld by measurement, not by map name.** Telling a cluster on the
+wrong class from one on nothing needs classes further apart than the radius that matches
+them. `separability` measures the share of annotations with another class inside their own
+radius and withholds *classification* and *classification+localisation* above a third,
+printing the number it refused on. With today's ground truth — no `extent_m`, so a flat
+5 m radius — that is 60.5 % on vinci and both columns are withheld on both maps. They
+become available as `extent_m` lands, which is why that field is the one to annotate
+first: see [ADR 0009](../../docs/adr/0009-ground-truth-annotation-contract.md).
+
+Matching here is greedy **by rank**, not by distance as `match_predictions` does, because
+a duplicate is defined by a better-scoring cluster having already taken the object.
+Recall figures from this module are therefore close to but not identical with the sweep's
+`recall_at`.
+
+## Scoring a label against a set, not a string
+
+`label_set_metrics.py` implements OpenLex3D's two open-set metrics — **top-N frequency**
+(does any of the N proposed labels fall in category C) and **set ranking** (does the
+proposed order match the ideal order of the categories, as nDCG against the object's own
+best possible ordering). Both read the four ranked label sets ADR 0009 puts on an
+annotation: synonyms, depictions, visually similar, clutter.
+
+The module never produces labels — it takes a ranked list per object, because that list
+can come from the detector's own `label` column, from `gdino_labels.encode_classes`
+scored against a cluster embedding, or from a VLM, and choosing between those is a
+separate question. `rank_labels` covers the embedding case and is pure numpy.
+
+`map_analysis.py` section `s7` wires it to the map's own detector labels, ordered by
+detector score — deliberately not a MetaCLIP ranking, because that tool loads no model
+and keeping that property is worth more than a sharper ranking. Until the annotations
+carry label sets, `s7` says `0/258 annotations portent des ensembles` rather than printing
+a table of zeros.
 
 ## Depth quality where it places a detection
 
