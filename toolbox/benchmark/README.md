@@ -205,3 +205,33 @@ the 3D attachment, which shares the annotation's own construction
 **Known limit.** `detection_review` verdicts cannot be joined here: their `target_id` is
 a pgvector candidate id, not a parquet `row_index`. `s0` says so rather than printing an
 empty table.
+
+## Putting a name back on a G-DINO box
+
+A prepare run can leave every GroundingDINO row carrying one placeholder label —
+`gdino_venue` on 813 467 of vinci's 1 063 142 rows. The information is not lost, only
+unwritten: the venue prompt lists the exact phrases the detector was asked for
+(`prepare.prompts.gdino_classes`), the cutouts already carry MetaCLIP image
+embeddings, and MetaCLIP text embeddings live in the same space.
+
+```bash
+PYTHONPATH=.:third_party/object_search python -m toolbox.benchmark.gdino_labels \
+  --map-path /path/to/map --validate --write
+```
+
+`--write` produces `object-search/gdino_labels.parquet`, a **sidecar**: it sits beside
+`metadata.parquet` and is joined back on `row_index`, so what prepare wrote stays
+byte-for-byte what prepare wrote. A re-run of prepare cannot silently swallow the
+estimate, and deleting the file undoes it.
+
+**This is an estimate, and the margin says how much of one.** The stored labels of a
+healthy map come from GroundingDINO; these come from MetaCLIP's opinion of the same
+crop. Validated against bbhotel, whose 44 labels are real: 64.4 % top-1 agreement
+overall, but the top1-minus-top2 margin separates the two regimes almost perfectly —
+49.9 % below 0.01, 84.5 % from 0.01 to 0.03, **99.9 %** from 0.03 to 0.06, 100 % above.
+Filter on the margin rather than trusting the label.
+
+Most of the disagreement is vocabulary redundancy rather than error: the hotel prompt
+holds three phrases for one camera and five for one table, so `dining table` ->
+`rectangular table` and `surveillance camera` -> `security camera` dominate the
+confusions. Collapsing synonym groups would raise the agreement mechanically.
