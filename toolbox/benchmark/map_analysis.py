@@ -216,6 +216,20 @@ def load_detections(map_path: Path, pose_source: PoseSource) -> Detections:
 def load_ground_truth(map_path: Path, pose_source: PoseSource) -> GroundTruth:
     """Annotations in EUS, keeping the panorama and pixel each one was clicked in."""
     path = map_path / "benchmark" / "annotations.geojson"
+    if not path.is_file():
+        # A freshly prepared map has no annotations yet, which is a state to describe
+        # rather than an error: s0 still says what the index holds, and every
+        # ground-truth section reports that it has nothing to compare against.
+        empty = np.empty(0)
+        return GroundTruth(
+            class_name=np.empty(0, dtype=object),
+            position_eus=np.empty((0, 3)),
+            accuracy_m=empty,
+            source_keyframe_id=np.empty(0, dtype=object),
+            erp_uv=np.empty((0, 2)),
+            depth_m=empty,
+            level=np.empty(0, dtype=object),
+        )
     annotations: Sequence[Annotation] = load_annotations(path, 5.0)
     raw = json.loads(path.read_text(encoding="utf-8"))
     wgs84 = []
@@ -390,8 +404,11 @@ def section_inventory(data: MapData, report: Report) -> None:
         f"{int((ground_truth.source_keyframe_id != '').sum())} avec keyframe source, "
         f"{int(np.isfinite(ground_truth.erp_uv).all(axis=1).sum())} avec pixel source"
     )
-    accuracy = _label_counts(ground_truth.accuracy_m.astype(str))
-    report.say(f"    précisions déclarées     {accuracy}")
+    if len(ground_truth):
+        accuracy = _label_counts(ground_truth.accuracy_m.astype(str))
+        report.say(f"    précisions déclarées     {accuracy}")
+    else:
+        missing.append("aucune vérité terrain (benchmark/annotations.geojson absent)")
     report.say(
         f"  verdicts humains           {len(data.reviews)} ; "
         f"étiquettes de partition {len(data.group_labels)}"
