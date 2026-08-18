@@ -9,6 +9,7 @@ import { parseManifest } from "./map-manifest.js";
 import type { MetadataRow } from "./object-search-metadata.js";
 import {
   columnarKeyframeMarkers,
+  featureMatchAssessment,
   indexProjectWorldPointPayload,
   keyframeHeadingDegreesFromPose,
   metadataKeyframesPayload,
@@ -200,6 +201,20 @@ test("occlusion confidence separates a matching surface from a foreground obstac
   const unsupported = projectionOcclusionAssessment(5, 8);
   assert.equal(unsupported.occlusion_status, "depth_mismatch");
   assert.ok((unsupported.occlusion_confidence ?? 100) < 5);
+});
+
+test("feature confidence requires both verified support and a clean inlier ratio", () => {
+  const strong = featureMatchAssessment(24, 18);
+  assert.equal(strong.feature_match_status, "matched");
+  assert.ok((strong.feature_match_score ?? 0) > 80);
+
+  const sparse = featureMatchAssessment(2, 2);
+  assert.equal(sparse.feature_match_status, "weak");
+  assert.ok((sparse.feature_match_score ?? 100) < 35);
+
+  const textureless = featureMatchAssessment(0, 0, false);
+  assert.equal(textureless.feature_match_status, "no_features");
+  assert.equal(textureless.feature_match_score, 0);
 });
 
 test("refuses neighbour projection when a proposal has no depth", () => {

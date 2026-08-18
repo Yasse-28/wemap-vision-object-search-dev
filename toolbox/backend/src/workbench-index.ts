@@ -1070,6 +1070,11 @@ export type ProposalNeighborProjection = {
   occlusion_margin_m: number | null;
   occlusion_confidence: number | null;
   occlusion_status: "clear" | "occluded" | "depth_mismatch" | "unknown";
+  feature_match_score: number | null;
+  feature_matches: number;
+  feature_inliers: number;
+  feature_inlier_ratio: number | null;
+  feature_match_status: "matched" | "weak" | "no_features" | "unavailable";
 };
 
 type ProposalProjectionGeometry = {
@@ -1206,6 +1211,11 @@ function projectProposalIntoKeyframe(
     occlusion_margin_m: null,
     occlusion_confidence: null,
     occlusion_status: "unknown",
+    feature_match_score: null,
+    feature_matches: 0,
+    feature_inliers: 0,
+    feature_inlier_ratio: null,
+    feature_match_status: "unavailable",
   };
 }
 
@@ -1232,6 +1242,36 @@ function angleBetweenVectors(left: number[], right: number[]): number {
 
 function confidencePercent(value: number): number {
   return Math.round(Math.max(0, Math.min(1, value)) * 100);
+}
+
+export function featureMatchAssessment(
+  rawMatches: number,
+  rawInliers: number,
+  hasFeatures: boolean = true,
+): FeatureMatchAssessment {
+  const matches = Math.max(0, Math.round(rawMatches));
+  const inliers = Math.max(0, Math.min(matches, Math.round(rawInliers)));
+  if (!hasFeatures) {
+    return {
+      feature_match_score: 0,
+      feature_matches: 0,
+      feature_inliers: 0,
+      feature_inlier_ratio: 0,
+      feature_match_status: "no_features",
+    };
+  }
+  const inlierRatio = matches > 0 ? inliers / matches : 0;
+  // A high ratio from only two points is not evidence. Saturate support at twenty
+  // verified correspondences, then combine support and purity symmetrically.
+  const support = Math.min(1, inliers / 20);
+  return {
+    feature_match_score: confidencePercent(Math.sqrt(inlierRatio * support)),
+    feature_matches: matches,
+    feature_inliers: inliers,
+    feature_inlier_ratio: inlierRatio,
+    feature_match_status:
+      inliers >= 8 && inlierRatio >= 0.25 ? "matched" : "weak",
+  };
 }
 
 /** Project one depth-backed proposal into nearby, spatially distinct camera poses. */
@@ -1308,10 +1348,19 @@ export async function proposalNeighborProjectionsPayload(
   requestedCount: number,
 ): Promise<Record<string, unknown>> {
   const { row, manifest } = await proposalProjectionSource(map, rowIndex);
-  const projections = await scoreProjectionOcclusion(
-    map,
-    projectProposalIntoNearestKeyframes(row, manifest, requestedCount),
+  const baseProjections = projectProposalIntoNearestKeyframes(
+    row,
+    manifest,
+    requestedCount,
   );
+  const [occlusionScored, featureAssessments] = await Promise.all([
+    scoreProjectionOcclusion(map, baseProjections),
+    scoreProjectionFeatures(map, row, baseProjections),
+  ]);
+  const projections = occlusionScored.map((projection, index) => ({
+    ...projection,
+    ...(featureAssessments?.[index] ?? {}),
+  }));
   return {
     row_index: row.rowIndex,
     source_keyframe_id: String(row.videoKeyframeId),
@@ -1323,7 +1372,8 @@ export async function proposalNeighborProjectionsPayload(
     note:
       "Nearby views are spaced by at least 0.5 m when possible. Geometric "
       + "confidence combines distance, viewpoint angle and apparent size. Visibility "
-      + "compares the projected distance with target depth when available.",
+      + "compares the projected distance with target depth. Feature match uses "
+      + "COLMAP-style SIFT ratio matching with geometric verification.",
   };
 }
 
@@ -1639,6 +1689,118 @@ type DepthBatchSample = {
   error: string | null;
 };
 
+type FeatureMatchAssessment = Pick<
+  ProposalNeighborProjection,
+  | "feature_match_score"
+  | "feature_matches"
+  | "feature_inliers"
+  | "feature_inlier_ratio"
+  | "feature_match_status"
+>;
+
+type RawFeatureMatch = {
+  matches: number;
+  inliers: number;
+  has_features: boolean;
+};
+
+const FEATURE_MATCH_SCRIPT = String.raw`
+import base64
+import json
+import sys
+
+import cv2
+import numpy as np
+
+
+def decode_gray(encoded):
+    payload = np.frombuffer(base64.b64decode(encoded), dtype=np.uint8)
+    image = cv2.imdecode(payload, cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise RuntimeError("could not decode projection PNG")
+    return image
+
+
+def extract_sift(image):
+    # COLMAP defaults to SIFT. A slightly lower contrast threshold keeps useful
+    # points in these small, already-localised proposal views.
+    sift = cv2.SIFT_create(nfeatures=2048, contrastThreshold=0.02)
+    return sift.detectAndCompute(image, None)
+
+
+def proposal_region(image):
+    # The proposal occupies half of a 2x-FOV render. Keep a small tolerance for
+    # viewpoint changes while excluding most scene context from the score.
+    height, width = image.shape[:2]
+    half_height = max(1, int(height * 0.30))
+    half_width = max(1, int(width * 0.30))
+    center_y = height // 2
+    center_x = width // 2
+    return image[
+        center_y - half_height:center_y + half_height,
+        center_x - half_width:center_x + half_width,
+    ]
+
+
+def match_target(source_keypoints, source_descriptors, target_encoded):
+    target = proposal_region(decode_gray(target_encoded))
+    target_keypoints, target_descriptors = extract_sift(target)
+    if (
+        source_descriptors is None
+        or target_descriptors is None
+        or len(source_descriptors) < 2
+        or len(target_descriptors) < 2
+    ):
+        return {"matches": 0, "inliers": 0, "has_features": False}
+
+    # COLMAP's SIFT_BRUTEFORCE matcher uses L2 descriptors and a 0.8 ratio test.
+    pairs = cv2.BFMatcher(cv2.NORM_L2).knnMatch(
+        source_descriptors,
+        target_descriptors,
+        k=2,
+    )
+    matches = [
+        pair[0]
+        for pair in pairs
+        if len(pair) == 2 and pair[0].distance < 0.8 * pair[1].distance
+    ]
+    inliers = 0
+    if len(matches) >= 4:
+        source_points = np.float32(
+            [source_keypoints[item.queryIdx].pt for item in matches]
+        ).reshape(-1, 1, 2)
+        target_points = np.float32(
+            [target_keypoints[item.trainIdx].pt for item in matches]
+        ).reshape(-1, 1, 2)
+        _, mask = cv2.findHomography(
+            source_points,
+            target_points,
+            cv2.RANSAC,
+            4.0,
+            maxIters=2000,
+            confidence=0.995,
+        )
+        if mask is not None:
+            inliers = int(mask.ravel().sum())
+
+    return {"matches": len(matches), "inliers": inliers, "has_features": True}
+
+
+def main():
+    request = json.loads(sys.stdin.read())
+    source = proposal_region(decode_gray(request["source_png"]))
+    source_keypoints, source_descriptors = extract_sift(source)
+    results = [
+        match_target(source_keypoints, source_descriptors, encoded)
+        for encoded in request["target_pngs"]
+    ]
+    print(json.dumps(results))
+
+
+if __name__ == "__main__":
+    main()
+`;
+
 const DEPTH_SAMPLE_SCRIPT = String.raw`
 import json
 import math
@@ -1878,6 +2040,35 @@ async function runDepthBatchSamplePython(
   return JSON.parse(Buffer.concat(stdout).toString("utf8")) as DepthBatchSample[];
 }
 
+async function runFeatureMatchPython(
+  pythonBin: string,
+  sourcePng: Buffer,
+  targetPngs: Buffer[],
+): Promise<FeatureMatchAssessment[]> {
+  const child = spawn(pythonBin, ["-c", FEATURE_MATCH_SCRIPT], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  child.stdin.end(JSON.stringify({
+    source_png: sourcePng.toString("base64"),
+    target_pngs: targetPngs.map((target) => target.toString("base64")),
+  }));
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+  if (code !== 0) {
+    throw new Error(Buffer.concat(stderr).toString("utf8").trim() || `python exited with ${code}`);
+  }
+  const raw = JSON.parse(Buffer.concat(stdout).toString("utf8")) as RawFeatureMatch[];
+  return raw.map((item) =>
+    featureMatchAssessment(item.matches, item.inliers, item.has_features),
+  );
+}
+
 async function runDepthPreviewPython(
   pythonBin: string,
   request: Record<string, unknown>,
@@ -2018,6 +2209,52 @@ async function scoreProjectionOcclusion(
     ...projection,
     ...(assessments.get(index) ?? {}),
   }));
+}
+
+async function scoreProjectionFeatures(
+  map: MapEntry,
+  row: MetadataRow,
+  projections: ProposalNeighborProjection[],
+): Promise<FeatureMatchAssessment[] | null> {
+  let sourcePng: Buffer;
+  let targetPngs: Buffer[];
+  try {
+    [sourcePng, targetPngs] = await Promise.all([
+      rowRenderPng(map, row, { size: 384, fovScale: 2 }),
+      Promise.all(
+        projections.map((projection) =>
+          renderGnomonicPng(
+            map,
+            projection.keyframe_id,
+            {
+              thetaCenter: projection.theta_center,
+              phiCenter: projection.phi_center,
+              angularWidth: projection.angular_width,
+              angularHeight: projection.angular_height,
+            },
+            { size: 384, fovScale: 2 },
+          ),
+        ),
+      ),
+    ]);
+  } catch {
+    return null;
+  }
+
+  for (const pythonBin of pythonBinaryCandidates()) {
+    try {
+      const assessments = await runFeatureMatchPython(
+        pythonBin,
+        sourcePng,
+        targetPngs,
+      );
+      return assessments.length === projections.length ? assessments : null;
+    } catch {
+      // Feature scoring is additive. Missing OpenCV/SIFT must not make geometric
+      // projection, depth visibility, or rendered cards disappear.
+    }
+  }
+  return null;
 }
 
 export async function indexKeyframeDepthPreviewPng(

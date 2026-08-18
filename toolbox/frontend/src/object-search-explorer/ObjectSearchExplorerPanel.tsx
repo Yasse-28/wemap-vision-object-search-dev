@@ -188,6 +188,9 @@ function ProjectionConfidence(props: {
   const visibility = props.projection.occlusion_confidence === null
     ? null
     : confidenceBand(props.projection.occlusion_confidence);
+  const features = props.projection.feature_match_score === null
+    ? null
+    : confidenceBand(props.projection.feature_match_score);
   const geometryTitle = [
     `Source distance ${props.projection.distance_score}%`,
     `view angle ${props.projection.view_angle_score}% (${props.projection.viewpoint_angle_deg.toFixed(1)}°)`,
@@ -196,6 +199,9 @@ function ProjectionConfidence(props: {
   const visibilityTitle = props.projection.observed_depth_m === null
     ? "No target depth sample is available."
     : `Expected ${props.projection.distance_to_proposal_m.toFixed(2)} m · observed ${props.projection.observed_depth_m.toFixed(2)} m`;
+  const featureTitle = props.projection.feature_match_score === null
+    ? "SIFT matching is unavailable."
+    : `${props.projection.feature_inliers} geometric inliers from ${props.projection.feature_matches} ratio-test matches`;
 
   return (
     <span className="object-search-projection-confidence">
@@ -232,6 +238,30 @@ function ProjectionConfidence(props: {
         <span className="object-search-confidence-meter" aria-hidden="true">
           {props.projection.occlusion_confidence !== null ? (
             <span style={{ width: `${props.projection.occlusion_confidence}%` }} />
+          ) : null}
+        </span>
+      </span>
+      <span
+        className={`object-search-confidence-score is-${
+          props.projection.feature_match_status === "no_features"
+            ? "unknown"
+            : features?.tone ?? "unknown"
+        }`}
+        title={featureTitle}
+      >
+        <span className="object-search-confidence-heading">
+          <span>Features</span>
+          <strong>
+            {props.projection.feature_match_status === "unavailable"
+              ? "Unavailable"
+              : props.projection.feature_match_status === "no_features"
+                ? "No features"
+                : `${props.projection.feature_match_status === "weak" ? "Weak" : features?.label} · ${props.projection.feature_match_score}%`}
+          </strong>
+        </span>
+        <span className="object-search-confidence-meter" aria-hidden="true">
+          {props.projection.feature_match_score !== null ? (
+            <span style={{ width: `${props.projection.feature_match_score}%` }} />
           ) : null}
         </span>
       </span>

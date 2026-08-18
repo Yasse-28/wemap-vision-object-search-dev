@@ -200,6 +200,11 @@ export type ProposalNeighborProjection = {
   occlusion_margin_m: number | null;
   occlusion_confidence: number | null;
   occlusion_status: "clear" | "occluded" | "depth_mismatch" | "unknown";
+  feature_match_score: number | null;
+  feature_matches: number;
+  feature_inliers: number;
+  feature_inlier_ratio: number | null;
+  feature_match_status: "matched" | "weak" | "no_features" | "unavailable";
 };
 
 export type ProposalNeighborProjectionsResponse = {
