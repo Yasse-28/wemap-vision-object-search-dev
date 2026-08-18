@@ -13,6 +13,7 @@ import { WorkbenchRouteError } from "./workbench-index.js";
 
 export const ANNOTATION_DB_FILENAME = "object-search-annotations.db";
 const BENCHMARK_IMPORTED_KEY = "benchmark_geojson_imported";
+const OFFICE_IMPORTED_KEY = "office_geojson_imported";
 const databaseCache = new Map<string, Database.Database>();
 let cleanupRegistered = false;
 
@@ -106,6 +107,83 @@ const SCHEMA = `
     level TEXT,
     class TEXT,
     prompt TEXT,
+    accuracy REAL,
+    extra_properties TEXT,
+    created_at TEXT NOT NULL
+  );
+
+  /**
+   * The *true* grouping of detections, as a human reads it — the reference partition
+   * that says which detections are one physical object.
+   *
+   * Deliberately query-independent, unlike 'detection_review': "these two detections
+   * are the same extinguisher" is a fact about the map, not about a prompt. The
+   * unique index over the detection key is the partition constraint itself — a
+   * detection belongs to exactly one group, and re-labelling moves it.
+   *
+   * 'group_name' NULL means "not an object" (a box on a wall, two objects at once):
+   * an explicit reject, so junk does not have to be filed into some group to be
+   * annotated. 'row_index' is resolved at write time when the parquet can answer,
+   * because offline scripts join on it; '(keyframe_id, theta, phi)' stays
+   * authoritative since pgvector cannot produce a row index.
+   *
+   * Not wired into the benchmark's ground truth — that stays 'ground_truth_point'.
+   */
+  CREATE TABLE IF NOT EXISTS detection_group_label (
+    detection_group_label_id INTEGER PRIMARY KEY,
+    keyframe_id TEXT NOT NULL,
+    theta_center REAL NOT NULL,
+    phi_center REAL NOT NULL,
+    row_index INTEGER,
+    group_name TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    created_by TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_detection_group_label_key
+    ON detection_group_label (keyframe_id, theta_center, phi_center);
+
+  /**
+   * The Annotation office's class palette: name, colour, default prompt.
+   *
+   * It exists so an empty class survives a reload. Colour and prompt could be read
+   * off the annotations that use a class, but a class created and not yet drawn on
+   * would then vanish — which is exactly the moment the palette is being set up.
+   *
+   * Distinct from 'manual_detection_classes', which names image-space detections and
+   * carries no colour. Merging the two would tie the office's palette to a table the
+   * benchmark reads.
+   */
+  CREATE TABLE IF NOT EXISTS annotation_class (
+    annotation_class_id INTEGER PRIMARY KEY,
+    class TEXT NOT NULL,
+    annotation_type TEXT NOT NULL CHECK (annotation_type IN ('point', 'polygon')),
+    color TEXT NOT NULL,
+    prompt TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_annotation_class_key
+    ON annotation_class (class, annotation_type);
+
+  /**
+   * Polygon annotations from the office.
+   *
+   * Points go to 'ground_truth_point' — they *are* benchmark ground truth, which is
+   * the whole reason the office exists. A polygon is not: it has no single position
+   * to score a localization against, and 'ground_truth_point' has no geometry
+   * column. It gets its own table rather than a nullable geometry on that one, so
+   * nothing reading ground truth has to learn to skip rows.
+   *
+   * 'ring' is a JSON array of [lng, lat] pairs, open — the first vertex is
+   * implicitly reconnected to the last, matching what the livemap draws.
+   */
+  CREATE TABLE IF NOT EXISTS annotation_polygon (
+    annotation_polygon_id INTEGER PRIMARY KEY,
+    ring TEXT NOT NULL,
+    class TEXT,
+    prompt TEXT,
+    level TEXT,
+    alt REAL,
     accuracy REAL,
     extra_properties TEXT,
     created_at TEXT NOT NULL
@@ -388,6 +466,7 @@ function openAnnotationDatabase(map: MapEntry): Database.Database {
     migrateLegacyManualDetections(database);
     addMissingManualDetectionColumns(database);
     importBenchmarkGeoJsonOnce(database, map);
+    importOfficeGeoJsonOnce(database, map);
     databaseCache.set(databasePath, database);
     registerCleanup();
     return database;
@@ -518,6 +597,150 @@ export function deleteDetectionReview(map: MapEntry, review: ReviewMutation): vo
   });
 }
 
+export type DetectionGroupLabel = {
+  keyframeId: string;
+  thetaCenter: number;
+  phiCenter: number;
+  rowIndex: number | null;
+  /** null = "not an object": an explicit reject, not an absence of annotation. */
+  groupName: string | null;
+  note: string | null;
+};
+
+/**
+ * Angles are the key, so they must be compared the way they are stored. 6 decimals is
+ * far below the float16 precision the angles carry, and matches what the frontend
+ * rounds to before sending — an exact SQL equality on a REAL is only safe because
+ * both sides round first.
+ */
+function roundAngle(value: number): number {
+  return Number(value.toFixed(6));
+}
+
+export function parseDetectionGroupLabel(
+  body: Record<string, unknown>,
+  requireGroup: boolean,
+): DetectionGroupLabel {
+  const keyframeId = typeof body.keyframe_id === "string" ? body.keyframe_id.trim() : "";
+  const thetaCenter = Number(body.theta_center);
+  const phiCenter = Number(body.phi_center);
+  if (!keyframeId || !Number.isFinite(thetaCenter) || !Number.isFinite(phiCenter)) {
+    throw new WorkbenchRouteError(422, "Invalid detection group label payload.");
+  }
+  // `Number(null)` is 0, and 0 is a perfectly valid row index — the coercion would
+  // file every angle-only annotation against the parquet's first row.
+  const rowIndex = body.row_index == null ? Number.NaN : Number(body.row_index);
+  const groupName =
+    typeof body.group_name === "string" && body.group_name.trim()
+      ? body.group_name.trim()
+      : null;
+  if (requireGroup && groupName === null && body.group_name !== null) {
+    throw new WorkbenchRouteError(
+      422,
+      "A group name is required; send null explicitly to mark a detection as 'not an object'.",
+    );
+  }
+  return {
+    keyframeId,
+    thetaCenter: roundAngle(thetaCenter),
+    phiCenter: roundAngle(phiCenter),
+    rowIndex: Number.isInteger(rowIndex) ? rowIndex : null,
+    groupName,
+    note: typeof body.note === "string" && body.note.trim() ? body.note.trim() : null,
+  };
+}
+
+export function upsertDetectionGroupLabel(
+  map: MapEntry,
+  label: DetectionGroupLabel,
+): number {
+  return withDatabase(map, (database) => {
+    const result = database
+      .prepare(`
+        INSERT INTO detection_group_label
+          (keyframe_id, theta_center, phi_center, row_index, group_name, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (keyframe_id, theta_center, phi_center) DO UPDATE SET
+          row_index = COALESCE(excluded.row_index, row_index),
+          group_name = excluded.group_name,
+          note = excluded.note,
+          created_at = excluded.created_at
+      `)
+      .run(
+        label.keyframeId,
+        label.thetaCenter,
+        label.phiCenter,
+        label.rowIndex,
+        label.groupName,
+        label.note,
+        nowIso(),
+      );
+    return Number(result.lastInsertRowid);
+  });
+}
+
+export function deleteDetectionGroupLabel(
+  map: MapEntry,
+  label: DetectionGroupLabel,
+): void {
+  withDatabase(map, (database) => {
+    database
+      .prepare(`
+        DELETE FROM detection_group_label
+        WHERE keyframe_id = ? AND theta_center = ? AND phi_center = ?
+      `)
+      .run(label.keyframeId, label.thetaCenter, label.phiCenter);
+  });
+}
+
+/**
+ * The reference partition, grouped and ready to be scored against an algorithm's.
+ *
+ * Rejected detections come back under `not_an_object` rather than being dropped:
+ * "annotated as junk" and "never looked at" are different states, and a scoring pass
+ * that confuses them will count its own blind spots as agreement.
+ */
+export function listDetectionGroups(map: MapEntry): Record<string, unknown> {
+  return withDatabase(map, (database) => {
+    const rows = database
+      .prepare(`
+        SELECT keyframe_id, theta_center, phi_center, row_index, group_name, note, created_at
+        FROM detection_group_label
+        ORDER BY group_name IS NULL, group_name, keyframe_id
+      `)
+      .all() as Array<{
+      keyframe_id: string;
+      theta_center: number;
+      phi_center: number;
+      row_index: number | null;
+      group_name: string | null;
+      note: string | null;
+      created_at: string;
+    }>;
+    const groups = new Map<string, typeof rows>();
+    const notAnObject: typeof rows = [];
+    for (const row of rows) {
+      if (row.group_name === null) {
+        notAnObject.push(row);
+        continue;
+      }
+      const members = groups.get(row.group_name) ?? [];
+      members.push(row);
+      groups.set(row.group_name, members);
+    }
+    return {
+      labelled_count: rows.length,
+      groups: [...groups].map(([name, members]) => ({
+        group_name: name,
+        member_count: members.length,
+        keyframe_count: new Set(members.map((member) => member.keyframe_id)).size,
+        members,
+      })),
+      not_an_object: notAnObject,
+    };
+  });
+}
+
 function parseExtraProperties(value: string | null): Record<string, unknown> {
   if (!value) {
     return {};
@@ -603,4 +826,603 @@ export function buildGroundTruth(map: MapEntry): FeatureCollection {
     }
     return { type: "FeatureCollection", features };
   });
+}
+
+// ---------------------------------------------------------------------------
+// The Annotation office
+// ---------------------------------------------------------------------------
+
+/**
+ * The office's annotations, in the store the rest of the pipeline already uses.
+ *
+ * Points land in `ground_truth_point` **on purpose**: they are the positional
+ * annotations the benchmark scores against, and they used to sit in a
+ * `annotations/annotations.geojson` that nothing ever read — the office wrote it and
+ * no consumer opened it. Writing them here is what connects the two.
+ *
+ * The consequence is that opening the office now shows the map's existing ground
+ * truth (258 points on vinci, 674 on bbhotel at the time of writing) and that
+ * deleting one there removes it from the benchmark. That is the point of the
+ * change, and it is why the UI confirms a deletion by naming it.
+ *
+ * Ids are prefixed (`gt:1`, `poly:4`) so one opaque string tells the caller which
+ * table a row came from. The frontend treats them as opaque.
+ */
+const POINT_ID_PREFIX = "gt:";
+const POLYGON_ID_PREFIX = "poly:";
+
+/**
+ * Palette for classes met in `ground_truth_point` with no `annotation_class` row.
+ *
+ * Twelve, because colour is how classes are told apart on the map and bbhotel
+ * already has twelve. Collisions past that are resolved by taking the next free
+ * entry rather than repeating one — see `backfillAnnotationClasses`.
+ */
+const DERIVED_CLASS_COLORS = [
+  "#2563eb",
+  "#dc2626",
+  "#16a34a",
+  "#d97706",
+  "#7c3aed",
+  "#0891b2",
+  "#db2777",
+  "#65a30d",
+  "#0f766e",
+  "#b91c1c",
+  "#4338ca",
+  "#a16207",
+];
+
+/**
+ * A stable colour for a class name.
+ *
+ * Deterministic rather than random: the same class keeps its colour across maps and
+ * across reloads, so a screenshot taken today still reads tomorrow.
+ */
+function derivedClassColor(name: string): string {
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash * 31 + name.charCodeAt(index)) | 0;
+  }
+  return DERIVED_CLASS_COLORS[Math.abs(hash) % DERIVED_CLASS_COLORS.length];
+}
+
+export type WorkspaceClass = {
+  name: string;
+  annotationType: "point" | "polygon";
+  color: string;
+  prompt: string | null;
+};
+
+export type WorkspaceAnnotation = {
+  id: string;
+  className: string;
+  annotationType: "point" | "polygon";
+  prompt: string | null;
+  level: string | null;
+  altitude: number | null;
+  accuracyM: number | null;
+  /** `[lng, lat]` for a point; an open ring of `[lng, lat]` for a polygon. */
+  coordinates: number[] | number[][];
+  source: Record<string, unknown> | null;
+};
+
+type AnnotationClassRow = {
+  class: string;
+  annotation_type: "point" | "polygon";
+  color: string;
+  prompt: string | null;
+};
+
+function parseJsonObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "string" || !value) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Make sure every class named by an annotation has a palette row.
+ *
+ * The 258 ground-truth points that predate the office carry a class name and no
+ * colour. Without this the office would open on annotations whose class does not
+ * exist in its own palette, so they could be neither hidden nor recoloured.
+ */
+function backfillAnnotationClasses(database: Database.Database): void {
+  const insert = database.prepare(`
+    INSERT OR IGNORE INTO annotation_class
+      (class, annotation_type, color, prompt, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  const rows = database
+    .prepare(`
+      SELECT DISTINCT class, 'point' AS annotation_type FROM ground_truth_point
+        WHERE class IS NOT NULL AND TRIM(class) <> ''
+      UNION
+      SELECT DISTINCT class, 'polygon' AS annotation_type FROM annotation_polygon
+        WHERE class IS NOT NULL AND TRIM(class) <> ''
+      ORDER BY 1, 2
+    `)
+    .all() as Array<{ class: string; annotation_type: "point" | "polygon" }>;
+  const taken = new Set(
+    (
+      database.prepare("SELECT color FROM annotation_class").all() as Array<{
+        color: string;
+      }>
+    ).map((row) => row.color.toLowerCase()),
+  );
+  for (const row of rows) {
+    // Preferred colour first, then the next free one. The row order is stable
+    // (the query sorts), so a class keeps the colour it was first given.
+    let color = derivedClassColor(row.class);
+    if (taken.has(color)) {
+      const free = DERIVED_CLASS_COLORS.find(
+        (candidate) => !taken.has(candidate.toLowerCase()),
+      );
+      color = free ?? color;
+    }
+    taken.add(color.toLowerCase());
+    insert.run(row.class, row.annotation_type, color, null, nowIso());
+  }
+}
+
+export function listWorkspaceAnnotations(map: MapEntry): {
+  classes: WorkspaceClass[];
+  annotations: WorkspaceAnnotation[];
+} {
+  return withDatabase(map, (database) => {
+    backfillAnnotationClasses(database);
+
+    const classes = (
+      database
+        .prepare(
+          "SELECT class, annotation_type, color, prompt FROM annotation_class ORDER BY class",
+        )
+        .all() as AnnotationClassRow[]
+    ).map((row) => ({
+      name: row.class,
+      annotationType: row.annotation_type,
+      color: row.color,
+      prompt: row.prompt,
+    }));
+
+    const annotations: WorkspaceAnnotation[] = [];
+    const points = database
+      .prepare(`
+        SELECT ground_truth_point_id, lng, lat, alt, level, class, prompt, accuracy,
+          extra_properties
+        FROM ground_truth_point ORDER BY ground_truth_point_id
+      `)
+      .all() as Array<{
+      ground_truth_point_id: number;
+      lng: number;
+      lat: number;
+      alt: number | null;
+      level: string | null;
+      class: string | null;
+      prompt: string | null;
+      accuracy: number | null;
+      extra_properties: string | null;
+    }>;
+    for (const point of points) {
+      const extra = parseJsonObject(point.extra_properties);
+      annotations.push({
+        id: `${POINT_ID_PREFIX}${point.ground_truth_point_id}`,
+        className: point.class ?? "",
+        annotationType: "point",
+        prompt: point.prompt,
+        level: point.level,
+        altitude: point.alt,
+        accuracyM: point.accuracy,
+        coordinates: [point.lng, point.lat],
+        source: parseJsonObject(extra?.source ? JSON.stringify(extra.source) : null),
+      });
+    }
+
+    const polygons = database
+      .prepare(`
+        SELECT annotation_polygon_id, ring, class, prompt, level, alt, accuracy
+        FROM annotation_polygon ORDER BY annotation_polygon_id
+      `)
+      .all() as Array<{
+      annotation_polygon_id: number;
+      ring: string;
+      class: string | null;
+      prompt: string | null;
+      level: string | null;
+      alt: number | null;
+      accuracy: number | null;
+    }>;
+    for (const polygon of polygons) {
+      let ring: number[][] = [];
+      try {
+        const parsed = JSON.parse(polygon.ring) as unknown;
+        ring = Array.isArray(parsed) ? (parsed as number[][]) : [];
+      } catch {
+        continue;
+      }
+      annotations.push({
+        id: `${POLYGON_ID_PREFIX}${polygon.annotation_polygon_id}`,
+        className: polygon.class ?? "",
+        annotationType: "polygon",
+        prompt: polygon.prompt,
+        level: polygon.level,
+        altitude: polygon.alt,
+        accuracyM: polygon.accuracy,
+        coordinates: ring,
+        source: null,
+      });
+    }
+
+    return { classes, annotations };
+  });
+}
+
+/**
+ * Parse one annotation off the wire, rejecting anything the tables cannot hold.
+ *
+ * Validation is here rather than in the route because a bad ring or a missing
+ * coordinate would be stored as valid JSON and only fail later, when something
+ * tries to draw or score it.
+ */
+export function parseWorkspaceAnnotation(body: Record<string, unknown>): WorkspaceAnnotation {
+  const annotationType = body.annotationType === "polygon" ? "polygon" : "point";
+  const className = typeof body.className === "string" ? body.className.trim() : "";
+  if (!className) {
+    throw new Error("An annotation needs a class name.");
+  }
+  const coordinates = body.coordinates;
+  if (annotationType === "point") {
+    if (
+      !Array.isArray(coordinates) ||
+      typeof coordinates[0] !== "number" ||
+      typeof coordinates[1] !== "number"
+    ) {
+      throw new Error("A point annotation needs [lng, lat] coordinates.");
+    }
+  } else if (
+    !Array.isArray(coordinates) ||
+    coordinates.length < 3 ||
+    !coordinates.every(
+      (point) =>
+        Array.isArray(point) &&
+        typeof point[0] === "number" &&
+        typeof point[1] === "number",
+    )
+  ) {
+    throw new Error("A polygon annotation needs at least 3 [lng, lat] vertices.");
+  }
+
+  return {
+    id: typeof body.id === "string" ? body.id : "",
+    className,
+    annotationType,
+    prompt: typeof body.prompt === "string" && body.prompt.trim() ? body.prompt.trim() : null,
+    level: typeof body.level === "string" && body.level.trim() ? body.level.trim() : null,
+    altitude: typeof body.altitude === "number" ? body.altitude : null,
+    accuracyM: typeof body.accuracyM === "number" ? body.accuracyM : null,
+    coordinates: coordinates as number[] | number[][],
+    source:
+      body.source && typeof body.source === "object" && !Array.isArray(body.source)
+        ? (body.source as Record<string, unknown>)
+        : null,
+  };
+}
+
+function insertWorkspaceAnnotation(
+  database: Database.Database,
+  annotation: WorkspaceAnnotation,
+): string {
+  if (annotation.annotationType === "point") {
+    const [lng, lat] = annotation.coordinates as number[];
+    const extra = annotation.source ? JSON.stringify({ source: annotation.source }) : null;
+    const result = database
+      .prepare(`
+        INSERT INTO ground_truth_point
+          (lng, lat, alt, level, class, prompt, accuracy, extra_properties, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        lng,
+        lat,
+        annotation.altitude,
+        annotation.level,
+        annotation.className,
+        annotation.prompt,
+        annotation.accuracyM,
+        extra,
+        nowIso(),
+      );
+    return `${POINT_ID_PREFIX}${Number(result.lastInsertRowid)}`;
+  }
+
+  const result = database
+    .prepare(`
+      INSERT INTO annotation_polygon
+        (ring, class, prompt, level, alt, accuracy, extra_properties, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      JSON.stringify(annotation.coordinates),
+      annotation.className,
+      annotation.prompt,
+      annotation.level,
+      annotation.altitude,
+      annotation.accuracyM,
+      null,
+      nowIso(),
+    );
+  return `${POLYGON_ID_PREFIX}${Number(result.lastInsertRowid)}`;
+}
+
+export function createWorkspaceAnnotation(
+  map: MapEntry,
+  annotation: WorkspaceAnnotation,
+): string {
+  return withDatabase(map, (database) => insertWorkspaceAnnotation(database, annotation));
+}
+
+/** Delete one annotation by its prefixed id. Returns false when nothing matched. */
+export function deleteWorkspaceAnnotation(map: MapEntry, id: string): boolean {
+  return withDatabase(map, (database) => {
+    if (id.startsWith(POINT_ID_PREFIX)) {
+      const result = database
+        .prepare("DELETE FROM ground_truth_point WHERE ground_truth_point_id = ?")
+        .run(Number(id.slice(POINT_ID_PREFIX.length)));
+      return result.changes > 0;
+    }
+    if (id.startsWith(POLYGON_ID_PREFIX)) {
+      const result = database
+        .prepare("DELETE FROM annotation_polygon WHERE annotation_polygon_id = ?")
+        .run(Number(id.slice(POLYGON_ID_PREFIX.length)));
+      return result.changes > 0;
+    }
+    return false;
+  });
+}
+
+/** Delete every office annotation. Classes survive: the palette is not the data. */
+export function clearWorkspaceAnnotations(map: MapEntry): number {
+  return withDatabase(map, (database) => {
+    const transaction = database.transaction(() => {
+      const points = database.prepare("DELETE FROM ground_truth_point").run().changes;
+      const polygons = database.prepare("DELETE FROM annotation_polygon").run().changes;
+      return points + polygons;
+    });
+    return transaction();
+  });
+}
+
+export function parseWorkspaceClass(body: Record<string, unknown>): WorkspaceClass {
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
+    throw new Error("A class needs a name.");
+  }
+  const color = typeof body.color === "string" ? body.color.trim() : "";
+  if (!/^#[0-9A-Fa-f]{6}$/.test(color)) {
+    throw new Error("A class colour must be a #rrggbb hex string.");
+  }
+  return {
+    name,
+    annotationType: body.annotationType === "polygon" ? "polygon" : "point",
+    color,
+    prompt: typeof body.prompt === "string" && body.prompt.trim() ? body.prompt.trim() : null,
+  };
+}
+
+/**
+ * Create a class, or rename/recolour an existing one.
+ *
+ * A rename cascades to the annotations that carry the old name, because the class
+ * is referenced by name rather than by id — `ground_truth_point.class` is the
+ * column the benchmark reads, and turning it into a foreign key would change what
+ * `buildGroundTruth` emits.
+ */
+export function upsertWorkspaceClass(
+  map: MapEntry,
+  next: WorkspaceClass,
+  original: { name: string; annotationType: "point" | "polygon" } | null,
+): void {
+  withDatabase(map, (database) => {
+    const transaction = database.transaction(() => {
+      if (original && original.name !== next.name) {
+        database
+          .prepare(
+            "DELETE FROM annotation_class WHERE class = ? AND annotation_type = ?",
+          )
+          .run(original.name, original.annotationType);
+        const table =
+          original.annotationType === "point" ? "ground_truth_point" : "annotation_polygon";
+        database
+          .prepare(`UPDATE ${table} SET class = ? WHERE class = ?`)
+          .run(next.name, original.name);
+      }
+      database
+        .prepare(`
+          INSERT INTO annotation_class (class, annotation_type, color, prompt, created_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT (class, annotation_type) DO UPDATE SET
+            color = excluded.color,
+            prompt = excluded.prompt
+        `)
+        .run(next.name, next.annotationType, next.color, next.prompt, nowIso());
+    });
+    transaction();
+  });
+}
+
+/** Delete a class and every annotation carrying it. Returns how many rows went. */
+export function deleteWorkspaceClass(
+  map: MapEntry,
+  name: string,
+  annotationType: "point" | "polygon",
+): number {
+  return withDatabase(map, (database) => {
+    const table = annotationType === "point" ? "ground_truth_point" : "annotation_polygon";
+    const transaction = database.transaction(() => {
+      const removed = database
+        .prepare(`DELETE FROM ${table} WHERE class = ?`)
+        .run(name).changes;
+      database
+        .prepare("DELETE FROM annotation_class WHERE class = ? AND annotation_type = ?")
+        .run(name, annotationType);
+      return removed;
+    });
+    return transaction();
+  });
+}
+
+/**
+ * Merge a GeoJSON FeatureCollection into the store — the file-import path.
+ *
+ * Kept because the office's only way in used to be dropping a `.geojson` on it, and
+ * a store that cannot read what the previous one wrote strands whatever people
+ * already have on disk.
+ */
+export function importWorkspaceAnnotations(
+  map: MapEntry,
+  collection: Record<string, unknown>,
+): { imported: number; skipped: number } {
+  return withDatabase(map, (database) => importCollection(database, collection));
+}
+
+/**
+ * The same merge against an open handle.
+ *
+ * Split out because the one-shot legacy import runs *inside* database open, where
+ * `withDatabase` would recurse.
+ */
+function importCollection(
+  database: Database.Database,
+  collection: Record<string, unknown>,
+): { imported: number; skipped: number } {
+  const features = Array.isArray(collection.features) ? collection.features : [];
+  {
+    let imported = 0;
+    let skipped = 0;
+    const transaction = database.transaction(() => {
+      for (const rawFeature of features) {
+        const feature = asObject(rawFeature);
+        const geometry = asObject(feature?.geometry);
+        const properties = asObject(feature?.properties) ?? {};
+        const className =
+          typeof properties.class === "string" ? properties.class.trim() : "";
+        if (!className) {
+          skipped += 1;
+          continue;
+        }
+        const {
+          class: _class,
+          prompt,
+          accuracy,
+          level,
+          altitude,
+          color,
+          ...rest
+        } = properties;
+
+        let annotation: WorkspaceAnnotation;
+        try {
+          if (geometry?.type === "Point") {
+            const coordinates = geometry.coordinates as number[];
+            annotation = parseWorkspaceAnnotation({
+              className,
+              annotationType: "point",
+              coordinates: [coordinates?.[0], coordinates?.[1]],
+              altitude:
+                typeof coordinates?.[2] === "number" ? coordinates[2] : altitude,
+              level,
+              prompt,
+              accuracyM: accuracy,
+              source: rest.source,
+            });
+          } else if (geometry?.type === "Polygon") {
+            const rings = geometry.coordinates as number[][][];
+            annotation = parseWorkspaceAnnotation({
+              className,
+              annotationType: "polygon",
+              coordinates: rings?.[0],
+              altitude,
+              level,
+              prompt,
+              accuracyM: accuracy,
+            });
+          } else {
+            skipped += 1;
+            continue;
+          }
+        } catch {
+          skipped += 1;
+          continue;
+        }
+
+        insertWorkspaceAnnotation(database, annotation);
+        database
+          .prepare(`
+            INSERT OR IGNORE INTO annotation_class
+              (class, annotation_type, color, prompt, created_at)
+            VALUES (?, ?, ?, ?, ?)
+          `)
+          .run(
+            className,
+            annotation.annotationType,
+            typeof color === "string" && /^#[0-9A-Fa-f]{6}$/.test(color)
+              ? color
+              : derivedClassColor(className),
+            annotation.prompt,
+            nowIso(),
+          );
+        imported += 1;
+      }
+    });
+    transaction();
+    return { imported, skipped };
+  }
+}
+
+/**
+ * One-shot import of `{map}/annotations/annotations.geojson`, the file this store
+ * replaces.
+ *
+ * That file was write-only: the office saved it and nothing ever read it back, so
+ * whatever is in one is work that never reached the pipeline. Importing it once,
+ * and recording that in `meta`, is what stops the migration from silently dropping
+ * it. Neither map in use here has one, so this is for the ones that might.
+ */
+function importOfficeGeoJsonOnce(database: Database.Database, map: MapEntry): void {
+  const alreadyImported = database
+    .prepare("SELECT value FROM meta WHERE key = ?")
+    .get(OFFICE_IMPORTED_KEY);
+  if (alreadyImported) {
+    return;
+  }
+  const markImported = database.prepare(
+    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+  );
+  const officePath = path.join(map.path, "annotations", "annotations.geojson");
+  if (!existsSync(officePath)) {
+    markImported.run(OFFICE_IMPORTED_KEY, nowIso());
+    return;
+  }
+  try {
+    copyFileSync(officePath, `${officePath}.pre-import.bak`);
+  } catch {
+    // Best-effort, as for the benchmark import: a missing backup must not block.
+  }
+  try {
+    const parsed = asObject(JSON.parse(readFileSync(officePath, "utf8")));
+    if (parsed) {
+      importCollection(database, parsed);
+    }
+  } catch {
+    // A malformed file is left on disk untouched rather than retried every open.
+  }
+  markImported.run(OFFICE_IMPORTED_KEY, nowIso());
 }

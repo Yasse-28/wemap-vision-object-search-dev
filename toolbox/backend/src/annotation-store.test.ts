@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,11 +10,19 @@ import Database from "better-sqlite3";
 import {
   annotationDatabasePath,
   buildGroundTruth,
+  clearWorkspaceAnnotations,
   closeAnnotationDatabase,
+  createWorkspaceAnnotation,
   deleteDetectionReview,
+  deleteWorkspaceAnnotation,
+  deleteWorkspaceClass,
   listAnnotations,
+  listWorkspaceAnnotations,
   parseReviewMutation,
+  parseWorkspaceAnnotation,
+  parseWorkspaceClass,
   upsertDetectionReview,
+  upsertWorkspaceClass,
 } from "./annotation-store.js";
 import type { MapEntry } from "./config.js";
 import { WorkbenchRouteError } from "./workbench-index.js";
@@ -194,4 +203,282 @@ test("validates review payloads at the Toolbox API boundary", () => {
       ),
     (error: unknown) => error instanceof WorkbenchRouteError && error.status === 422,
   );
+});
+
+// ---------------------------------------------------------------------------
+// The Annotation office, now backed by the store instead of a GeoJSON file
+// ---------------------------------------------------------------------------
+
+test("a point annotation is stored as benchmark ground truth", async () => {
+  const fixture = await createMap();
+  try {
+    const id = createWorkspaceAnnotation(
+      fixture.map,
+      parseWorkspaceAnnotation({
+        className: "fire extinguisher",
+        annotationType: "point",
+        coordinates: [2.35, 48.85],
+        altitude: 3.5,
+        level: "1",
+        prompt: "red fire extinguisher",
+        accuracyM: 2,
+        source: { keyframeId: "42", depthM: 4.2 },
+      }),
+    );
+    assert.ok(id.startsWith("gt:"));
+
+    // The point is what the benchmark scores against — that is the whole reason
+    // this went into `ground_truth_point` rather than a table of its own.
+    const groundTruth = buildGroundTruth(fixture.map);
+    assert.equal(groundTruth.features.length, 1);
+    const feature = groundTruth.features[0] as Record<string, unknown>;
+    const properties = feature.properties as Record<string, unknown>;
+    assert.equal(properties.class, "fire extinguisher");
+    assert.equal(properties.prompt, "red fire extinguisher");
+    assert.deepEqual(
+      (feature.geometry as Record<string, unknown>).coordinates,
+      [2.35, 48.85, 3.5],
+    );
+
+    const stored = listWorkspaceAnnotations(fixture.map);
+    assert.equal(stored.annotations.length, 1);
+    assert.equal(stored.annotations[0].id, id);
+    assert.deepEqual(stored.annotations[0].source, {
+      keyframeId: "42",
+      depthM: 4.2,
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a polygon annotation stays out of the ground truth", async () => {
+  const fixture = await createMap();
+  try {
+    createWorkspaceAnnotation(
+      fixture.map,
+      parseWorkspaceAnnotation({
+        className: "zone",
+        annotationType: "polygon",
+        coordinates: [
+          [2.35, 48.85],
+          [2.36, 48.85],
+          [2.36, 48.86],
+        ],
+      }),
+    );
+
+    // A polygon has no single position to score a localization against.
+    assert.equal(buildGroundTruth(fixture.map).features.length, 0);
+    const stored = listWorkspaceAnnotations(fixture.map);
+    assert.equal(stored.annotations.length, 1);
+    assert.equal(stored.annotations[0].annotationType, "polygon");
+    assert.equal((stored.annotations[0].coordinates as number[][]).length, 3);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("malformed geometry is refused rather than stored", async () => {
+  assert.throws(
+    () => parseWorkspaceAnnotation({ className: "x", coordinates: [2.35] }),
+    /\[lng, lat\]/,
+  );
+  assert.throws(
+    () =>
+      parseWorkspaceAnnotation({
+        className: "x",
+        annotationType: "polygon",
+        coordinates: [[2.35, 48.85], [2.36, 48.85]],
+      }),
+    /at least 3/,
+  );
+  assert.throws(
+    () => parseWorkspaceAnnotation({ className: "  ", coordinates: [2.35, 48.85] }),
+    /class name/,
+  );
+});
+
+test("classes existing only in the ground truth are given a palette entry", async () => {
+  const fixture = await createMap();
+  try {
+    // Points that predate the office: a class name, no colour. Without the
+    // backfill the office would render annotations whose class it cannot list.
+    listWorkspaceAnnotations(fixture.map); // creates the schema
+    closeAnnotationDatabase(fixture.map);
+    const database = new Database(annotationDatabasePath(fixture.map));
+    database
+      .prepare(
+        "INSERT INTO ground_truth_point (lng, lat, class, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(2.35, 48.85, "legacy class", new Date().toISOString());
+    database.close();
+    closeAnnotationDatabase(fixture.map);
+
+    const stored = listWorkspaceAnnotations(fixture.map);
+    assert.equal(stored.annotations.length, 1);
+    const derived = stored.classes.find((item) => item.name === "legacy class");
+    assert.ok(derived, "the class should have been backfilled");
+    assert.match(derived.color, /^#[0-9a-f]{6}$/);
+    // Deterministic, so a class keeps its colour across reloads and maps.
+    assert.equal(
+      listWorkspaceAnnotations(fixture.map).classes.find(
+        (item) => item.name === "legacy class",
+      )?.color,
+      derived.color,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("renaming a class moves its annotations with it", async () => {
+  const fixture = await createMap();
+  try {
+    createWorkspaceAnnotation(
+      fixture.map,
+      parseWorkspaceAnnotation({
+        className: "extinguisher",
+        coordinates: [2.35, 48.85],
+      }),
+    );
+    upsertWorkspaceClass(
+      fixture.map,
+      parseWorkspaceClass({
+        name: "fire extinguisher",
+        color: "#123456",
+        annotationType: "point",
+      }),
+      { name: "extinguisher", annotationType: "point" },
+    );
+
+    const stored = listWorkspaceAnnotations(fixture.map);
+    assert.equal(stored.annotations[0].className, "fire extinguisher");
+    assert.deepEqual(
+      stored.classes.map((item) => item.name),
+      ["fire extinguisher"],
+    );
+    // The benchmark reads `class`, so the rename has to reach it.
+    const properties = (buildGroundTruth(fixture.map).features[0] as Record<string, unknown>)
+      .properties as Record<string, unknown>;
+    assert.equal(properties.class, "fire extinguisher");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("deleting a class removes its annotations, and only its own", async () => {
+  const fixture = await createMap();
+  try {
+    createWorkspaceAnnotation(
+      fixture.map,
+      parseWorkspaceAnnotation({ className: "a", coordinates: [2.35, 48.85] }),
+    );
+    createWorkspaceAnnotation(
+      fixture.map,
+      parseWorkspaceAnnotation({ className: "b", coordinates: [2.36, 48.86] }),
+    );
+
+    assert.equal(deleteWorkspaceClass(fixture.map, "a", "point"), 1);
+    const stored = listWorkspaceAnnotations(fixture.map);
+    assert.deepEqual(
+      stored.annotations.map((item) => item.className),
+      ["b"],
+    );
+    assert.deepEqual(
+      stored.classes.map((item) => item.name),
+      ["b"],
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("deleting one annotation, and clearing them all", async () => {
+  const fixture = await createMap();
+  try {
+    const first = createWorkspaceAnnotation(
+      fixture.map,
+      parseWorkspaceAnnotation({ className: "a", coordinates: [2.35, 48.85] }),
+    );
+    createWorkspaceAnnotation(
+      fixture.map,
+      parseWorkspaceAnnotation({
+        className: "a",
+        annotationType: "polygon",
+        coordinates: [
+          [2.35, 48.85],
+          [2.36, 48.85],
+          [2.36, 48.86],
+        ],
+      }),
+    );
+
+    assert.equal(deleteWorkspaceAnnotation(fixture.map, first), true);
+    assert.equal(deleteWorkspaceAnnotation(fixture.map, first), false);
+    assert.equal(listWorkspaceAnnotations(fixture.map).annotations.length, 1);
+
+    // Both tables go; the palette survives, because it is not the data.
+    assert.equal(clearWorkspaceAnnotations(fixture.map), 1);
+    const stored = listWorkspaceAnnotations(fixture.map);
+    assert.equal(stored.annotations.length, 0);
+    assert.equal(stored.classes.length, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("the legacy annotations.geojson is imported once, and backed up", async () => {
+  const fixture = await createMap();
+  try {
+    await mkdir(path.join(fixture.map.path, "annotations"), { recursive: true });
+    const legacyPath = path.join(
+      fixture.map.path,
+      "annotations",
+      "annotations.geojson",
+    );
+    await writeFile(
+      legacyPath,
+      JSON.stringify({
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            geometry: { type: "Point", coordinates: [2.35, 48.85, 3] },
+            properties: { class: "extinguisher", prompt: "red", color: "#abcdef" },
+          },
+          {
+            type: "Feature",
+            geometry: {
+              type: "Polygon",
+              coordinates: [[[2.35, 48.85], [2.36, 48.85], [2.36, 48.86]]],
+            },
+            properties: { class: "zone" },
+          },
+          // No class: nothing to file it under, so it is skipped rather than guessed.
+          {
+            type: "Feature",
+            geometry: { type: "Point", coordinates: [2.37, 48.87] },
+            properties: {},
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const stored = listWorkspaceAnnotations(fixture.map);
+    assert.equal(stored.annotations.length, 2);
+    assert.equal(
+      stored.classes.find((item) => item.name === "extinguisher")?.color,
+      "#abcdef",
+    );
+    assert.equal(stored.annotations[0].altitude, 3);
+
+    // A second open must not import it again.
+    closeAnnotationDatabase(fixture.map);
+    assert.equal(listWorkspaceAnnotations(fixture.map).annotations.length, 2);
+    assert.ok(existsSync(`${legacyPath}.pre-import.bak`));
+  } finally {
+    await fixture.cleanup();
+  }
 });

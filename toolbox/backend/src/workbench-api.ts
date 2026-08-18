@@ -1,12 +1,19 @@
-import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import path from "node:path";
 
 import {
+  clearWorkspaceAnnotations,
+  createWorkspaceAnnotation,
   deleteDetectionReview,
+  deleteWorkspaceAnnotation,
+  deleteWorkspaceClass,
+  importWorkspaceAnnotations,
+  listWorkspaceAnnotations,
+  parseWorkspaceAnnotation,
+  parseWorkspaceClass,
   listAnnotations,
   parseReviewMutation,
   upsertDetectionReview,
+  upsertWorkspaceClass,
 } from "./annotation-store.js";
 import {
   benchmarkRunPayload,
@@ -104,36 +111,12 @@ async function findMap(configPath: string, mapId: string): Promise<MapEntry | nu
   return maps.find((item) => item.id === mapId) ?? null;
 }
 
-async function saveAnnotations(
-  map: MapEntry,
-  body: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  if (body.type !== "FeatureCollection" || !Array.isArray(body.features)) {
-    throw new WorkbenchRouteError(400, "Annotations must be a GeoJSON FeatureCollection.");
-  }
-  const annotationsDir = path.join(map.path, "annotations");
-  const annotationsPath = path.join(annotationsDir, "annotations.geojson");
-  const temporaryPath = path.join(
-    annotationsDir,
-    `.annotations.geojson.${process.pid}.${Date.now()}.tmp`,
-  );
-  await mkdir(annotationsDir, { recursive: true });
-  let renamed = false;
-  try {
-    await writeFile(temporaryPath, `${JSON.stringify(body, null, 2)}\n`, "utf8");
-    await rename(temporaryPath, annotationsPath);
-    renamed = true;
-  } finally {
-    if (!renamed) {
-      await unlink(temporaryPath).catch(() => {});
-    }
-  }
-  return {
-    saved: true,
-    annotation_count: body.features.length,
-    path: annotationsPath,
-    relative_path: "annotations/annotations.geojson",
-  };
+
+/** A nested object off a JSON body, or an empty one — the parsers validate it. */
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 export function isWorkbenchUiMapRoute(pathname: string): boolean {
@@ -197,8 +180,73 @@ export async function handleWorkbenchUiMapRoute(
       );
       return true;
     }
+    if (method === "GET" && suffix === "/annotations") {
+      sendJson(response, 200, listWorkspaceAnnotations(map));
+      return true;
+    }
+    // A whole FeatureCollection in: the file-import path. It merges rather than
+    // replaces, matching what dropping a file on the office always did.
     if (method === "POST" && suffix === "/annotations") {
-      sendJson(response, 200, await saveAnnotations(map, await requestJson(request)));
+      sendJson(response, 200, importWorkspaceAnnotations(map, await requestJson(request)));
+      return true;
+    }
+    if (method === "DELETE" && suffix === "/annotations") {
+      sendJson(response, 200, { deleted: clearWorkspaceAnnotations(map) });
+      return true;
+    }
+    if (method === "POST" && suffix === "/annotations/annotation") {
+      const body = await requestJson(request);
+      let annotation;
+      try {
+        annotation = parseWorkspaceAnnotation(body);
+      } catch (error) {
+        throw new WorkbenchRouteError(400, (error as Error).message);
+      }
+      sendJson(response, 201, { id: createWorkspaceAnnotation(map, annotation) });
+      return true;
+    }
+    if (method === "DELETE" && suffix === "/annotations/annotation") {
+      const body = await requestJson(request);
+      const id = typeof body.id === "string" ? body.id : "";
+      if (!id) {
+        throw new WorkbenchRouteError(400, "An annotation id is required.");
+      }
+      sendJson(response, 200, { deleted: deleteWorkspaceAnnotation(map, id) });
+      return true;
+    }
+    if (method === "POST" && suffix === "/annotations/class") {
+      const body = await requestJson(request);
+      let next;
+      try {
+        next = parseWorkspaceClass(asRecord(body.class));
+      } catch (error) {
+        throw new WorkbenchRouteError(400, (error as Error).message);
+      }
+      const rawOriginal = body.original ? asRecord(body.original) : null;
+      const original =
+        rawOriginal && typeof rawOriginal.name === "string"
+          ? {
+              name: rawOriginal.name,
+              annotationType:
+                rawOriginal.annotationType === "polygon"
+                  ? ("polygon" as const)
+                  : ("point" as const),
+            }
+          : null;
+      upsertWorkspaceClass(map, next, original);
+      sendJson(response, 200, { saved: true });
+      return true;
+    }
+    if (method === "DELETE" && suffix === "/annotations/class") {
+      const body = await requestJson(request);
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      if (!name) {
+        throw new WorkbenchRouteError(400, "A class name is required.");
+      }
+      const annotationType = body.annotationType === "polygon" ? "polygon" : "point";
+      sendJson(response, 200, {
+        deleted: deleteWorkspaceClass(map, name, annotationType),
+      });
       return true;
     }
     if (method === "GET" && suffix === "/review-annotations") {

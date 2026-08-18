@@ -67,9 +67,25 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
 - `index-explorer/` — `api.ts` + `types.ts` only, shared by both panels. The
   directory name is a leftover of `IndexExplorerPanel.tsx`/`LatentScatter.tsx`, which
   were never mounted and were deleted with this migration.
-- `annotations/` — point/polygon annotations → `annotations/annotations.geojson`
-  (`ExplorerAnnotationWorkspace.tsx`, `geojson.ts`, `LivemapAnnotation.tsx`,
-  `livemapHost.ts`).
+- `annotations/` — point/polygon annotations, **in `object-search-annotations.db`**
+  (`api.ts`, `ExplorerAnnotationWorkspace.tsx`, `LivemapAnnotation.tsx`,
+  `livemapHost.ts`; `geojson.ts` is now only the "Save As…" download). They used to
+  go to `annotations/annotations.geojson`, a file **nothing ever read back**: the
+  office opened empty every time, its work had to be re-imported by hand, and it
+  never reached the benchmark. Points are now stored as `ground_truth_point` — they
+  *are* the positional ground truth the benchmark scores against, so the office is
+  its editor: opening it shows the map's existing points (258 on vinci, 674 on
+  bbhotel) and deleting one removes it from the benchmark, which is why the UI says
+  so. Polygons get `annotation_polygon`, out of the ground truth: they have no
+  single position to score a localization against. The palette lives in
+  `annotation_class`, so a class created and not yet drawn on survives a reload;
+  classes met only in pre-existing ground truth are backfilled with a deterministic,
+  collision-free colour. Loading is automatic and every create/delete/rename writes
+  through — the "Save" button is gone, the file import stays as the way in for an
+  old file. `canonicalLevel` and `pointInPolygon` moved out to
+  `annotations/geometry.ts` when the export needed the same floor rule and the
+  same ray cast; two copies that must agree with the backend's is exactly the
+  drift this file exists to prevent.
 - `object-search-review/` — detection-review API client, review controls, and
   per-query TP/FP state with undo/redo whose history survives a re-search. Its
   per-query annotation list is independent of displayed results, and counters
