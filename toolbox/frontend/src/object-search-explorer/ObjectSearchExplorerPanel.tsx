@@ -188,9 +188,10 @@ function ProjectionConfidence(props: {
     ? props.projection.feature_match_score
     : null;
   const featureStatus = props.projection.feature_match_status ?? "unavailable";
-  const ssimScore = typeof props.projection.appearance_ssim_score === "number"
-    ? props.projection.appearance_ssim_score
+  const edgeNccScore = typeof props.projection.edge_ncc_score === "number"
+    ? props.projection.edge_ncc_score
     : null;
+  const edgeNccStatus = props.projection.edge_ncc_status ?? "unavailable";
   const geometry = confidenceBand(props.projection.geometric_confidence);
   const visibility = props.projection.occlusion_confidence === null
     ? null
@@ -198,7 +199,7 @@ function ProjectionConfidence(props: {
   const features = featureScore === null
     ? null
     : confidenceBand(featureScore);
-  const appearance = ssimScore === null ? null : confidenceBand(ssimScore);
+  const appearance = edgeNccScore === null ? null : confidenceBand(edgeNccScore);
   const geometryTitle = [
     `Source distance ${props.projection.distance_score}%`,
     `view angle ${props.projection.view_angle_score}% (${props.projection.viewpoint_angle_deg.toFixed(1)}°)`,
@@ -210,9 +211,11 @@ function ProjectionConfidence(props: {
   const featureTitle = featureScore === null
     ? "SIFT matching is unavailable."
     : `${props.projection.feature_inliers} geometric inliers from ${props.projection.feature_matches} ratio-test matches`;
-  const appearanceTitle = ssimScore === null
-    ? "SSIM appearance comparison is unavailable."
-    : "Translation-aligned structural similarity over the projected proposal region.";
+  const appearanceTitle = edgeNccStatus === "uninformative"
+    ? "The proposal region does not contain enough edge structure for NCC."
+    : edgeNccScore === null
+      ? "Edge NCC comparison is unavailable."
+      : "Conservative gradient correlation over the proposal region; low scores can result from viewpoint changes.";
 
   return (
     <span className="object-search-projection-confidence">
@@ -281,14 +284,18 @@ function ProjectionConfidence(props: {
         title={appearanceTitle}
       >
         <span className="object-search-confidence-heading">
-          <span>SSIM</span>
+          <span>Edge NCC</span>
           <strong>
-            {appearance ? `${appearance.label} · ${ssimScore}%` : "Unavailable"}
+            {edgeNccStatus === "uninformative"
+              ? "Uninformative"
+              : appearance
+                ? `${appearance.label} · ${edgeNccScore}%`
+                : "Unavailable"}
           </strong>
         </span>
         <span className="object-search-confidence-meter" aria-hidden="true">
-          {ssimScore !== null ? (
-            <span style={{ width: `${ssimScore}%` }} />
+          {edgeNccScore !== null ? (
+            <span style={{ width: `${edgeNccScore}%` }} />
           ) : null}
         </span>
       </span>

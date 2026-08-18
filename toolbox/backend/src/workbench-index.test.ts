@@ -8,8 +8,8 @@ import type { MapEntry } from "./config.js";
 import { parseManifest } from "./map-manifest.js";
 import type { MetadataRow } from "./object-search-metadata.js";
 import {
-  appearanceSsimAssessment,
   columnarKeyframeMarkers,
+  edgeNccAssessment,
   featureMatchAssessment,
   indexProjectWorldPointPayload,
   keyframeHeadingDegreesFromPose,
@@ -228,18 +228,18 @@ test("feature confidence requires both verified support and a clean inlier ratio
   assert.equal(textureless.feature_match_score, 0);
 });
 
-test("SSIM confidence clamps similarity and reports availability", () => {
-  assert.deepEqual(appearanceSsimAssessment(0.824), {
-    appearance_ssim_score: 82,
-    appearance_ssim_status: "matched",
+test("Edge NCC confidence clamps correlation and rejects uninformative input", () => {
+  assert.deepEqual(edgeNccAssessment(0.824), {
+    edge_ncc_score: 82,
+    edge_ncc_status: "matched",
   });
-  assert.deepEqual(appearanceSsimAssessment(-0.4), {
-    appearance_ssim_score: 0,
-    appearance_ssim_status: "weak",
+  assert.deepEqual(edgeNccAssessment(-0.4), {
+    edge_ncc_score: 0,
+    edge_ncc_status: "weak",
   });
-  assert.deepEqual(appearanceSsimAssessment(null), {
-    appearance_ssim_score: null,
-    appearance_ssim_status: "unavailable",
+  assert.deepEqual(edgeNccAssessment(null), {
+    edge_ncc_score: null,
+    edge_ncc_status: "uninformative",
   });
 });
 

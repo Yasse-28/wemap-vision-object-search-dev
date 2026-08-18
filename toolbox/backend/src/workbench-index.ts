@@ -1075,8 +1075,8 @@ export type ProposalNeighborProjection = {
   feature_inliers: number;
   feature_inlier_ratio: number | null;
   feature_match_status: "matched" | "weak" | "no_features" | "unavailable";
-  appearance_ssim_score: number | null;
-  appearance_ssim_status: "matched" | "weak" | "unavailable";
+  edge_ncc_score: number | null;
+  edge_ncc_status: "matched" | "weak" | "uninformative" | "unavailable";
 };
 
 type ProposalProjectionGeometry = {
@@ -1218,8 +1218,8 @@ function projectProposalIntoKeyframe(
     feature_inliers: 0,
     feature_inlier_ratio: null,
     feature_match_status: "unavailable",
-    appearance_ssim_score: null,
-    appearance_ssim_status: "unavailable",
+    edge_ncc_score: null,
+    edge_ncc_status: "unavailable",
   };
 }
 
@@ -1278,19 +1278,25 @@ export function featureMatchAssessment(
   };
 }
 
-export function appearanceSsimAssessment(
+export function edgeNccAssessment(
   rawScore: number | null,
-): AppearanceSsimAssessment {
-  if (rawScore === null || !Number.isFinite(rawScore)) {
+): EdgeNccAssessment {
+  if (rawScore === null) {
     return {
-      appearance_ssim_score: null,
-      appearance_ssim_status: "unavailable",
+      edge_ncc_score: null,
+      edge_ncc_status: "uninformative",
+    };
+  }
+  if (!Number.isFinite(rawScore)) {
+    return {
+      edge_ncc_score: null,
+      edge_ncc_status: "unavailable",
     };
   }
   const score = confidencePercent(rawScore);
   return {
-    appearance_ssim_score: score,
-    appearance_ssim_status: score >= 60 ? "matched" : "weak",
+    edge_ncc_score: score,
+    edge_ncc_status: score >= 60 ? "matched" : "weak",
   };
 }
 
@@ -1405,8 +1411,8 @@ export async function proposalNeighborProjectionsPayload(
         : "Views are the strictly nearest keyframes; no minimum spacing is applied."} Geometric `
       + "confidence combines distance, viewpoint angle and apparent size. Visibility "
       + "compares the projected distance with target depth. Feature match uses "
-      + "COLMAP-style SIFT ratio matching with geometric verification. Appearance "
-      + "uses translation-aligned SSIM on the projected proposal region.",
+      + "COLMAP-style SIFT ratio matching with geometric verification. Edge NCC "
+      + "compares proposal gradients and rejects low-structure regions.",
   };
 }
 
@@ -1731,18 +1737,18 @@ type FeatureMatchAssessment = Pick<
   | "feature_match_status"
 >;
 
-type AppearanceSsimAssessment = Pick<
+type EdgeNccAssessment = Pick<
   ProposalNeighborProjection,
-  "appearance_ssim_score" | "appearance_ssim_status"
+  "edge_ncc_score" | "edge_ncc_status"
 >;
 
-type ProjectionVisualAssessment = FeatureMatchAssessment & AppearanceSsimAssessment;
+type ProjectionVisualAssessment = FeatureMatchAssessment & EdgeNccAssessment;
 
 type RawFeatureMatch = {
   matches: number;
   inliers: number;
   has_features: boolean;
-  ssim: number | null;
+  edge_ncc: number | null;
 };
 
 const FEATURE_MATCH_SCRIPT = String.raw`
@@ -1784,7 +1790,7 @@ def proposal_region(image):
 
 
 def appearance_region(image):
-    # The exact proposal spans half of a 2x-FOV render. SSIM uses that region,
+    # The exact proposal spans half of a 2x-FOV render. Edge NCC uses that region,
     # while SIFT keeps the slightly wider crop above for geometric tolerance.
     height, width = image.shape[:2]
     quarter_height = max(1, height // 4)
@@ -1797,54 +1803,75 @@ def appearance_region(image):
     ]
 
 
-def ssim(left, right):
-    left_float = left.astype(np.float32)
-    right_float = right.astype(np.float32)
-    mu_left = cv2.GaussianBlur(left_float, (11, 11), 1.5)
-    mu_right = cv2.GaussianBlur(right_float, (11, 11), 1.5)
-    mu_left_sq = mu_left * mu_left
-    mu_right_sq = mu_right * mu_right
-    mu_cross = mu_left * mu_right
-    sigma_left = cv2.GaussianBlur(left_float * left_float, (11, 11), 1.5) - mu_left_sq
-    sigma_right = (
-        cv2.GaussianBlur(right_float * right_float, (11, 11), 1.5)
-        - mu_right_sq
+def gradient_map(image):
+    image_float = cv2.GaussianBlur(image, (5, 5), 1.0).astype(np.float32)
+    return cv2.magnitude(
+        cv2.Sobel(image_float, cv2.CV_32F, 1, 0, ksize=3),
+        cv2.Sobel(image_float, cv2.CV_32F, 0, 1, ksize=3),
     )
-    sigma_cross = (
-        cv2.GaussianBlur(left_float * right_float, (11, 11), 1.5)
-        - mu_cross
-    )
-    c1 = (0.01 * 255.0) ** 2
-    c2 = (0.03 * 255.0) ** 2
-    numerator = (2.0 * mu_cross + c1) * (2.0 * sigma_cross + c2)
-    denominator = (mu_left_sq + mu_right_sq + c1) * (
-        sigma_left + sigma_right + c2
-    )
-    return float(np.mean(numerator / np.maximum(denominator, 1e-6)))
 
 
-def aligned_ssim(source, target):
+def channel_ncc(left, right):
+    left_centered = left - float(np.mean(left))
+    right_centered = right - float(np.mean(right))
+    left_norm = float(np.linalg.norm(left_centered))
+    right_norm = float(np.linalg.norm(right_centered))
+    if left_norm < 1e-6 or right_norm < 1e-6:
+        return None
+    return float(np.sum(left_centered * right_centered) / (left_norm * right_norm))
+
+
+def edge_ncc(source_edges, target_edges):
+    correlation = channel_ncc(source_edges, target_edges)
+    if correlation is None:
+        return None
+    return max(0.0, min(1.0, correlation))
+
+
+def has_structure(edges):
+    return float(np.mean(edges > 12.0)) >= 0.01
+
+
+def aligned_edge_ncc(source, target):
     # Projection already normalises scale and centre. A small translation search
-    # absorbs residual pose/depth error without letting unrelated context win.
+    # absorbs residual pose/depth error. Shift cost prevents best-of-N inflation.
     size = 160
     source_small = cv2.resize(source, (size, size), interpolation=cv2.INTER_AREA)
     target_small = cv2.resize(target, (size, size), interpolation=cv2.INTER_AREA)
+    source_edges = gradient_map(source_small)
+    target_edges = gradient_map(target_small)
+    if not has_structure(source_edges) or not has_structure(target_edges):
+        return None
     max_shift = 8
-    best = -1.0
+    best = 0.0
     for dy in (-max_shift, -max_shift // 2, 0, max_shift // 2, max_shift):
         for dx in (-max_shift, -max_shift // 2, 0, max_shift // 2, max_shift):
             source_y = slice(max(0, dy), min(size, size + dy))
             target_y = slice(max(0, -dy), min(size, size - dy))
             source_x = slice(max(0, dx), min(size, size + dx))
             target_x = slice(max(0, -dx), min(size, size - dx))
-            best = max(
-                best,
-                ssim(
-                    source_small[source_y, source_x],
-                    target_small[target_y, target_x],
-                ),
+            correlation = edge_ncc(
+                source_edges[source_y, source_x],
+                target_edges[target_y, target_x],
             )
+            if correlation is None:
+                continue
+            shift_ratio = float(np.hypot(dx, dy)) / (np.sqrt(2.0) * max_shift)
+            best = max(best, correlation - 0.10 * shift_ratio)
     return max(0.0, min(1.0, best))
+
+
+def proposal_inner_region(image):
+    # appearance_region(full 2x FOV) is 5/6 of proposal_region(full 2x FOV).
+    height, width = image.shape[:2]
+    half_height = max(1, int(height * 5.0 / 12.0))
+    half_width = max(1, int(width * 5.0 / 12.0))
+    center_y = height // 2
+    center_x = width // 2
+    return image[
+        center_y - half_height:center_y + half_height,
+        center_x - half_width:center_x + half_width,
+    ]
 
 
 def match_target(
@@ -1855,7 +1882,11 @@ def match_target(
 ):
     target_full = decode_gray(target_encoded)
     target = proposal_region(target_full)
-    appearance = aligned_ssim(source_appearance, appearance_region(target_full))
+    appearance_target = appearance_region(target_full)
+    appearance = aligned_edge_ncc(
+        source_appearance,
+        appearance_target,
+    )
     target_keypoints, target_descriptors = extract_sift(target)
     if (
         source_descriptors is None
@@ -1867,7 +1898,7 @@ def match_target(
             "matches": 0,
             "inliers": 0,
             "has_features": False,
-            "ssim": appearance,
+            "edge_ncc": appearance,
         }
 
     # COLMAP's SIFT_BRUTEFORCE matcher uses L2 descriptors and a 0.8 ratio test.
@@ -1889,7 +1920,7 @@ def match_target(
         target_points = np.float32(
             [target_keypoints[item.trainIdx].pt for item in matches]
         ).reshape(-1, 1, 2)
-        _, mask = cv2.findHomography(
+        homography, mask = cv2.findHomography(
             source_points,
             target_points,
             cv2.RANSAC,
@@ -1899,12 +1930,25 @@ def match_target(
         )
         if mask is not None:
             inliers = int(mask.ravel().sum())
+            inlier_ratio = inliers / len(matches)
+            if homography is not None and inliers >= 6 and inlier_ratio >= 0.4:
+                aligned_target = cv2.warpPerspective(
+                    target,
+                    homography,
+                    (target.shape[1], target.shape[0]),
+                    flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                    borderMode=cv2.BORDER_REFLECT,
+                )
+                appearance = aligned_edge_ncc(
+                    source_appearance,
+                    proposal_inner_region(aligned_target),
+                )
 
     return {
         "matches": len(matches),
         "inliers": inliers,
         "has_features": True,
-        "ssim": appearance,
+        "edge_ncc": appearance,
     }
 
 
@@ -2195,7 +2239,7 @@ async function runFeatureMatchPython(
   const raw = JSON.parse(Buffer.concat(stdout).toString("utf8")) as RawFeatureMatch[];
   return raw.map((item) => ({
     ...featureMatchAssessment(item.matches, item.inliers, item.has_features),
-    ...appearanceSsimAssessment(item.ssim),
+    ...edgeNccAssessment(item.edge_ncc),
   }));
 }
 

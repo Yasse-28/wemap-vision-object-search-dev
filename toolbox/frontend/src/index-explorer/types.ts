@@ -205,8 +205,8 @@ export type ProposalNeighborProjection = {
   feature_inliers: number;
   feature_inlier_ratio: number | null;
   feature_match_status: "matched" | "weak" | "no_features" | "unavailable";
-  appearance_ssim_score: number | null;
-  appearance_ssim_status: "matched" | "weak" | "unavailable";
+  edge_ncc_score: number | null;
+  edge_ncc_status: "matched" | "weak" | "uninformative" | "unavailable";
 };
 
 export type ProposalNeighborProjectionsResponse = {
