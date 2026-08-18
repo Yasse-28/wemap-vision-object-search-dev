@@ -32,7 +32,6 @@ import {
   fetchKeyframeGraph,
   fetchMetadataKeyframes,
   fetchMetadataMarkers,
-  fetchMetadataRow,
   fetchMetadataRows,
   fetchMetadataStatus,
   indexKeyframeDepthPreviewUrl,
@@ -48,7 +47,6 @@ import type {
   KeyframeMarker,
   KeyframeSummary,
   MetadataKeyframesResponse,
-  MetadataRowDetail,
   MetadataRowRecord,
   MetadataStatusResponse,
   MetadataSummary,
@@ -177,8 +175,6 @@ function ObjectSearchExplorerPanel(props: Props) {
   const [isResizingVisualSplit, setIsResizingVisualSplit] = useState(false);
 
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
-  const [rowDetail, setRowDetail] = useState<MetadataRowDetail | null>(null);
-  const [isLoadingRow, setIsLoadingRow] = useState(false);
   const [equirectPreviewError, setEquirectPreviewError] = useState<string | null>(null);
   const [equirectPreviewSrc, setEquirectPreviewSrc] = useState<string | null>(null);
   const [equirectPreviewKeyframeId, setEquirectPreviewKeyframeId] = useState<string | null>(null);
@@ -1135,35 +1131,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     );
   }, [pageRowIndexKey]);
 
-  useEffect(() => {
-    if (selectedRowIndex === null || !status?.available) {
-      setRowDetail(null);
-      return;
-    }
-    let cancelled = false;
-    setIsLoadingRow(true);
-    fetchMetadataRow(props.mapId, selectedRowIndex)
-      .then((payload) => {
-        if (!cancelled) {
-          setRowDetail(payload);
-        }
-      })
-      .catch((err: Error) => {
-        if (!cancelled) {
-          setError(err.message);
-          setRowDetail(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setIsLoadingRow(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.mapId, selectedRowIndex, status?.available]);
-
   if (!props.isMapKnown) {
     return (
       <section className="object-search-explorer-panel page-section">
@@ -1209,7 +1176,7 @@ function ObjectSearchExplorerPanel(props: Props) {
 
   const totalRows = summary?.row_count ?? 0;
   const selectedDetection =
-    pageRows.find((row) => row.row_index === selectedRowIndex) ?? rowDetail?.row ?? null;
+    pageRows.find((row) => row.row_index === selectedRowIndex) ?? null;
   const activeKeyframeIndex = activeKeyframeId
     ? navigableKeyframeIds.indexOf(activeKeyframeId)
     : -1;
@@ -2324,19 +2291,11 @@ function ObjectSearchExplorerPanel(props: Props) {
                 onReset={resetBboxPostProcess}
               />
 
-              {isLoadingRow ? <p className="muted">Loading row metadata...</p> : null}
-
               {rawDetections.length && !filteredDetections.length ? (
                 <p className="info-box">
                   All proposals were removed by the current post-processing filters.
                 </p>
               ) : null}
-
-              <CollapsibleSection title="Selected row JSON" defaultOpen={false}>
-                <pre className="debug-json">
-                  {JSON.stringify(selectedDetection, null, 2)}
-                </pre>
-              </CollapsibleSection>
 
               <CollapsibleSection
                 title="Proposals in this keyframe"
@@ -2392,11 +2351,6 @@ function ObjectSearchExplorerPanel(props: Props) {
                 </div>
               </CollapsibleSection>
 
-              <CollapsibleSection title="Preview debug" defaultOpen={false}>
-                <pre className="debug-json">
-                  {JSON.stringify(rowDetail?.preview_debug ?? {}, null, 2)}
-                </pre>
-              </CollapsibleSection>
             </>
           ) : (
             <p className="muted">Select a proposal to inspect it.</p>
