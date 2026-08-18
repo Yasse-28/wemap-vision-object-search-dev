@@ -1949,29 +1949,63 @@ body.explorer-equirect-dragging {
   margin: 0 0 4px;
 }
 
-/* Stored thumbnail beside the widened re-render: same four numbers, two views. */
-.object-search-proposal-previews {
+.object-search-selected-heading {
   display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-3);
 }
 
-.object-search-proposal-previews figure {
+.object-search-selected-heading strong {
+  color: var(--c-text);
+  font-size: 1.05rem;
+}
+
+.object-search-selected-heading span {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+}
+
+.object-search-selected-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.object-search-selected-facts span {
+  padding: 4px 7px;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-raised);
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.object-search-context-preview,
+.object-search-embedded-preview {
   margin: 0;
   display: grid;
   gap: var(--s-1);
-  max-width: 240px;
 }
 
-.object-search-proposal-previews img {
+.object-search-context-preview img,
+.object-search-embedded-preview img {
   width: 100%;
   border-radius: var(--r-sm);
   background: #111;
 }
 
-.object-search-proposal-previews figcaption {
+.object-search-context-preview figcaption,
+.object-search-embedded-preview figcaption {
   font-size: 11px;
   color: #566;
+}
+
+.object-search-embedded-preview {
+  max-width: 240px;
 }
 
 .dismissible-alert {

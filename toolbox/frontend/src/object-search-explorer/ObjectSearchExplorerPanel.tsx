@@ -2244,11 +2244,20 @@ function ObjectSearchExplorerPanel(props: Props) {
           <h3>Selected proposal</h3>
           {selectedDetection ? (
             <>
-              <div className="metrics-row">
-                <span>Keyframe {selectedDetection.keyframe_id}</span>
+              <div className="object-search-selected-heading">
+                <strong>{selectedDetection.label || "Unlabelled proposal"}</strong>
                 <span>Row {selectedDetection.row_index}</span>
+              </div>
+              <div className="object-search-selected-facts">
+                <span>Keyframe {selectedDetection.keyframe_id}</span>
+                <span>{selectedDetection.detector_source || "Unknown source"}</span>
                 <span>
-                  {filteredDetections.length} / {rawDetections.length} proposals kept
+                  Score {selectedDetection.detection_score?.toFixed(3) ?? "unknown"}
+                </span>
+                <span>
+                  {selectedDetection.depth === null
+                    ? "No depth"
+                    : `${selectedDetection.depth.toFixed(2)} m depth`}
                 </span>
                 {activeKeyframeSummary ? (
                   <span
@@ -2264,43 +2273,47 @@ function ObjectSearchExplorerPanel(props: Props) {
               </div>
 
               {/*
-                The stored thumbnail (left) is what MetaCLIP2 saw, masked to a square by
-                build_padding_mask. The re-render (right) is the proposal's true angular
-                extent at a widened FOV — the same four numbers, two different views.
+                The grid already shows what MetaCLIP2 saw. The inspector leads with the
+                useful delta: the proposal's true angular extent at a widened FOV.
               */}
-              <div className="object-search-proposal-previews">
-                {selectedDetection.thumbnail_key ? (
-                  <figure>
+              <figure className="object-search-context-preview">
+                <img
+                  src={rowRenderUrl(props.mapId, selectedDetection.row_index, {
+                    size: 512,
+                    fovScale: 2,
+                  })}
+                  alt={`Context view for proposal ${selectedDetection.row_index}`}
+                  loading="lazy"
+                  onClick={(event) => {
+                    const { xRatio, yRatio } = readClickRatio(event);
+                    placeDepthPin(
+                      "cutout",
+                      selectedDetection.keyframe_id,
+                      xRatio,
+                      yRatio,
+                      selectedDetection.row_index,
+                    );
+                  }}
+                />
+                <figcaption>Context re-render · 2× FOV</figcaption>
+              </figure>
+
+              {selectedDetection.thumbnail_key ? (
+                <CollapsibleSection
+                  title="Compare embedded crop"
+                  summary="What MetaCLIP2 saw"
+                  defaultOpen={false}
+                >
+                  <figure className="object-search-embedded-preview">
                     <img
                       src={rowThumbnailUrl(props.mapId, selectedDetection.thumbnail_key)}
-                      alt={`Stored thumbnail for proposal ${selectedDetection.row_index}`}
+                      alt={`Embedded crop for proposal ${selectedDetection.row_index}`}
                       loading="lazy"
                     />
-                    <figcaption>Stored thumbnail (embedded)</figcaption>
+                    <figcaption>Stored thumbnail used for embedding</figcaption>
                   </figure>
-                ) : null}
-                <figure>
-                  <img
-                    src={rowRenderUrl(props.mapId, selectedDetection.row_index, {
-                      size: 512,
-                      fovScale: 2,
-                    })}
-                    alt={`Context view for proposal ${selectedDetection.row_index}`}
-                    loading="lazy"
-                    onClick={(event) => {
-                      const { xRatio, yRatio } = readClickRatio(event);
-                      placeDepthPin(
-                        "cutout",
-                        selectedDetection.keyframe_id,
-                        xRatio,
-                        yRatio,
-                        selectedDetection.row_index,
-                      );
-                    }}
-                  />
-                  <figcaption>Context re-render, 2x FOV (reconstructed)</figcaption>
-                </figure>
-              </div>
+                </CollapsibleSection>
+              ) : null}
 
               <BboxPostProcessControls
                 params={bboxPostProcess}
@@ -2328,7 +2341,7 @@ function ObjectSearchExplorerPanel(props: Props) {
               <CollapsibleSection
                 title="Proposals in this keyframe"
                 summary={`${filteredDetections.length} kept`}
-                defaultOpen
+                defaultOpen={false}
               >
                 <div className="table-wrap object-search-box-table">
                   <table>
