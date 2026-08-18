@@ -34,6 +34,24 @@ export const DEFAULT_BBOX_POST_PROCESS: BboxPostProcessParams = {
   showGdino: true,
 };
 
+/**
+ * The four corners of a row's reconstructed ERP box, in texture ratios.
+ *
+ * The box arrives ready-made in `erp_bbox_ratios`, so there is no geometry here any
+ * more — the 45 lines of cubemap algebra this replaces lived in two copies (here and
+ * in the backend) and had to agree. `u` is intentionally left unwrapped: the viewer
+ * reads it as a yaw, where 1.02 and 0.02 are the same direction.
+ */
+export function bboxPolygonRatios(row: MetadataRowRecord): Array<[number, number]> {
+  const [u0, v0, u1, v1] = row.erp_bbox_ratios;
+  return [
+    [u0, v0],
+    [u1, v0],
+    [u1, v1],
+    [u0, v1],
+  ];
+}
+
 // v2: the area thresholds changed unit (ERP pixels -> square degrees), so a stored
 // v1 value like 5000 would silently filter every row out. New key, fresh defaults.
 const STORAGE_KEY = "object-search-gui.explorerBboxPostProcess.v2";

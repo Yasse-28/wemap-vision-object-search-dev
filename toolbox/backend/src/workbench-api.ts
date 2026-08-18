@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   clearWorkspaceAnnotations,
   createWorkspaceAnnotation,
+  deleteDetectionGroupLabel,
   deleteDetectionReview,
   deleteWorkspaceAnnotation,
   deleteWorkspaceClass,
@@ -11,7 +12,10 @@ import {
   parseWorkspaceAnnotation,
   parseWorkspaceClass,
   listAnnotations,
+  listDetectionGroups,
+  parseDetectionGroupLabel,
   parseReviewMutation,
+  upsertDetectionGroupLabel,
   upsertDetectionReview,
   upsertWorkspaceClass,
 } from "./annotation-store.js";
@@ -23,6 +27,15 @@ import {
   type BenchmarkRunParams,
 } from "./benchmark-runner.js";
 import { loadMapEntries, type MapEntry } from "./config.js";
+import {
+  createDirectoryPayload,
+  deleteMapPayload,
+  deletionPreviewPayload,
+  exportPreviewPayload,
+  exportStatusPayload,
+  listDirectoriesPayload,
+  startExportRun,
+} from "./export-roi.js";
 import {
   readRequestBody,
   sendJson,
@@ -120,7 +133,9 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 export function isWorkbenchUiMapRoute(pathname: string): boolean {
-  return /^\/ui\/api\/maps\/[^/]+\//.test(pathname);
+  // The trailing segment is optional so `DELETE /ui/api/maps/{id}` — the map itself
+  // as a resource — reaches the same dispatcher as everything hanging off it.
+  return /^\/ui\/api\/maps\/[^/]+(\/|$)/.test(pathname);
 }
 
 export async function handleWorkbenchUiMapRoute(
@@ -152,6 +167,45 @@ export async function handleWorkbenchUiMapRoute(
     if (method === "POST" && suffix === "/benchmark/run") {
       const params = (await requestJson(request)) as BenchmarkRunParams;
       sendJson(response, 202, startBenchmarkRun(options, map, params));
+      return true;
+    }
+    if (method === "GET" && suffix === "/export-roi/directories") {
+      sendJson(
+        response,
+        200,
+        await listDirectoriesPayload(options, map, queryString(url, "path")),
+      );
+      return true;
+    }
+    if (method === "POST" && suffix === "/export-roi/directories") {
+      const body = await requestJson(request);
+      sendJson(
+        response,
+        201,
+        await createDirectoryPayload(options, map, String(body.parent ?? ""), String(body.name ?? "")),
+      );
+      return true;
+    }
+    if (method === "POST" && suffix === "/export-roi/preview") {
+      sendJson(response, 200, await exportPreviewPayload(options, map, await requestJson(request)));
+      return true;
+    }
+    if (method === "POST" && suffix === "/export-roi") {
+      sendJson(response, 202, await startExportRun(options, map, await requestJson(request)));
+      return true;
+    }
+    if (method === "GET" && suffix === "/export-roi/status") {
+      sendJson(response, 200, exportStatusPayload(map.id));
+      return true;
+    }
+    if (method === "GET" && suffix === "/deletion-preview") {
+      sendJson(response, 200, await deletionPreviewPayload(options, map));
+      return true;
+    }
+    // The map itself as a resource: the suffix is "/" because there is no trailing
+    // segment (see `isWorkbenchUiMapRoute`).
+    if (method === "DELETE" && suffix === "/") {
+      sendJson(response, 200, await deleteMapPayload(options, map, await requestJson(request)));
       return true;
     }
     if (method === "POST" && suffix === "/benchmark/score-prompt") {
@@ -265,6 +319,28 @@ export async function handleWorkbenchUiMapRoute(
       deleteDetectionReview(
         map,
         parseReviewMutation(await requestJson(request), false),
+      );
+      response.writeHead(204);
+      response.end();
+      return true;
+    }
+    if (method === "GET" && suffix === "/group-annotations") {
+      sendJson(response, 200, listDetectionGroups(map));
+      return true;
+    }
+    if (method === "POST" && suffix === "/group-annotations/label") {
+      sendJson(response, 201, {
+        detection_group_label_id: upsertDetectionGroupLabel(
+          map,
+          parseDetectionGroupLabel(await requestJson(request), true),
+        ),
+      });
+      return true;
+    }
+    if (method === "DELETE" && suffix === "/group-annotations/label") {
+      deleteDetectionGroupLabel(
+        map,
+        parseDetectionGroupLabel(await requestJson(request), false),
       );
       response.writeHead(204);
       response.end();

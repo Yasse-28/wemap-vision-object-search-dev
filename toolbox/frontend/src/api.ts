@@ -7,6 +7,8 @@
  * panel's version, so it was removed with the ADR 0002 cleanup.
  */
 
+import { fetchJson } from "./http";
+
 export type MapSummary = {
   id: string;
   display_name: string;
@@ -17,50 +19,24 @@ export type MapSummary = {
   /** Whether the map directory and a parseable v2 manifest are present. */
   object_search_available: boolean;
   unavailable_reason: string | null;
+  /**
+   * The map this one was exported from, or null when it came from production. It is
+   * what makes a map a sub-map: the home page nests it under its parent, and only a
+   * map with one may be deleted.
+   */
+  parent_map: string | null;
+  /** Ids declaring this map as their parent. Resolved server-side, see `main.ts`. */
+  child_map_ids: string[];
 };
 
 export type MapsResponse = {
   maps: MapSummary[];
 };
 
-export type SearchType = "auto" | "cutout" | "object";
-
-async function readJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text) {
-    return null;
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-async function fetchJson(path: string, options?: RequestInit): Promise<unknown> {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      ...options?.headers,
-    },
-  });
-  const data = await readJson(response);
-  if (!response.ok) {
-    const details =
-      data == null
-        ? "empty response (is the object-search API running?)"
-        : typeof data === "string"
-          ? data
-          : JSON.stringify(data);
-    throw new Error(`HTTP ${response.status}: ${details}`);
-  }
-  return data;
-}
-
 export async function fetchMaps(): Promise<MapSummary[]> {
-  const data = await fetchJson("/ui/api/maps");
+  const data = await fetchJson("/ui/api/maps", {
+    headers: { "Content-Type": "application/json" },
+  });
   if (!data || typeof data !== "object" || !Array.isArray((data as MapsResponse).maps)) {
     throw new Error("Unexpected maps response.");
   }
@@ -69,5 +45,7 @@ export async function fetchMaps(): Promise<MapSummary[]> {
     geo_ref_id: map.geo_ref_id ?? 1,
     object_search_available: map.object_search_available ?? true,
     unavailable_reason: map.unavailable_reason ?? null,
+    parent_map: map.parent_map ?? null,
+    child_map_ids: map.child_map_ids ?? [],
   }));
 }

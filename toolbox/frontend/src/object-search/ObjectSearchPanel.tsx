@@ -1,15 +1,12 @@
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from "react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { NavigationCandidate } from "../object-search-explorer/EquirectPhotoSphereViewer";
-import {
-  ReviewAnnotationList,
-  ReviewButtons,
-} from "../object-search-review/ReviewControls";
-import {
-  type ObjectSearchReviews,
-  useObjectSearchReviews,
-} from "../object-search-review/useObjectSearchReviews";
+import type {
+  HoveredDetection,
+  NavigationCandidate,
+} from "../object-search-explorer/EquirectPhotoSphereViewer";
+import { ReviewSummaryBar } from "../object-search-review/ReviewSummaryBar";
+import { useObjectSearchReviews } from "../object-search-review/useObjectSearchReviews";
 
 import type { MapSummary } from "../api";
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
@@ -21,17 +18,38 @@ import {
   scorePrompt,
 } from "../benchmark/api";
 import type { ByPromptRow, PromptScore } from "../benchmark/types";
-import { DEFAULT_MATCH_ACCURACY_M, FEEDBACK_NORMALIZATIONS } from "../benchmark/types";
-import { configSummary as scoreConfigSummary } from "../benchmark/config-summary";
+import { DEFAULT_MATCH_ACCURACY_M } from "../benchmark/types";
+import { projectKeyframeToLocalFloor } from "../geo";
 import {
   fetchKeyframeGraph,
   fetchMetadataMarkers,
+  fetchMetadataRows,
   indexKeyframeEquirectPreviewUrl,
 } from "../index-explorer/api";
 import type {
   KeyframeGraphResponse,
   KeyframeMarker,
+  MetadataRowRecord,
 } from "../index-explorer/types";
+import { bboxPolygonRatios } from "../object-search-explorer/bboxPostProcess";
+import { basketKey, useMatchingBasket } from "../matching/basket";
+import type { BasketItem } from "../matching/basket";
+import { useGroupAnnotations } from "../matching/groupAnnotations";
+import {
+  KEYFRAME_GRAPH_COLOR,
+  KEYFRAME_MARKER_COLOR,
+  KEYFRAME_MARKER_RADIUS,
+  KEYFRAME_MARKER_SELECTED_COLOR,
+  KEYFRAME_MARKER_SELECTED_RADIUS,
+  VIEW_CONE_COLOR,
+  VIEW_CONE_HALF_ANGLE_DEG,
+} from "../theme";
+import BboxDrawOverlay from "./BboxDrawOverlay";
+import LocalizeInspector from "./LocalizeInspector";
+import OverviewSection from "./OverviewSection";
+import SearchControlsCard from "./SearchControlsCard";
+import SelectedObservationPanel from "./SelectedObservationPanel";
+import TextInspector from "./TextInspector";
 import { runObjectSearch } from "./api";
 import type {
   EnrichedResult,
@@ -43,13 +61,12 @@ import type {
   QueryInputMode,
 } from "./types";
 import { DEFAULT_ONLINE_OVERRIDES, ObjectSearchMode } from "./types";
+import { normalizeBenchmarkPrompt } from "./promptScoreFormat";
 import {
   buildKeyframeGroups,
   cutoutPreviewUrl,
-  formatNumber,
   localizationColorForMatch,
   localizationMatchThreshold,
-  localizationScoreSymbol,
   markerColorForScore,
 } from "./utils";
 import "./object-search-vision.css";
@@ -60,83 +77,17 @@ const EquirectPhotoSphereViewer = lazy(
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const KEYFRAME_MARKER_COLOR = "#9ca3af";
-const KEYFRAME_MARKER_SELECTED_COLOR = "#16a34a";
-const KEYFRAME_GRAPH_COLOR = "#64748b";
-const VIEW_CONE_HALF_ANGLE_DEG = 25;
-const VIEW_CONE_COLOR = KEYFRAME_MARKER_SELECTED_COLOR;
 const COL_MIN = 25;
 const COL_MAX = 75;
 const ROW_MIN = 20;
 const ROW_MAX = 80;
-const EARTH_RADIUS_M = 6378137;
 const EMPTY_LOCALIZATIONS: ObjectLocalization[] = [];
-
-function normalizeBenchmarkPrompt(prompt: string): string {
-  return prompt.trim().toLocaleLowerCase();
-}
-
-function promptMetricSummary(row: ByPromptRow): string {
-  // A failed prompt still gets a row, with `error` set and every count at zero. Left
-  // formatted as metrics it reads as a legitimate "found nothing" — the one reading
-  // the exit-2 path exists to prevent. Same handling as BenchmarkPanel's tables.
-  if (row.error) {
-    return `not measured: ${row.error}`;
-  }
-  return (
-    `P ${row.precision.toFixed(2)} · R ${row.recall.toFixed(2)} · F1 ${row.f1.toFixed(2)}`
-    + ` · ${row.true_positives}/${row.false_positives}/${row.false_negatives} (TP/FP/FN)`
-  );
-}
-
-/** The populations behind TP/FP/FN, which the three numbers alone do not reveal.
- *
- * TP+FP counts *predictions* the benchmark kept, TP+FN counts *ground-truth
- * annotations*: adding all three together totals nothing, and `kept` is well below the
- * cluster count on screen because the benchmark accepts only `match_score >
- * acceptance_threshold` (0.9) while the list is filtered by the Sensitivity slider.
- * `kept + rejected` is the identity that does hold — it equals the clusters returned.
+/**
+ * Both sides of the box ↔ observation join read the same float16 angles, so this is a
+ * rounding margin (~0.06°), not a search radius — two distinct detections that close
+ * together would be the same proposal twice.
  */
-/** The threshold-free half: what to read when comparing two feedback settings.
- *
- * P/R/F1 above are one operating point, and the review-feedback gains *shift the score
- * distribution* — so a change there conflates "the ranking improved" with "the fixed
- * threshold now sits somewhere else on the same curve". AP does not move under a
- * monotone rescaling of the scores, so it isolates the ranking.
- */
-function promptCurveSummary(row: ByPromptRow): string | null {
-  if (row.average_precision == null) {
-    return null;
-  }
-  const best = row.best_f1 == null ? "" : ` · best F1 ${row.best_f1.toFixed(2)}`;
-  const at =
-    row.best_f1_threshold == null ? "" : ` @ ${row.best_f1_threshold.toFixed(3)}`;
-  return `AP ${row.average_precision.toFixed(3)}${best}${at}`;
-}
-
-function promptCountsSummary(row: ByPromptRow): string {
-  return (
-    `${row.accepted_predictions} kept · ${row.rejected_predictions} rejected`
-    + ` · ${row.ground_truth} ground truth`
-  );
-}
-
-function projectKeyframeToLocalFloor(
-  source: { latitude: number; longitude: number; heading_deg: number },
-  destination: { latitude: number; longitude: number },
-): Pick<NavigationCandidate, "localX" | "localZ"> {
-  const latitudeRad = (source.latitude * Math.PI) / 180;
-  const east =
-    ((destination.longitude - source.longitude) * Math.PI) / 180 *
-    EARTH_RADIUS_M *
-    Math.cos(latitudeRad);
-  const north =
-    ((destination.latitude - source.latitude) * Math.PI) / 180 * EARTH_RADIUS_M;
-  const distance = Math.hypot(east, north);
-  const bearing = Math.atan2(east, north);
-  const localYaw = bearing - (source.heading_deg * Math.PI) / 180;
-  return { localX: distance * Math.sin(localYaw), localZ: -distance * Math.cos(localYaw) };
-}
+const ANGLE_MATCH_TOL_RAD = 1e-3;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -144,132 +95,7 @@ type Props = {
   map: MapSummary | null;
   mapId: string;
   isMapKnown: boolean;
-  reviewMode?: boolean;
 };
-
-type BboxDraft = { left: number; top: number; width: number; height: number };
-
-// ── BboxDrawOverlay ──────────────────────────────────────────────────────────
-
-function BboxDrawOverlay(props: {
-  photosphereWrapRef: React.RefObject<HTMLDivElement | null>;
-  onCapture: (file: File) => void;
-  onCancel: () => void;
-  onError: (msg: string) => void;
-}) {
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const [draft, setDraft] = useState<BboxDraft | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
-  const startRef = useRef<{ x: number; y: number } | null>(null);
-
-  const hasDraft = draft && draft.width > 8 && draft.height > 8;
-
-  function capture() {
-    if (!draft || !props.photosphereWrapRef.current) {
-      props.onError("Draw a bounding box before using it as an image query.");
-      return;
-    }
-    const wrap = props.photosphereWrapRef.current;
-    const canvas = wrap.querySelector<HTMLCanvasElement>(".object-search-keyframe-photosphere-canvas");
-    if (!canvas) {
-      props.onError("Viewer canvas not found — is the panorama loaded?");
-      return;
-    }
-
-    const wrapRect = wrap.getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
-    const scaleX = canvasRect.width > 0 ? canvas.width / canvasRect.width : 1;
-    const scaleY = canvasRect.height > 0 ? canvas.height / canvasRect.height : 1;
-
-    // draft coords are relative to the overlay (same origin as wrap)
-    const x = (draft.left - (canvasRect.left - wrapRect.left)) * scaleX;
-    const y = (draft.top - (canvasRect.top - wrapRect.top)) * scaleY;
-    const w = draft.width * scaleX;
-    const h = draft.height * scaleY;
-
-    if (w < 4 || h < 4) {
-      props.onError("The selected bounding box is too small to capture.");
-      return;
-    }
-
-    const tmp = document.createElement("canvas");
-    tmp.width = Math.round(w);
-    tmp.height = Math.round(h);
-    const ctx = tmp.getContext("2d");
-    if (!ctx) {
-      props.onError("Could not create the bounding-box image.");
-      return;
-    }
-    try {
-      ctx.drawImage(canvas, x, y, w, h, 0, 0, tmp.width, tmp.height);
-    } catch (err) {
-      props.onError(`Failed to capture bbox: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-    tmp.toBlob((blob) => {
-      if (!blob) {
-        props.onError("Failed to encode bbox crop (toBlob returned null).");
-        return;
-      }
-      props.onCapture(new File([blob], "bbox-crop.png", { type: "image/png" }));
-    }, "image/png");
-  }
-
-  return (
-    <div
-      ref={overlayRef}
-      className="os-bbox-overlay"
-      onPointerDown={(e) => {
-        const rect = overlayRef.current!.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-        startRef.current = { x, y };
-        setDraft(null);
-        setIsDragging(true);
-        overlayRef.current!.setPointerCapture(e.pointerId);
-      }}
-      onPointerMove={(e) => {
-        if (!isDragging || !startRef.current || !overlayRef.current) return;
-        const rect = overlayRef.current.getBoundingClientRect();
-        const ex = e.clientX - rect.left;
-        const ey = e.clientY - rect.top;
-        setDraft({
-          left: Math.min(startRef.current.x, ex),
-          top: Math.min(startRef.current.y, ey),
-          width: Math.abs(ex - startRef.current.x),
-          height: Math.abs(ey - startRef.current.y),
-        });
-      }}
-      onPointerUp={() => setIsDragging(false)}
-    >
-      {draft ? (
-        <div
-          className="os-bbox-rect"
-          style={{ left: draft.left, top: draft.top, width: draft.width, height: draft.height }}
-        />
-      ) : null}
-      <div
-        className="os-bbox-actions"
-        onPointerDown={(event) => event.stopPropagation()}
-        onPointerMove={(event) => event.stopPropagation()}
-        onPointerUp={(event) => event.stopPropagation()}
-      >
-        {hasDraft ? (
-          <button type="button" className="object-search-button os-pane-btn" onClick={capture}>
-            Use as query
-          </button>
-        ) : null}
-        <button
-          type="button"
-          className="object-search-secondary-button os-pane-btn"
-          onClick={props.onCancel}
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-  );
-}
 
 // ── Main component ───────────────────────────────────────────────────────────
 
@@ -282,10 +108,8 @@ function ObjectSearchPanel(props: Props) {
   const [maxObservationsPerCluster, setMaxObservationsPerCluster] = useState(1000);
   const [localizeSensitivity, setLocalizeSensitivity] = useState(10);
   const [searchMode, setSearchMode] = useState<ObjectSearchMode>("localize-online");
-  const [searchType, setSearchType] = useState<"auto" | "cutout" | "object">("auto");
   const [onlineOverrides, setOnlineOverrides] =
     useState<OnlineLocalizeOverrides>(DEFAULT_ONLINE_OVERRIDES);
-  const [showOnlineOverrides, setShowOnlineOverrides] = useState(false);
   const [useRemoteServer, setUseRemoteServer] = useState(false);
   const [remoteServerUrl, setRemoteServerUrl] = useState(
     "https://vps-api.wemap-vision-computing-1.getwemap.com/{map_id}/object-search/localize",
@@ -298,6 +122,7 @@ function ObjectSearchPanel(props: Props) {
   const [isPromptScoring, setIsPromptScoring] = useState(false);
   const [promptScoreMissing, setPromptScoreMissing] = useState(false);
   const [promptScoreError, setPromptScoreError] = useState<string | null>(null);
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
   const [promptBaseline, setPromptBaseline] = useState<{
     runId: string;
     row: ByPromptRow;
@@ -312,8 +137,6 @@ function ObjectSearchPanel(props: Props) {
     (FocusTarget & { requestId: number }) | null
   >(null);
 
-  const imageInputRef = useRef<HTMLInputElement>(null);
-
   // ── New: keyframe / map state ──────────────────────────────────────────────
   const [keyframeMarkers, setKeyframeMarkers] = useState<KeyframeMarker[] | null>(null);
   const [keyframeGraph, setKeyframeGraph] = useState<KeyframeGraphResponse | null>(null);
@@ -326,6 +149,9 @@ function ObjectSearchPanel(props: Props) {
   const [photosphereYawRad, setPhotosphereYawRad] = useState<number | null>(null);
   const [photosphereViewKeyframeId, setPhotosphereViewKeyframeId] = useState<string | null>(null);
   const [bboxMode, setBboxMode] = useState(false);
+  const [showPanoramaBoxes, setShowPanoramaBoxes] = useState(false);
+  const [panoramaDetections, setPanoramaDetections] = useState<MetadataRowRecord[]>([]);
+  const [hoveredDetection, setHoveredDetection] = useState<HoveredDetection | null>(null);
   const [panoramaExpanded, setPanoramaExpanded] = useState(false);
   const [panoramaViewRequestId, setPanoramaViewRequestId] = useState(0);
   const preservedCompassBearingDegRef = useRef<number | null>(null);
@@ -341,13 +167,6 @@ function ObjectSearchPanel(props: Props) {
   const panelRef = useRef<HTMLElement>(null);
   const photosphereWrapRef = useRef<HTMLDivElement>(null);
 
-  // ── New: floating search controls (draggable + collapsible) ────────────────
-  const [controlsPos, setControlsPos] = useState<{ x: number; y: number } | null>(null);
-  const [controlsSize, setControlsSize] = useState<{ w: number; h: number } | null>(null);
-  const [controlsCollapsed, setControlsCollapsed] = useState(false);
-  const controlsRef = useRef<HTMLDivElement>(null);
-
-  const isLocalizeMode = searchMode !== "text";
   const emmid = props.map?.emmid ?? null;
 
   // ── Fetch keyframe data ────────────────────────────────────────────────────
@@ -402,6 +221,27 @@ function ObjectSearchPanel(props: Props) {
     };
   }, [props.mapId, props.isMapKnown]);
 
+  // Detection boxes for the panorama overlay: fetched only while the checkbox is on,
+  // and only for the keyframe on screen — this panel shows one keyframe at a time.
+  useEffect(() => {
+    setHoveredDetection(null);
+    if (!props.isMapKnown || !showPanoramaBoxes || !activeKeyframeId) {
+      setPanoramaDetections([]);
+      return;
+    }
+    let cancelled = false;
+    fetchMetadataRows(props.mapId, { keyframeIds: [activeKeyframeId] })
+      .then((payload) => {
+        if (!cancelled) setPanoramaDetections(payload.rows);
+      })
+      .catch(() => {
+        if (!cancelled) setPanoramaDetections([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.mapId, props.isMapKnown, showPanoramaBoxes, activeKeyframeId]);
+
   // ── Existing: detections for selected cutout ───────────────────────────────
   const keyframeGroups = useMemo(() => {
     if (!result || result.mode !== "text") return {} as Record<string, KeyframeGroup>;
@@ -430,11 +270,143 @@ function ObjectSearchPanel(props: Props) {
       ),
     [allLocalizations, localizationDisplayThreshold],
   );
+  /**
+   * Which cluster each drawn box belongs to, and its rank inside that cluster.
+   *
+   * The join is angular, not by id: pgvector carries no `row_index`, so a cluster
+   * observation and its parquet row can only be recognized as the same detection by
+   * their `(theta, phi)` centre — the same float16 values on both sides, hence the
+   * very tight tolerance. Observations arrive sorted by similarity, so their position
+   * *is* their rank. Empty when the answer came from a remote endpoint that does not
+   * send the angles.
+   */
+  const clusterByRowIndex = useMemo(() => {
+    const byRow = new Map<
+      number,
+      { clusterRank: number; obsRank: number; obsCount: number; similarity: number }
+    >();
+    if (!activeKeyframeId || !panoramaDetections.length) {
+      return byRow;
+    }
+    localizations.forEach((loc, locIndex) => {
+      loc.observations.forEach((obs, obsIndex) => {
+        if (obs.keyframeId !== activeKeyframeId) return;
+        if (obs.thetaCenter === null || obs.phiCenter === null) return;
+        const row = panoramaDetections.find(
+          (candidate) =>
+            Math.abs(candidate.theta_center - obs.thetaCenter!) < ANGLE_MATCH_TOL_RAD &&
+            Math.abs(candidate.phi_center - obs.phiCenter!) < ANGLE_MATCH_TOL_RAD,
+        );
+        // First match wins: clusters are ranked, so the best one owns the box.
+        if (!row || byRow.has(row.row_index)) return;
+        byRow.set(row.row_index, {
+          clusterRank: locIndex + 1,
+          obsRank: obsIndex + 1,
+          obsCount: loc.observations.length,
+          similarity: obs.similarityScore,
+        });
+      });
+    });
+    return byRow;
+  }, [localizations, panoramaDetections, activeKeyframeId]);
+
+  const basket = useMatchingBasket(props.mapId);
+  const groupAnnotations = useGroupAnnotations(props.mapId);
+
+  /**
+   * Observations reach the basket as directions, and the ones without angles cannot:
+   * a remote endpoint does not send them, and there is no other key back to the
+   * detection. Silently dropping them would show a basket that lies about its size,
+   * so the caller reports what was skipped.
+   */
+  const addObservationsToBasket = useCallback(
+    (
+      observations: ObjectObservation[],
+      clusterRank: number,
+      cluster?: ObjectLocalization,
+    ) => {
+      const items: BasketItem[] = [];
+      let skipped = 0;
+      for (const obs of observations) {
+        if (obs.thetaCenter === null || obs.phiCenter === null) {
+          skipped += 1;
+          continue;
+        }
+        const ray = { thetaCenter: obs.thetaCenter, phiCenter: obs.phiCenter };
+        items.push({
+          key: basketKey(obs.keyframeId, ray),
+          keyframeId: obs.keyframeId,
+          rays: [ray],
+          source: "cluster",
+          clusterRank,
+          clusterPosition: cluster
+            ? {
+                lat: cluster.lat,
+                lng: cluster.lng,
+                alt: cluster.alt,
+                level: cluster.level,
+              }
+            : undefined,
+          label: null,
+          thumbnail: obs.thumbnail,
+          similarity: obs.similarityScore,
+        });
+      }
+      basket.add(items);
+      setError(
+        skipped
+          ? `${skipped} detection(s) skipped: the service did not send their angles.`
+          : null,
+      );
+    },
+    [basket],
+  );
+
+  const hoveredRow =
+    hoveredDetection === null
+      ? null
+      : (panoramaDetections.find(
+          (row) => row.row_index === hoveredDetection.rowIndex,
+        ) ?? null);
+  const hoveredCluster =
+    hoveredDetection === null ? null : clusterByRowIndex.get(hoveredDetection.rowIndex);
+
+  // "C1 6 · C2 13 · panorama 1" — the composition is the whole point of the basket:
+  // it says which clusters are being asked to merge, and how much each brought.
+  const basketSummary = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of basket.items) {
+      const bucket = item.clusterRank === null ? "panorama" : `C${item.clusterRank}`;
+      counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    }
+    return [...counts].map(([bucket, count]) => `${bucket} ${count}`).join(" · ");
+  }, [basket.items]);
+
+  const addHoveredRowToBasket = useCallback(() => {
+    if (!hoveredRow || !activeKeyframeId) return;
+    const ray = {
+      thetaCenter: hoveredRow.theta_center,
+      phiCenter: hoveredRow.phi_center,
+    };
+    basket.add([
+      {
+        key: basketKey(activeKeyframeId, ray),
+        keyframeId: activeKeyframeId,
+        rays: [ray],
+        source: "panorama",
+        clusterRank: hoveredCluster?.clusterRank ?? null,
+        label: hoveredRow.label,
+        thumbnail: hoveredRow.thumbnail_key,
+        similarity: null,
+      },
+    ]);
+  }, [activeKeyframeId, basket, hoveredCluster, hoveredRow]);
+
   // The *displayed* localizations, not `allLocalizations`: this feeds the hook's
   // `inResults` flag, whose whole job is to say whether an annotation is still
   // reachable on screen. A cluster the sensitivity slider filters out is not.
   const reviews = useObjectSearchReviews({
-    enabled: props.reviewMode === true,
+    enabled: true,
     mapId: props.mapId,
     query: result?.mode === "localize-online" ? resultQuery : "",
     localizations,
@@ -465,7 +437,7 @@ function ObjectSearchPanel(props: Props) {
   useEffect(() => {
     let cancelled = false;
     setPromptBaseline(null);
-    if (!props.reviewMode || result?.mode !== "localize-online" || !resultQuery) {
+    if (!isReviewOpen || result?.mode !== "localize-online" || !resultQuery) {
       return () => {
         cancelled = true;
       };
@@ -494,7 +466,7 @@ function ObjectSearchPanel(props: Props) {
     return () => {
       cancelled = true;
     };
-  }, [props.mapId, props.reviewMode, result?.mode, resultQuery]);
+  }, [isReviewOpen, props.mapId, result?.mode, resultQuery]);
 
   async function handleScorePrompt(): Promise<void> {
     if (!resultQuery || isPromptScoring) return;
@@ -685,7 +657,7 @@ function ObjectSearchPanel(props: Props) {
           longitude: m.longitude,
           level: m.level,
           color: isActive ? KEYFRAME_MARKER_SELECTED_COLOR : KEYFRAME_MARKER_COLOR,
-          radius: isActive ? 8 : 6,
+          radius: isActive ? KEYFRAME_MARKER_SELECTED_RADIUS : KEYFRAME_MARKER_RADIUS,
           scaleWithZoom: true,
         });
       }
@@ -892,7 +864,6 @@ function ObjectSearchPanel(props: Props) {
         text: text.trim(),
         imageFile,
         numResults,
-        searchType,
         maxObservationsPerCluster,
         onlineOverrides,
         remoteUrl:
@@ -1065,97 +1036,6 @@ function ObjectSearchPanel(props: Props) {
     window.addEventListener("pointerup", onUp);
   };
 
-  const startControlsDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if ((event.target as HTMLElement).closest("button")) return;
-    event.preventDefault();
-    const card = controlsRef.current;
-    const parent = card?.parentElement as HTMLElement | null;
-    if (!card || !parent) return;
-    const cardRect = card.getBoundingClientRect();
-    const parentRect = parent.getBoundingClientRect();
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const originX = cardRect.left - parentRect.left;
-    const originY = cardRect.top - parentRect.top;
-    document.body.classList.add("os-dragging");
-    const onMove = (e: PointerEvent) => {
-      const maxX = Math.max(0, parentRect.width - cardRect.width);
-      const maxY = Math.max(0, parentRect.height - cardRect.height);
-      setControlsPos({
-        x: Math.max(0, Math.min(maxX, originX + (e.clientX - startX))),
-        y: Math.max(0, Math.min(maxY, originY + (e.clientY - startY))),
-      });
-    };
-    const onUp = () => {
-      document.body.classList.remove("os-dragging");
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  const startControlsResize =
-    (dir: string) => (event: ReactPointerEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const card = controlsRef.current;
-      const parent = card?.parentElement as HTMLElement | null;
-      if (!card || !parent) return;
-      const cardRect = card.getBoundingClientRect();
-      const parentRect = parent.getBoundingClientRect();
-      const origin = {
-        left: cardRect.left - parentRect.left,
-        top: cardRect.top - parentRect.top,
-        width: cardRect.width,
-        height: cardRect.height,
-      };
-      const startX = event.clientX;
-      const startY = event.clientY;
-      const MIN_W = 240;
-      const MIN_H = 80;
-      const handle = event.currentTarget;
-      handle.setPointerCapture(event.pointerId);
-      document.body.classList.add("os-dragging");
-      const onMove = (e: PointerEvent) => {
-        const dx = e.clientX - startX;
-        const dy = e.clientY - startY;
-        let { left, top, width, height } = origin;
-        if (dir.includes("e")) width = origin.width + dx;
-        if (dir.includes("s")) height = origin.height + dy;
-        if (dir.includes("w")) {
-          width = origin.width - dx;
-          left = origin.left + dx;
-        }
-        if (dir.includes("n")) {
-          height = origin.height - dy;
-          top = origin.top + dy;
-        }
-        if (width < MIN_W) {
-          if (dir.includes("w")) left -= MIN_W - width;
-          width = MIN_W;
-        }
-        if (height < MIN_H) {
-          if (dir.includes("n")) top -= MIN_H - height;
-          height = MIN_H;
-        }
-        left = Math.max(0, Math.min(left, parentRect.width - width));
-        top = Math.max(0, Math.min(top, parentRect.height - height));
-        width = Math.min(width, parentRect.width - left);
-        height = Math.min(height, parentRect.height - top);
-        setControlsPos({ x: left, y: top });
-        setControlsSize({ w: width, h: height });
-      };
-      const onUp = (e: PointerEvent) => {
-        document.body.classList.remove("os-dragging");
-        handle.releasePointerCapture(e.pointerId);
-        handle.removeEventListener("pointermove", onMove);
-        handle.removeEventListener("pointerup", onUp);
-      };
-      handle.addEventListener("pointermove", onMove);
-      handle.addEventListener("pointerup", onUp);
-    };
-
   // ── Render ─────────────────────────────────────────────────────────────────
   const hasPanorama = !!activeKeyframeId;
 
@@ -1167,7 +1047,7 @@ function ObjectSearchPanel(props: Props) {
       }`}
       style={
         {
-          "--os-col-w": `${colWidthPct}%`,
+          "--os-user-col-w": `${colWidthPct}%`,
           "--os-row-h": `${rowHeightPct}%`,
         } as CSSProperties
       }
@@ -1201,6 +1081,31 @@ function ObjectSearchPanel(props: Props) {
                   &gt;
                 </button>
               </div>
+              <div className="checkbox-row--compact" style={{ marginLeft: 8 }}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={showPanoramaBoxes}
+                    onChange={(e) => setShowPanoramaBoxes(e.target.checked)}
+                  />
+                  Bounding boxes
+                </label>
+              </div>
+              {basket.items.length ? (
+                <span
+                  className="os-basket-chip"
+                  title={`Matching basket: ${basketSummary}`}
+                >
+                  Basket {basket.items.length} · {basketSummary}
+                  <button
+                    type="button"
+                    aria-label="Empty the matching basket"
+                    onClick={basket.clear}
+                  >
+                    ×
+                  </button>
+                </span>
+              ) : null}
               <div className="os-pane-header-actions">
                 <button
                   type="button"
@@ -1227,7 +1132,15 @@ function ObjectSearchPanel(props: Props) {
                 </button>
               </div>
             </div>
-            <div ref={photosphereWrapRef} className="os-photosphere-wrap">
+            <div
+              ref={photosphereWrapRef}
+              className="os-photosphere-wrap"
+              onContextMenu={(event) => {
+                if (!hoveredRow) return;
+                event.preventDefault();
+                addHoveredRowToBasket();
+              }}
+            >
               <Suspense
                 fallback={<div className="os-photosphere-loading">Loading viewer…</div>}
               >
@@ -1238,16 +1151,40 @@ function ObjectSearchPanel(props: Props) {
                   height={1000}
                   initialYawRad={initialPhotosphereView.yawRad}
                   initialTextureYRatio={initialPhotosphereView.textureYRatio}
-                  detections={[]}
+                  detections={showPanoramaBoxes ? panoramaDetections : []}
                   selectedRowIndex={null}
                   depthPin={null}
-                  polygonForDetection={() => []}
+                  polygonForDetection={bboxPolygonRatios}
                   onDepthPin={() => {}}
                   onViewChange={handleViewChange}
                   navigationCandidates={photosphereNavigationCandidates}
                   onNavigate={navigateToKeyframe}
+                  onHoverDetection={showPanoramaBoxes ? setHoveredDetection : undefined}
                 />
               </Suspense>
+              {hoveredDetection && hoveredRow ? (
+                <div
+                  className="os-bbox-tooltip"
+                  style={{ left: hoveredDetection.x + 14, top: hoveredDetection.y + 14 }}
+                >
+                  <strong>{hoveredRow.label ?? "unlabelled"}</strong>
+                  <span>
+                    {hoveredRow.detector_source}
+                    {hoveredRow.detection_score === null
+                      ? ""
+                      : ` · ${hoveredRow.detection_score.toFixed(2)}`}
+                  </span>
+                  {hoveredCluster ? (
+                    <span>
+                      Cluster #{hoveredCluster.clusterRank} · rank{" "}
+                      {hoveredCluster.obsRank}/{hoveredCluster.obsCount} · sim{" "}
+                      {hoveredCluster.similarity.toFixed(3)}
+                    </span>
+                  ) : (
+                    <span className="muted">No cluster</span>
+                  )}
+                </div>
+              ) : null}
               {bboxMode ? (
                 <BboxDrawOverlay
                   photosphereWrapRef={photosphereWrapRef}
@@ -1268,302 +1205,6 @@ function ObjectSearchPanel(props: Props) {
             <p>Click a keyframe on the map to view its panorama</p>
           </div>
         )}
-
-        {/* ── Floating search controls (draggable, collapsible) ── */}
-        <div
-          ref={controlsRef}
-          className={`os-floating-controls${controlsPos ? " is-dragged" : ""}${controlsCollapsed ? " is-collapsed" : ""}`}
-          style={{
-            ...(controlsPos ? { left: controlsPos.x, top: controlsPos.y } : {}),
-            ...(controlsSize ? { width: controlsSize.w } : {}),
-            ...(controlsSize && !controlsCollapsed ? { height: controlsSize.h } : {}),
-          }}
-        >
-          <div className="os-floating-controls-header" onPointerDown={startControlsDrag}>
-            <span className="os-floating-controls-title">
-              {props.reviewMode ? "Annotation" : "Object Search"}
-            </span>
-            {result ? (
-              <span className="os-pane-subtitle">
-                {result.mode === "text"
-                  ? `${result.enriched.length} results`
-                  : `${localizations.length} clusters`}
-              </span>
-            ) : null}
-            <button
-              type="button"
-              className="os-floating-controls-collapse"
-              onClick={() => setControlsCollapsed((v) => !v)}
-              aria-label={controlsCollapsed ? "Expand controls" : "Collapse controls"}
-              title={controlsCollapsed ? "Expand" : "Collapse"}
-            >
-              {controlsCollapsed ? "▾" : "▴"}
-            </button>
-          </div>
-          <div className="os-floating-controls-body">
-          {error ? (
-            <div className="object-search-error-banner" role="alert" style={{ margin: "8px 12px 0" }}>
-              <span>{error}</span>
-              <button type="button" onClick={() => setError(null)} aria-label="Dismiss">
-                ×
-              </button>
-            </div>
-          ) : null}
-          <form className="os-search-form" onSubmit={onSubmit}>
-            {/* Query input row */}
-            <div className="object-search-toolbar-row">
-              {queryInputMode === "text" ? (
-                <input
-                  className="object-search-input"
-                  type="text"
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  placeholder="Search objects…"
-                  disabled={!props.isMapKnown || isLoading}
-                />
-              ) : imageFile ? (
-                <div className="object-search-selected-image-chip">
-                  <span>{imageFile.name}</span>
-                  <button
-                    type="button"
-                    className="object-search-chip-clear-button"
-                    onClick={() => setImageFile(null)}
-                    disabled={isLoading}
-                    aria-label="Clear image"
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : (
-                <span className="object-search-status-row">Select an image query below</span>
-              )}
-              <input
-                className="object-search-num-results"
-                type="number"
-                min={1}
-                max={1000}
-                value={numResults}
-                onChange={(e) => setNumResults(Number(e.target.value))}
-                disabled={!props.isMapKnown || isLoading}
-                title="Number of results"
-              />
-              <button
-                className="object-search-button"
-                type="submit"
-                disabled={!props.isMapKnown || isLoading}
-              >
-                {isLoading ? "Searching…" : "Search"}
-              </button>
-            </div>
-
-            {/* Input mode toggle */}
-            <div className="object-search-toolbar-row">
-              <div className="object-search-mode-toggle" role="group" aria-label="Query input">
-                <button
-                  type="button"
-                  className={`object-search-secondary-button${queryInputMode === "text" ? " active-query" : ""}`}
-                  onClick={() => setQueryInputMode("text")}
-                >
-                  Text
-                </button>
-                <button
-                  type="button"
-                  className={`object-search-secondary-button${queryInputMode === "image" ? " active-query" : ""}`}
-                  onClick={() => setQueryInputMode("image")}
-                >
-                  Image
-                </button>
-                <button
-                  type="button"
-                  className={`object-search-secondary-button${bboxMode ? " active-query" : ""}`}
-                  onClick={() => {
-                    if (!activeKeyframeId) return;
-                    setQueryInputMode("image");
-                    setBboxMode((m) => !m);
-                  }}
-                  disabled={!activeKeyframeId}
-                  title={activeKeyframeId ? "Draw a bbox on the panorama" : "Select a keyframe first"}
-                >
-                  Draw bbox
-                </button>
-              </div>
-              {queryInputMode === "image" ? (
-                <>
-                  <input
-                    ref={imageInputRef}
-                    className="object-search-image-input"
-                    type="file"
-                    accept="image/jpeg,image/png"
-                    onChange={(e) => setImageFile(e.target.files?.[0] ?? null)}
-                    disabled={!props.isMapKnown || isLoading}
-                  />
-                  <button
-                    type="button"
-                    className={`object-search-secondary-button${imageFile ? " active-query" : ""}`}
-                    onClick={() => imageInputRef.current?.click()}
-                    disabled={!props.isMapKnown || isLoading}
-                  >
-                    {imageFile ? "Change image" : "Pick image"}
-                  </button>
-                </>
-              ) : null}
-            </div>
-
-            {/* Search mode */}
-            <div className="object-search-toolbar-row object-search-toolbar-controls">
-              <div className="object-search-mode-toggle" role="group" aria-label="Search mode">
-                <button
-                  type="button"
-                  className={`object-search-secondary-button${searchMode === "text" ? " active-query" : ""}`}
-                  onClick={() => setSearchMode("text")}
-                >
-                  Text search
-                </button>
-                <button
-                  type="button"
-                  className={`object-search-secondary-button${searchMode === "localize-online" ? " active-query" : ""}`}
-                  onClick={() => setSearchMode("localize-online")}
-                >
-                  Localize
-                </button>
-              </div>
-              {searchMode === "text" ? (
-                <label className="object-search-inline-field">
-                  Search type
-                  <select
-                    className="object-search-inline-select"
-                    value={searchType}
-                    onChange={(e) => setSearchType(e.target.value as "auto" | "cutout" | "object")}
-                    disabled={!props.isMapKnown || isLoading}
-                  >
-                    <option value="auto">Auto</option>
-                    <option value="cutout">Cutout</option>
-                    <option value="object">Object</option>
-                  </select>
-                </label>
-              ) : null}
-            </div>
-
-            {/* Localize sliders */}
-            {isLocalizeMode ? (
-              <div className="object-search-toolbar-row object-search-toolbar-controls">
-                <div className="object-search-slider-control">
-                  <div className="object-search-slider-header">
-                    <label htmlFor="os-sensitivity">Sensitivity</label>
-                    <span>{localizeSensitivity}%</span>
-                  </div>
-                  <input
-                    id="os-sensitivity"
-                    type="range"
-                    min={0}
-                    max={100}
-                    step={1}
-                    value={localizeSensitivity}
-                    onChange={(e) => setLocalizeSensitivity(Number(e.target.value))}
-                    disabled={!props.isMapKnown || isLoading}
-                  />
-                  <div className="object-search-slider-help">
-                    Shows localizations with match_score &gt;= 1 - sensitivity / 100.
-                  </div>
-                </div>
-                <div className="object-search-slider-control">
-                  <div className="object-search-slider-header">
-                    <label htmlFor="os-max-obs">Max observations / cluster</label>
-                    <span>{maxObservationsPerCluster}</span>
-                  </div>
-                  <input
-                    id="os-max-obs"
-                    type="range"
-                    min={1}
-                    max={2000}
-                    step={1}
-                    value={Math.min(maxObservationsPerCluster, 2000)}
-                    onChange={(e) => setMaxObservationsPerCluster(Number(e.target.value))}
-                    disabled={!props.isMapKnown || isLoading}
-                  />
-                </div>
-                {searchMode === "localize-online" ? (
-                  <div className="object-search-slider-control">
-                    <div className="object-search-slider-header">
-                      <label htmlFor="os-merge-radius">Merge radius</label>
-                      <span>{onlineOverrides.merge_radius.toFixed(1)} m</span>
-                    </div>
-                    <input
-                      id="os-merge-radius"
-                      type="range"
-                      min={0}
-                      max={7}
-                      step={0.1}
-                      value={onlineOverrides.merge_radius}
-                      onChange={(e) =>
-                        setOnlineOverrides({ ...onlineOverrides, merge_radius: Number(e.target.value) })
-                      }
-                      disabled={!props.isMapKnown || isLoading}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            {searchMode === "localize-online" ? (
-              <div className="object-search-toolbar-row checkbox-row--compact os-remote-row">
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={useRemoteServer}
-                    onChange={(e) => setUseRemoteServer(e.target.checked)}
-                  />
-                  Remote server
-                </label>
-                {useRemoteServer ? (
-                  <input
-                    className="object-search-input os-remote-url-input"
-                    type="url"
-                    value={remoteServerUrl}
-                    onChange={(e) => setRemoteServerUrl(e.target.value)}
-                    placeholder="https://…/{map_id}/object-search/localize"
-                    spellCheck={false}
-                  />
-                ) : null}
-              </div>
-            ) : null}
-
-            {searchMode === "localize-online" ? (
-              <CollapsibleOnlineOverrides
-                open={showOnlineOverrides}
-                onToggle={() => setShowOnlineOverrides((v) => !v)}
-                overrides={onlineOverrides}
-                onChange={setOnlineOverrides}
-              />
-            ) : null}
-
-            {isLocalizeMode && result ? (
-              <div className="object-search-toolbar-row checkbox-row--compact">
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={showDebugRays}
-                    onChange={(e) => setShowDebugRays(e.target.checked)}
-                  />
-                  Show depth rays
-                </label>
-              </div>
-            ) : null}
-          </form>
-          </div>
-          {!controlsCollapsed ? (
-            <>
-              <div className="os-rz os-rz-e" onPointerDown={startControlsResize("e")} />
-              <div className="os-rz os-rz-w" onPointerDown={startControlsResize("w")} />
-              <div className="os-rz os-rz-s" onPointerDown={startControlsResize("s")} />
-              <div className="os-rz os-rz-n" onPointerDown={startControlsResize("n")} />
-              <div className="os-rz os-rz-se" onPointerDown={startControlsResize("se")} />
-              <div className="os-rz os-rz-sw" onPointerDown={startControlsResize("sw")} />
-              <div className="os-rz os-rz-ne" onPointerDown={startControlsResize("ne")} />
-              <div className="os-rz os-rz-nw" onPointerDown={startControlsResize("nw")} />
-            </>
-          ) : null}
-        </div>
       </div>
 
       {/* ── Horizontal divider (panorama ↔ map) ── */}
@@ -1641,135 +1282,46 @@ function ObjectSearchPanel(props: Props) {
           <div className="os-pane-header">
             <span className="os-pane-title">Results</span>
           </div>
+          <SearchControlsCard
+            isMapKnown={props.isMapKnown}
+            isLoading={isLoading}
+            error={error ?? groupAnnotations.error}
+            resultSummary={
+              result
+                ? result.mode === "text"
+                  ? `${result.enriched.length} results`
+                  : `${localizations.length} clusters`
+                : null
+            }
+            queryInputMode={queryInputMode}
+            text={text}
+            imageFile={imageFile}
+            numResults={numResults}
+            searchMode={searchMode}
+            activeKeyframeId={activeKeyframeId}
+            bboxMode={bboxMode}
+            localizeSensitivity={localizeSensitivity}
+            maxObservationsPerCluster={maxObservationsPerCluster}
+            onlineOverrides={onlineOverrides}
+            useRemoteServer={useRemoteServer}
+            remoteServerUrl={remoteServerUrl}
+            showDebugRays={showDebugRays}
+            onSubmit={onSubmit}
+            onDismissError={() => setError(null)}
+            onQueryInputModeChange={setQueryInputMode}
+            onTextChange={setText}
+            onImageFileChange={setImageFile}
+            onNumResultsChange={setNumResults}
+            onSearchModeChange={setSearchMode}
+            onBboxModeChange={setBboxMode}
+            onLocalizeSensitivityChange={setLocalizeSensitivity}
+            onMaxObservationsPerClusterChange={setMaxObservationsPerCluster}
+            onOnlineOverridesChange={setOnlineOverrides}
+            onUseRemoteServerChange={setUseRemoteServer}
+            onRemoteServerUrlChange={setRemoteServerUrl}
+            onShowDebugRaysChange={setShowDebugRays}
+          />
           <div className="os-results-scroll">
-            {props.reviewMode &&
-            (result?.mode === "localize-online" || reviews.annotations.length > 0) ? (
-              <div className="object-search-review-toolbar">
-                <span>
-                  {reviews.isLoading
-                    ? "Loading reviews…"
-                    : `${reviews.reviewedCount} reviewed · ${reviews.truePositiveCount} correct · ${reviews.falsePositiveCount} incorrect`}
-                </span>
-                <span className="object-search-review-score">
-                  <button
-                    type="button"
-                    className="object-search-secondary-button"
-                    disabled={reviews.isLoading || isPromptScoring || !resultQuery}
-                    onClick={() => void handleScorePrompt()}
-                  >
-                    {isPromptScoring ? "Scoring…" : "Score this prompt"}
-                  </button>
-                  {promptScore ? (
-                    <span
-                      className={
-                        promptScore.row.error
-                          ? "object-search-review-score-error"
-                          : undefined
-                      }
-                      title={
-                        `Scored with ${scoreConfigSummary(promptScore.config)}. The `
-                        + "acceptance threshold follows the Sensitivity slider and "
-                        + "min_similarity is sent from these controls, so the scored "
-                        + "clusters are the ones listed."
-                      }
-                    >
-                      {promptMetricSummary(promptScore.row)}
-                    </span>
-                  ) : null}
-                  {promptScore && promptCurveSummary(promptScore.row) ? (
-                    <span
-                      className="object-search-review-score-curve"
-                      title={
-                        "Threshold-free. Compare two feedback settings on AP, not on "
-                        + "F1: the gains shift the score distribution, so the fixed "
-                        + "threshold lands elsewhere on the curve even when the "
-                        + "ranking is unchanged. The full sweep is in the run's "
-                        + "raw_results.json."
-                      }
-                    >
-                      {promptCurveSummary(promptScore.row)}
-                    </span>
-                  ) : null}
-                  {promptScore && !promptScore.row.error ? (
-                    <span
-                      className="object-search-review-score-muted"
-                      title={
-                        "TP+FP counts kept predictions, TP+FN counts ground-truth "
-                        + "annotations — the three do not sum to anything. "
-                        + "kept + rejected equals the clusters returned."
-                      }
-                    >
-                      {promptCountsSummary(promptScore.row)}
-                    </span>
-                  ) : null}
-                  {promptScoreMissing ? (
-                    <span className="object-search-review-score-muted">
-                      no benchmark ground truth for &quot;{resultQuery}&quot; — ✓/× reviews
-                      only tune feedback; they do not create benchmark ground truth
-                    </span>
-                  ) : null}
-                  {promptScoreError ? (
-                    <span className="object-search-review-score-error" role="alert">
-                      Score: {promptScoreError}
-                    </span>
-                  ) : null}
-                  {promptBaseline ? (
-                    <span
-                      className="object-search-review-score-muted"
-                      title={
-                        "The newest benchmark run that covers this prompt — not "
-                        + "necessarily an unboosted one, and not necessarily measured "
-                        + "at the current sensitivity. Compare F1 only against a run "
-                        + `whose parameters match. Run parameters: ${scoreConfigSummary(
-                          promptBaseline.config,
-                        )}.`
-                      }
-                    >
-                      last run {promptBaseline.runId}: F1{" "}
-                      {promptBaseline.row.f1.toFixed(2)} ({
-                        scoreConfigSummary(promptBaseline.config)
-                      })
-                    </span>
-                  ) : null}
-                </span>
-                <span className="object-search-review-history-actions">
-                  <button
-                    type="button"
-                    className="object-search-secondary-button"
-                    disabled={!reviews.canUndo}
-                    onClick={reviews.undo}
-                    title={
-                      reviews.annotations[0]
-                        ? `Undo review of #${reviews.annotations[0].targetId} (Ctrl/Cmd+Z)`
-                        : "Undo review (Ctrl/Cmd+Z)"
-                    }
-                  >
-                    Undo
-                  </button>
-                  <button
-                    type="button"
-                    className="object-search-secondary-button"
-                    disabled={!reviews.canRedo}
-                    onClick={reviews.redo}
-                    title="Redo review (Ctrl/Cmd+Shift+Z)"
-                  >
-                    Redo
-                  </button>
-                </span>
-              </div>
-            ) : null}
-            {props.reviewMode &&
-            (result?.mode === "localize-online" || reviews.annotations.length > 0) ? (
-              <ReviewAnnotationList
-                annotations={reviews.annotations}
-                onClear={reviews.clearAnnotation}
-              />
-            ) : null}
-            {props.reviewMode && reviews.error ? (
-              <div className="object-search-error-banner" role="alert">
-                <span>Annotations: {reviews.error}</span>
-              </div>
-            ) : null}
             {!result ? (
               <p className="os-results-empty">Run a search to see results here.</p>
             ) : result.mode === "text" ? (
@@ -1800,7 +1352,9 @@ function ObjectSearchPanel(props: Props) {
                     onSelectIdx={focusLocalization}
                     selectedObsIdx={selectedObsIdx}
                     onSelectObservation={selectLocalizationObservation}
-                    reviews={props.reviewMode ? reviews : null}
+                    reviews={reviews}
+                    onAddToBasket={addObservationsToBasket}
+                    groups={groupAnnotations}
                   />
                 </section>
                 <section className="object-search-localize-detail">
@@ -1822,579 +1376,22 @@ function ObjectSearchPanel(props: Props) {
                 </section>
               </div>
             )}
+            {result?.mode === "localize-online"
+            || reviews.annotations.length > 0 ? (
+              <ReviewSummaryBar
+                reviews={reviews}
+                promptScore={promptScore}
+                promptBaseline={promptBaseline}
+                promptScoreError={promptScoreError}
+                promptScoreMissing={promptScoreMissing}
+                isPromptScoring={isPromptScoring}
+                resultQuery={resultQuery}
+                onScorePrompt={handleScorePrompt}
+                open={isReviewOpen}
+                onToggle={() => setIsReviewOpen((current) => !current)}
+              />
+            ) : null}
           </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function CollapsibleOnlineOverrides(props: {
-  open: boolean;
-  onToggle: () => void;
-  overrides: OnlineLocalizeOverrides;
-  onChange: (value: OnlineLocalizeOverrides) => void;
-}) {
-  return (
-    <div className="object-search-toolbar-row object-search-localize-mode-row">
-      <button
-        type="button"
-        className={`object-search-secondary-button${props.open ? " active" : ""}`}
-        onClick={props.onToggle}
-        aria-expanded={props.open}
-      >
-        {props.open ? "Hide overrides" : "Online overrides"}
-      </button>
-      {props.open ? (
-        <div className="object-search-online-overrides">
-          <label className="object-search-online-input">
-            <span>min_keyframes_per_cluster</span>
-            <input
-              type="number"
-              value={props.overrides.min_keyframes_per_cluster}
-              onChange={(event) =>
-                props.onChange({
-                  ...props.overrides,
-                  min_keyframes_per_cluster: Number(event.target.value),
-                })
-              }
-            />
-          </label>
-          <label className="object-search-online-input">
-            <span>feedback_alpha</span>
-            <input
-              type="number"
-              min={0}
-              max={1}
-              step={0.01}
-              value={props.overrides.feedback_alpha}
-              onChange={(event) =>
-                props.onChange({
-                  ...props.overrides,
-                  feedback_alpha: Number(event.target.value),
-                })
-              }
-            />
-          </label>
-          <label className="object-search-online-input">
-            <span>feedback_beta</span>
-            <input
-              type="number"
-              min={0}
-              max={1}
-              step={0.01}
-              value={props.overrides.feedback_beta}
-              onChange={(event) =>
-                props.onChange({
-                  ...props.overrides,
-                  feedback_beta: Number(event.target.value),
-                })
-              }
-            />
-          </label>
-          <label
-            className="object-search-online-input"
-            title={
-              "Rescales pos_sim/neg_sim across the retrieved candidates before the "
-              + "gains apply. They are image↔image similarities (~0.7–0.9), so raw "
-              + "they are mostly a constant offset, and a constant offset flattens "
-              + "the cluster ranking rather than sharpening it. Inert while both "
-              + "gains are 0."
-            }
-          >
-            <span>feedback_normalization</span>
-            <select
-              value={props.overrides.feedback_normalization}
-              disabled={
-                !props.overrides.feedback_alpha && !props.overrides.feedback_beta
-              }
-              onChange={(event) =>
-                props.onChange({
-                  ...props.overrides,
-                  feedback_normalization: event.target
-                    .value as OnlineLocalizeOverrides["feedback_normalization"],
-                })
-              }
-            >
-              {FEEDBACK_NORMALIZATIONS.map((mode) => (
-                <option key={mode} value={mode}>
-                  {mode}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label
-            className="object-search-online-input"
-            title={
-              "Absolute cluster eligibility floor. match_score is a ratio to the "
-              + "query's best cluster and no longer depends on this value. Sent "
-              + "explicitly so 'Score this prompt' measures the list you see — the "
-              + "benchmark script's own default is 0.15, the service's is 0.2."
-            }
-          >
-            <span>min_similarity</span>
-            <input
-              type="number"
-              min={-1}
-              max={1}
-              step={0.05}
-              value={props.overrides.min_similarity}
-              onChange={(event) =>
-                props.onChange({
-                  ...props.overrides,
-                  min_similarity: Number(event.target.value),
-                })
-              }
-            />
-          </label>
-          <label className="object-search-online-input">
-            <span>level_strategy</span>
-            <select
-              value={props.overrides.level_strategy}
-              onChange={(event) =>
-                props.onChange({
-                  ...props.overrides,
-                  level_strategy:
-                    event.target.value === "median" ? "median" : "seed",
-                })
-              }
-            >
-              <option value="seed">seed (production)</option>
-              <option value="median">median</option>
-            </select>
-          </label>
-          <label className="object-search-online-input">
-            <span>candidate_count</span>
-            <input
-              type="number"
-              value={props.overrides.candidate_count}
-              onChange={(event) =>
-                props.onChange({
-                  ...props.overrides,
-                  candidate_count: Number(event.target.value),
-                })
-              }
-            />
-          </label>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function OverviewSection(props: {
-  result: ObjectSearchRunResult | null;
-  keyframeGroups: Record<string, KeyframeGroup>;
-  localizations?: ObjectLocalization[];
-}) {
-  const endpointLabel = props.result?.debug.url ?? null;
-  const elapsedLabel =
-    props.result?.debug.elapsedMs == null
-      ? null
-      : `${Math.round(props.result.debug.elapsedMs)} ms`;
-  return (
-    <div className="object-search-overview-body">
-      {!props.result ? (
-        <p className="muted">No results yet. Run a query.</p>
-      ) : (
-        <>
-          <div className="object-search-endpoint-row">
-            {endpointLabel ? <span title={endpointLabel}>{endpointLabel}</span> : null}
-            {elapsedLabel ? <strong>{elapsedLabel}</strong> : null}
-          </div>
-          {props.result.mode === "text" ? (
-            <>
-              <div className="metrics-row">
-                <span>Keyframes: {Object.keys(props.keyframeGroups).length}</span>
-                <span>Results: {props.result.enriched.length}</span>
-              </div>
-              <details>
-                <summary>Ranked results</summary>
-                <ul className="ranked-list">
-                  {props.result.enriched.map((item) => (
-                    <li key={`${item.rank}-${item.id}`}>
-                      <strong>
-                        #{item.rank} {item.id}
-                      </strong>{" "}
-                      score {formatNumber(item.score)}
-                      {item.keyframe_id ? ` · keyframe ${item.keyframe_id}` : ""}
-                      {item.resolution_error ? (
-                        <small className="block-muted">{item.resolution_error}</small>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            </>
-          ) : (
-            <>
-              <div className="metrics-row">
-                <span>Clusters: {(props.localizations ?? props.result.localizations).length}</span>
-                <span>
-                  Detections:{" "}
-                  {(props.localizations ?? props.result.localizations).reduce(
-                    (sum, loc) => sum + loc.observationCount,
-                    0,
-                  )}
-                </span>
-              </div>
-              <details>
-                <summary>Ranked localizations</summary>
-                <ul className="ranked-list">
-                  {(props.localizations ?? props.result.localizations).map((loc, index) => (
-                    <li key={`loc-${index}`}>
-                      <strong>
-                        #{index + 1} match {formatNumber(loc.matchScore)}
-                      </strong>{" "}
-                      sim {formatNumber(loc.similarityScore)}
-                      <small className="block-muted">
-                        {formatNumber(loc.lat)}, {formatNumber(loc.lng)} ·{" "}
-                        {loc.observationCount} detections
-                      </small>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            </>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function TextInspector(props: {
-  group: KeyframeGroup | null;
-  selectedCutout: EnrichedResult | null;
-  selectedCutoutId: string | null;
-  onSelectCutout: (id: string) => void;
-  previewUrl: string | null;
-}) {
-  if (!props.group) {
-    return <p className="muted">Select a keyframe on the map.</p>;
-  }
-  const cutoutOptions = props.group.results.map((item) => item.cutout_id ?? item.id);
-  return (
-    <>
-      <p>
-        <strong>Keyframe {props.group.keyframeId}</strong>
-        <br />
-        <span className="muted">
-          {props.group.results.length} cutouts · best {formatNumber(props.group.bestScore)}
-        </span>
-      </p>
-      <label>
-        Cutout
-        <select
-          value={props.selectedCutoutId ?? cutoutOptions[0] ?? ""}
-          onChange={(event) => props.onSelectCutout(event.target.value)}
-        >
-          {cutoutOptions.map((id) => (
-            <option key={id} value={id}>
-              {id}
-            </option>
-          ))}
-        </select>
-      </label>
-      {props.previewUrl ? (
-        <img className="inspector-preview" src={props.previewUrl} alt="Cutout preview" />
-      ) : (
-        <p className="muted">Preview unavailable for this cutout.</p>
-      )}
-    </>
-  );
-}
-
-function LocalizeInspector(props: {
-  mapId: string;
-  localizations: ObjectLocalization[];
-  matchThreshold: number;
-  selectedIdx: number;
-  onSelectIdx: (idx: number) => void;
-  selectedObsIdx: number;
-  onSelectObservation: (locIdx: number, obsIdx: number) => void;
-  reviews: ObjectSearchReviews | null;
-}) {
-  const [collapsedClusters, setCollapsedClusters] = useState<Set<number>>(() => new Set());
-  const selectedClusterRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    setCollapsedClusters(new Set());
-  }, [props.localizations]);
-
-  // Bring the selected cluster into view — the selection often comes from a click on
-  // the livemap marker, where the matching card can be anywhere in a 76-cluster list.
-  useEffect(() => {
-    const item = selectedClusterRef.current;
-    // The scroller is the sidebar <section> this component renders *into* (its
-    // `overflow: auto` lives on .object-search-cluster-sidebar), so there is no ref
-    // to it here.
-    const scroller = item?.closest(".object-search-cluster-sidebar");
-    if (!item || !(scroller instanceof HTMLElement)) {
-      return;
-    }
-    const itemBox = item.getBoundingClientRect();
-    const scrollerBox = scroller.getBoundingClientRect();
-    // Adjust the sidebar's own scrollTop rather than calling scrollIntoView, which
-    // would also scroll the results pane and the page. No-op when already visible.
-    //
-    // A card with many detections is taller than the sidebar; aligning its bottom
-    // would then push the header — label, match score, review buttons, i.e. the only
-    // part that identifies the cluster — off the top. Align the top in that case.
-    if (itemBox.top < scrollerBox.top || itemBox.height > scrollerBox.height) {
-      scroller.scrollTop -= scrollerBox.top - itemBox.top;
-    } else if (itemBox.bottom > scrollerBox.bottom) {
-      scroller.scrollTop += itemBox.bottom - scrollerBox.bottom;
-    }
-  }, [props.selectedIdx, props.localizations]);
-
-  const allClustersCollapsed =
-    props.localizations.length > 0 &&
-    collapsedClusters.size === props.localizations.length;
-
-  if (!props.localizations.length) {
-    return (
-      <>
-        <div className="object-search-cluster-sidebar-header">
-          <h3>Clusters</h3>
-        </div>
-        <p className="muted">No localizations.</p>
-      </>
-    );
-  }
-  return (
-    <>
-      <div className="object-search-cluster-sidebar-header">
-        <h3>Clusters</h3>
-        <button
-          type="button"
-          className="object-search-secondary-button object-search-collapse-all-button"
-          disabled={allClustersCollapsed}
-          onClick={() =>
-            setCollapsedClusters(
-              new Set(props.localizations.map((_, locIndex) => locIndex)),
-            )
-          }
-        >
-          Collapse all
-        </button>
-      </div>
-      <div className="object-search-cluster-list">
-        {props.localizations.map((loc, locIndex) => {
-          const isSelectedCluster = locIndex === props.selectedIdx;
-          const isCollapsed = collapsedClusters.has(locIndex);
-          const clusterReviewStatus = props.reviews?.clusterStatus(loc) ?? null;
-          return (
-            <article
-              className={`object-search-cluster-group${
-                isSelectedCluster ? " is-selected" : ""
-              }${clusterReviewStatus ? ` is-review-${clusterReviewStatus}` : ""}`}
-              key={`cluster-${locIndex}`}
-              ref={isSelectedCluster ? selectedClusterRef : null}
-            >
-              <div className="object-search-cluster-header">
-                <button
-                  type="button"
-                  className="object-search-cluster-collapse-button"
-                  aria-label={`${isCollapsed ? "Expand" : "Collapse"} cluster ${locIndex + 1}`}
-                  aria-expanded={!isCollapsed}
-                  onClick={() => {
-                    setCollapsedClusters((current) => {
-                      const next = new Set(current);
-                      if (next.has(locIndex)) {
-                        next.delete(locIndex);
-                      } else {
-                        next.add(locIndex);
-                      }
-                      return next;
-                    });
-                  }}
-                >
-                  {isCollapsed ? "+" : "-"}
-                </button>
-                <button
-                  type="button"
-                  className="object-search-cluster-select-button"
-                  onClick={() => {
-                    props.onSelectIdx(locIndex);
-                  }}
-                >
-                  <span className="object-search-cluster-label">
-                    {localizationScoreSymbol(loc, props.matchThreshold)} Cluster {locIndex + 1}
-                  </span>
-                  <span className="object-search-cluster-score">
-                    Match {formatNumber(loc.matchScore)}
-                  </span>
-                  <span className="object-search-cluster-count">
-                    {loc.observations.length || loc.observationCount} detections
-                  </span>
-                </button>
-                {props.reviews ? (
-                  <ReviewButtons
-                    label={`Cluster ${locIndex + 1}`}
-                    status={clusterReviewStatus}
-                    onChange={(status) => props.reviews?.setClusterStatus(loc, status)}
-                  />
-                ) : null}
-              </div>
-              <div className="object-search-cluster-meta">
-                <span>sim {formatNumber(loc.similarityScore)}</span>
-                <span>conf {formatNumber(loc.confidence)}</span>
-                {loc.level !== null ? <span>level {loc.level}</span> : null}
-                <span>
-                  {formatNumber(loc.lat)}, {formatNumber(loc.lng)}
-                </span>
-              </div>
-              {isCollapsed ? null : loc.observations.length ? (
-                <div className="object-search-cluster-detections">
-                  {loc.observations.map((obs, obsIndex) => {
-                    const isSelectedDetection =
-                      isSelectedCluster && obsIndex === props.selectedObsIdx;
-                    const reviewStatus = props.reviews?.observationStatus(obs) ?? null;
-                    return (
-                      <div
-                        key={`${locIndex}-${obs.objectIdx}-${obsIndex}`}
-                        className={`object-search-detection-card${
-                          isSelectedDetection ? " is-selected" : ""
-                        }${reviewStatus ? ` is-review-${reviewStatus}` : ""}`}
-                      >
-                        <button
-                          type="button"
-                          className="object-search-detection-select-button"
-                          onClick={() => props.onSelectObservation(locIndex, obsIndex)}
-                        >
-                          <span className="object-search-detection-image-wrap">
-                            <img
-                              src={cutoutPreviewUrl(props.mapId, obs.thumbnail)}
-                              alt={`Detection ${obsIndex + 1} in cluster ${locIndex + 1}`}
-                              loading="lazy"
-                            />
-                            <span className="object-search-detection-index">
-                              {obsIndex + 1}
-                            </span>
-                            <span className="object-search-detection-score">
-                              {formatNumber(obs.similarityScore)}
-                            </span>
-                          </span>
-                          <span className="object-search-detection-meta">
-                            <strong>Keyframe {obs.keyframeId}</strong>
-                            <small>cutout {obs.cutoutId}</small>
-                          </span>
-                        </button>
-                        {props.reviews ? (
-                          <ReviewButtons
-                            label={`Detection ${obsIndex + 1} in cluster ${locIndex + 1}`}
-                            status={reviewStatus}
-                            onChange={(status) =>
-                              props.reviews?.setObservationStatus(obs, status)
-                            }
-                          />
-                        ) : null}
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="muted">No detections returned for this cluster.</p>
-              )}
-            </article>
-          );
-        })}
-      </div>
-    </>
-  );
-}
-
-function SelectedObservationPanel(props: {
-  mapId: string;
-  localization: ObjectLocalization | null;
-  localizationIndex: number;
-  observation: ObjectObservation | null;
-  observationIndex: number;
-}) {
-  if (!props.localization) {
-    return (
-      <section className="object-search-selected-observation">
-        <h3>Selected cutout</h3>
-        <p className="muted">Select a cluster to inspect its detections.</p>
-      </section>
-    );
-  }
-  if (!props.observation) {
-    return (
-      <section className="object-search-selected-observation">
-        <h3>Selected cutout</h3>
-        <p className="muted">No detection is available for this cluster.</p>
-      </section>
-    );
-  }
-
-  const previewUrl = cutoutPreviewUrl(props.mapId, props.observation.thumbnail);
-
-  return (
-    <section className="object-search-selected-observation">
-      <div className="object-search-selected-observation-header">
-        <h3>Selected cutout</h3>
-        <span>
-          Cluster {props.localizationIndex + 1} · Detection {props.observationIndex + 1}
-        </span>
-      </div>
-      <div className="object-search-selected-observation-body">
-        <img
-          className="object-search-selected-observation-image"
-          src={previewUrl}
-          alt={`Selected cutout ${props.observation.cutoutId}`}
-        />
-        <div className="object-search-selected-observation-meta">
-          <div>
-            <strong>Keyframe</strong>
-            <span>{props.observation.keyframeId}</span>
-          </div>
-          <div>
-            <strong>Cutout</strong>
-            <span>{props.observation.cutoutId}</span>
-          </div>
-          <div>
-            <strong>Similarity</strong>
-            <span>{formatNumber(props.observation.similarityScore)}</span>
-          </div>
-          <div>
-            <strong>Bbox</strong>
-            <span>{props.observation.bbox.map((value) => Math.round(value)).join(", ")}</span>
-          </div>
-          {props.observation.heading !== null ? (
-            <div>
-              <strong>Heading</strong>
-              <span>{formatNumber(props.observation.heading)} deg</span>
-            </div>
-          ) : null}
-          {props.observation.quaternion !== null ? (
-            <div>
-              <strong>Quaternion</strong>
-              <span>{props.observation.quaternion.map(formatNumber).join(", ")}</span>
-            </div>
-          ) : null}
-          {props.observation.coordinates ? (
-            <div>
-              <strong>Coordinates</strong>
-              <span>
-                {formatNumber(props.observation.coordinates[0])},{" "}
-                {formatNumber(props.observation.coordinates[1])}
-              </span>
-            </div>
-          ) : null}
-          <div>
-            <strong>Cluster position</strong>
-            <span>
-              {formatNumber(props.localization.lat)}, {formatNumber(props.localization.lng)}
-            </span>
-          </div>
-          {props.localization.level !== null ? (
-            <div>
-              <strong>Cluster level</strong>
-              <span>{props.localization.level}</span>
-            </div>
-          ) : null}
         </div>
       </div>
     </section>

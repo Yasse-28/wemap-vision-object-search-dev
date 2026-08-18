@@ -1,45 +1,35 @@
-import type {
-  ApiDebugInfo,
-  EnrichedResult,
-  KeyframeDebugMetadata,
-  ObjectLocalization,
-  ObjectObservation,
-  ObjectSearchRunResult,
-  OnlineLocalizeOverrides,
-  RunObjectSearchParams,
+import {
+  DEFAULT_ONLINE_OVERRIDES,
+  type ApiDebugInfo,
+  type EnrichedResult,
+  type KeyframeDebugMetadata,
+  type ObjectLocalization,
+  type ObjectObservation,
+  type ObjectSearchRunResult,
+  type OnlineLocalizeOverrides,
+  type RunObjectSearchParams,
 } from "./types";
+import { fetchJson } from "../http";
 
-async function readJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text) {
-    return null;
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
+const ASSOCIATION_OVERRIDE_KEYS: ReadonlySet<keyof OnlineLocalizeOverrides> = new Set([
+  "association",
+  "combination",
+  "association_sim_threshold",
+  "max_depth_m",
+  "max_depth_stage",
+  "max_cluster_spread_m",
+  "min_observations_per_cluster",
+]);
 
-async function fetchJson(path: string, options?: RequestInit): Promise<unknown> {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      Accept: "application/json",
-      ...options?.headers,
-    },
-  });
-  const data = await readJson(response);
-  if (!response.ok) {
-    const details =
-      data == null
-        ? "empty response (is the object-search API running?)"
-        : typeof data === "string"
-          ? data
-          : JSON.stringify(data);
-    throw new Error(`HTTP ${response.status}: ${details}`);
-  }
-  return data;
+/*
+ * The service owns these defaults. Omitting unchanged association controls keeps
+ * requests from an untouched panel byte-for-byte equivalent to the previous UI.
+ */
+function isDefaultAssociationOverride(
+  key: keyof OnlineLocalizeOverrides,
+  value: OnlineLocalizeOverrides[keyof OnlineLocalizeOverrides],
+): boolean {
+  return ASSOCIATION_OVERRIDE_KEYS.has(key) && value === DEFAULT_ONLINE_OVERRIDES[key];
 }
 
 function parseTextPairs(raw: unknown): {
@@ -89,6 +79,11 @@ function parseBbox(item: Record<string, unknown>): [number, number, number, numb
   return bbox.every(Number.isFinite) ? bbox : null;
 }
 
+function finiteOrNull(value: unknown): number | null {
+  const parsed = Number(value);
+  return value != null && Number.isFinite(parsed) ? parsed : null;
+}
+
 function parseObservation(item: Record<string, unknown>): ObjectObservation | null {
   const coordinates = Array.isArray(item.coordinates) ? item.coordinates : null;
   const bbox = parseBbox(item);
@@ -116,6 +111,8 @@ function parseObservation(item: Record<string, unknown>): ObjectObservation | nu
         ? [Number(coordinates[0]), Number(coordinates[1]), Number(coordinates[2])]
         : null,
     bbox,
+    thetaCenter: finiteOrNull(item.theta_center),
+    phiCenter: finiteOrNull(item.phi_center),
     similarityScore: Number(item.similarity_score ?? 0),
     quaternion,
     heading: heading == null || Number.isFinite(heading) ? heading : null,
@@ -227,10 +224,13 @@ function parseDebugKeyframes(raw: unknown): Record<string, KeyframeDebugMetadata
 function onlineOverrideEntries(
   overrides: OnlineLocalizeOverrides,
 ): Array<[string, boolean | number | string]> {
-  return Object.entries(overrides).map(([key, value]) => [
-    key === "merge_radius" ? "clustering_eps_m" : key,
-    value,
-  ]);
+  return Object.entries(overrides).flatMap(([rawKey, value]) => {
+    const key = rawKey as keyof OnlineLocalizeOverrides;
+    if (value === null || isDefaultAssociationOverride(key, value)) {
+      return [];
+    }
+    return [[key === "merge_radius" ? "clustering_eps_m" : key, value]];
+  });
 }
 
 /**
@@ -305,7 +305,6 @@ export async function runObjectSearch(
       body: JSON.stringify({
         text: params.text,
         num_results: params.numResults,
-        search_type: params.searchType,
       }),
     });
     const { routerObjectType } = parseTextPairs(raw);

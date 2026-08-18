@@ -259,9 +259,6 @@ export function useObjectSearchReviews(options: {
   }, [applyChanges, redoStack]);
 
   useEffect(() => {
-    if (!options.enabled) {
-      return;
-    }
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (isEditableElement(event.target)) {
         return;
@@ -282,7 +279,7 @@ export function useObjectSearchReviews(options: {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [options.enabled, redo, redoStack.length, undo, undoStack.length]);
+  }, [redo, redoStack.length, undo, undoStack.length]);
 
   const counts = useMemo(() => {
     // Counts cover every annotation for the query, including hidden results.

@@ -22,6 +22,12 @@ import {
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
 import type { LivemapMarker, LivemapPolygon, LivemapSegment } from "../annotations/types";
 import DismissibleAlert from "../DismissibleAlert";
+import ExportDialog from "../export-roi/ExportDialog";
+import ExportRoiPanel from "../export-roi/ExportRoiPanel";
+import { keyframesInRois, roisForRequest } from "../export-roi/selection";
+import { useExportSession } from "../export-roi/session";
+import "../export-roi/export-roi.css";
+import { bearingDegrees, projectKeyframeToLocalFloor } from "../geo";
 import {
   fetchKeyframeGraph,
   fetchMetadataKeyframes,
@@ -47,9 +53,24 @@ import type {
   MetadataStatusResponse,
   MetadataSummary,
 } from "../index-explorer/types";
+import {
+  KEYFRAME_GRAPH_COLOR,
+  KEYFRAME_TRACK_COLOR,
+  KEYFRAME_LINK_COLOR,
+  KEYFRAME_MARKER_COLOR,
+  KEYFRAME_MARKER_PRUNED_COLOR,
+  KEYFRAME_MARKER_RADIUS,
+  KEYFRAME_MARKER_SELECTED_COLOR,
+  KEYFRAME_MARKER_SELECTED_RADIUS,
+  KEYFRAME_MARKER_UNKNOWN_COLOR,
+  EXPORT_ROI_COLOR,
+  VIEW_CONE_COLOR,
+  VIEW_CONE_HALF_ANGLE_DEG,
+} from "../theme";
 import BboxPostProcessControls from "./BboxPostProcessControls";
-import { bboxArea, postProcessDetections } from "./bboxPostProcess";
+import { bboxArea, bboxPolygonRatios, postProcessDetections } from "./bboxPostProcess";
 import { useBboxPostProcessParams } from "./useBboxPostProcessParams";
+import { buildKeyframeTrack } from "./keyframeTrack";
 import { useEquirectFrameHeight } from "./useEquirectFrameHeight";
 import { useLivemapFrameHeight } from "./useLivemapFrameHeight";
 
@@ -93,41 +114,13 @@ type PhotosphereNavigationCandidate = {
 // [6, 12, 24, 48] would have put well over a thousand thumbnails in one grid.
 const PAGE_SIZE_OPTIONS = [1, 2, 4, 8];
 const COLUMN_OPTIONS = [1, 2, 3, 4, 5];
-const KEYFRAME_MARKER_COLOR = "#9ca3af";
-const KEYFRAME_MARKER_SELECTED_COLOR = "#16a34a";
-const KEYFRAME_MARKER_RADIUS = 6;
-const KEYFRAME_MARKER_SELECTED_RADIUS = 8;
-/** Keyframes with rows in the parquet but pruned from pgvector at ingest time. */
-const KEYFRAME_MARKER_PRUNED_COLOR = "#f97316";
-/** No summary is available for this marker on the server-paged current page. */
-const KEYFRAME_MARKER_UNKNOWN_COLOR = "#8b5cf6";
 const EquirectPhotoSphereViewer = lazy(() => import("./EquirectPhotoSphereViewer"));
 const DEPTH_PIN_MIN_DEPTH_M = 0.25;
-const VIEW_CONE_HALF_ANGLE_DEG = 25;
-const VIEW_CONE_COLOR = KEYFRAME_MARKER_SELECTED_COLOR;
 const VISUAL_SPLIT_MIN_PERCENT = 25;
 const VISUAL_SPLIT_MAX_PERCENT = 75;
 const KEYFRAME_GRAPH_STORAGE_KEY = "object-search-gui.showKeyframeGraph";
-const KEYFRAME_GRAPH_COLOR = "#64748b";
-const KEYFRAME_LINK_COLOR = "#9333ea";
+const KEYFRAME_TRACK_STORAGE_KEY = "object-search-gui.showKeyframeTrack";
 const PHOTOSPHERE_NAVIGATION_MAX_DISTANCE_M = 40;
-
-/** Initial compass bearing (degrees, 0 = north, clockwise) from one lng/lat to another. */
-function bearingDegrees(
-  from: { latitude: number; longitude: number },
-  to: { latitude: number; longitude: number },
-): number {
-  const toRad = Math.PI / 180;
-  const lat1 = from.latitude * toRad;
-  const lat2 = to.latitude * toRad;
-  const dLon = (to.longitude - from.longitude) * toRad;
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x =
-    Math.cos(lat1) * Math.sin(lat2) -
-    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
-}
-const EARTH_RADIUS_M = 6378137;
 
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   try {
@@ -136,57 +129,6 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
   } catch {
     return fallback;
   }
-}
-
-function projectKeyframeToLocalFloor(
-  source: {
-    latitude: number;
-    longitude: number;
-    heading_deg: number;
-  },
-  destination: {
-    latitude: number;
-    longitude: number;
-  },
-): Pick<PhotosphereNavigationCandidate, "localX" | "localZ"> & {
-  distanceM: number;
-} {
-  const latitudeRad = source.latitude * Math.PI / 180;
-  const east =
-    (destination.longitude - source.longitude) *
-    Math.PI / 180 *
-    EARTH_RADIUS_M *
-    Math.cos(latitudeRad);
-  const north =
-    (destination.latitude - source.latitude) *
-    Math.PI / 180 *
-    EARTH_RADIUS_M;
-  const distance = Math.hypot(east, north);
-  const bearing = Math.atan2(east, north);
-  const localYaw = bearing - source.heading_deg * Math.PI / 180;
-  return {
-    localX: distance * Math.sin(localYaw),
-    localZ: -distance * Math.cos(localYaw),
-    distanceM: distance,
-  };
-}
-
-/**
- * The four corners of a row's reconstructed ERP box, in texture ratios.
- *
- * The box arrives ready-made in `erp_bbox_ratios`, so there is no geometry here any
- * more — the 45 lines of cubemap algebra this replaces lived in two copies (here and
- * in the backend) and had to agree. `u` is intentionally left unwrapped: the viewer
- * reads it as a yaw, where 1.02 and 0.02 are the same direction.
- */
-function bboxPolygonRatios(row: MetadataRowRecord): Array<[number, number]> {
-  const [u0, v0, u1, v1] = row.erp_bbox_ratios;
-  return [
-    [u0, v0],
-    [u1, v0],
-    [u1, v1],
-    [u0, v1],
-  ];
 }
 
 /**
@@ -219,6 +161,11 @@ function ObjectSearchExplorerPanel(props: Props) {
   const [showPhotosphereBoxes, setShowPhotosphereBoxes] = useState(false);
   const [panoramaViewMode, setPanoramaViewMode] =
     useState<PanoramaViewMode>("image");
+  // On by default: without it the livemap shows an empty floor plan on any map with
+  // no 360-viewer graph, which is most of them.
+  const [showKeyframeTrack, setShowKeyframeTrack] = useState(() =>
+    readStoredBoolean(KEYFRAME_TRACK_STORAGE_KEY, true),
+  );
   const [showKeyframeGraph, setShowKeyframeGraph] = useState(() =>
     readStoredBoolean(KEYFRAME_GRAPH_STORAGE_KEY, true),
   );
@@ -381,6 +328,14 @@ function ObjectSearchExplorerPanel(props: Props) {
   }, [showKeyframeGraph]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(KEYFRAME_TRACK_STORAGE_KEY, String(showKeyframeTrack));
+    } catch {
+      /* ignore */
+    }
+  }, [showKeyframeTrack]);
+
+  useEffect(() => {
     if (!props.isMapKnown) {
       setKeyframeGraph(null);
       return;
@@ -430,6 +385,17 @@ function ObjectSearchExplorerPanel(props: Props) {
   }, [metadataRows, bboxPostProcess]);
 
   const emmid = props.map?.emmid ?? null;
+
+  // The ROI tool draws one polygon; what it selects is the choice here. Counting
+  // annotations was its only job until the export needed the same gesture over
+  // keyframes, so the drawing stays single and the target is switched.
+  const [roiTarget, setRoiTarget] = useState<"annotations" | "keyframes">("annotations");
+  const exportSession = useExportSession(props.mapId);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const exportSelection = useMemo(
+    () => keyframesInRois(markers, exportSession.rois),
+    [markers, exportSession.rois],
+  );
   const { height: livemapFrameHeight, isDragging: isResizingLivemap, startResize: startLivemapResize } =
     useLivemapFrameHeight();
   const { height: equirectFrameHeight, isDragging: isResizingEquirect, startResize: startEquirectResize } =
@@ -501,8 +467,14 @@ function ObjectSearchExplorerPanel(props: Props) {
     markers?.find((marker) => marker.id === activeKeyframeId) ?? null;
 
   useEffect(() => {
+    // The export's ROI count reads this table too: without it the panel would report
+    // zero selected keyframes rather than "not loaded", which is the worse failure.
     const needsMarkerTable =
-      showKeyframeGraph || activeKeyframeId !== null || keyframeLink !== null;
+      showKeyframeGraph ||
+      showKeyframeTrack ||
+      roiTarget === "keyframes" ||
+      activeKeyframeId !== null ||
+      keyframeLink !== null;
     if (!props.isMapKnown || !needsMarkerTable || markers !== null) {
       return;
     }
@@ -531,6 +503,8 @@ function ObjectSearchExplorerPanel(props: Props) {
     props.mapId,
     props.isMapKnown,
     showKeyframeGraph,
+    showKeyframeTrack,
+    roiTarget,
     activeKeyframeId,
     keyframeLink,
     markers,
@@ -575,8 +549,10 @@ function ObjectSearchExplorerPanel(props: Props) {
     annotation.markers,
   ]);
 
-  const graphHoverMarkers: LivemapMarker[] = useMemo(() => {
-    if (!showKeyframeGraph || !markers?.length) {
+  // The markers the hover-reveal picks from. Nothing renders them all: an overlay is
+  // shown as lines, and the point under the cursor is the one that appears.
+  const hoverRevealMarkers: LivemapMarker[] = useMemo(() => {
+    if ((!showKeyframeGraph && !showKeyframeTrack) || !markers?.length) {
       return [];
     }
     // Only the current server page has summaries. Every other pose remains visible
@@ -603,6 +579,7 @@ function ObjectSearchExplorerPanel(props: Props) {
     });
   }, [
     showKeyframeGraph,
+    showKeyframeTrack,
     markers,
     keyframeSummaryById,
     selectedKeyframeForMap,
@@ -695,10 +672,25 @@ function ObjectSearchExplorerPanel(props: Props) {
     };
   }, [activeKeyframeMarker, photosphereViewKeyframeId, activeKeyframeId, photosphereYawRad]);
 
-  const livemapPolygons: LivemapPolygon[] = useMemo(
-    () => annotation.polygons,
-    [annotation.polygons],
+  const livemapPolygons: LivemapPolygon[] = useMemo(() => {
+    // Saved regions ride the existing polygon overlay: `LivemapPolygon` carries a
+    // level and Mapbox already filters on it, so per-floor display costs nothing.
+    const sessionPolygons: LivemapPolygon[] = exportSession.rois.map((roi) => ({
+      id: `export-roi-${roi.id}`,
+      coordinates: roi.ring.map((point) => [point.longitude, point.latitude]),
+      color: EXPORT_ROI_COLOR,
+      level: roi.level,
+      opacity: 0.16,
+      lineOpacity: 0.9,
+      lineWidth: 2,
+    }));
+    return [...annotation.polygons, ...sessionPolygons];
+  }, [annotation.polygons, exportSession.rois]);
+  const keyframeTrackSegments: LivemapSegment[] = useMemo(
+    () => (showKeyframeTrack ? buildKeyframeTrack(markers, KEYFRAME_TRACK_COLOR) : []),
+    [showKeyframeTrack, markers],
   );
+
   const keyframeGraphSegments: LivemapSegment[] = useMemo(() => {
     if (!showKeyframeGraph || !keyframeGraph?.available) {
       return [];
@@ -750,8 +742,8 @@ function ObjectSearchExplorerPanel(props: Props) {
     ];
   }, [keyframeLink, annotation.annotations, markers]);
   const livemapSegments: LivemapSegment[] = useMemo(
-    () => [...keyframeGraphSegments, ...keyframeLinkSegments],
-    [keyframeGraphSegments, keyframeLinkSegments],
+    () => [...keyframeTrackSegments, ...keyframeGraphSegments, ...keyframeLinkSegments],
+    [keyframeTrackSegments, keyframeGraphSegments, keyframeLinkSegments],
   );
 
   const selectGraphKeyframe = useCallback(
@@ -1560,6 +1552,28 @@ function ObjectSearchExplorerPanel(props: Props) {
 
       <ExplorerAnnotationControls workspace={annotation} />
 
+      {roiTarget === "keyframes" ? (
+        <ExportRoiPanel
+          session={exportSession}
+          selection={exportSelection}
+          currentLevel={annotation.currentLevel}
+          onExport={() => {
+            exportSession.stop();
+            setExportDialogOpen(true);
+          }}
+        />
+      ) : null}
+
+      {exportDialogOpen ? (
+        <ExportDialog
+          mapId={props.mapId}
+          rois={roisForRequest(exportSession.rois)}
+          liveTotal={exportSelection.total}
+          onClose={() => setExportDialogOpen(false)}
+          onExported={() => exportSession.clear()}
+        />
+      ) : null}
+
       <div
         ref={visualSplitRef}
         className="object-search-visual-split"
@@ -1580,8 +1594,27 @@ function ObjectSearchExplorerPanel(props: Props) {
                     Show graph ({keyframeGraph.edges.length} edges)
                   </label>
                 ) : null}
+                <label className="inline-check">
+                  <input
+                    type="checkbox"
+                    checked={showKeyframeTrack}
+                    onChange={(event) => setShowKeyframeTrack(event.target.checked)}
+                  />
+                  Show track ({keyframeTrackSegments.length} segments)
+                </label>
                 <div className="object-search-livemap-roi-toolbar">
                   <span>ROI</span>
+                  <select
+                    value={roiTarget}
+                    aria-label="What the drawn region selects"
+                    onChange={(event) => {
+                      annotation.clearRoi();
+                      setRoiTarget(event.target.value as "annotations" | "keyframes");
+                    }}
+                  >
+                    <option value="annotations">Count annotations</option>
+                    <option value="keyframes">Select keyframes</option>
+                  </select>
                   <button
                     type="button"
                     className={`secondary-button${
@@ -1601,9 +1634,11 @@ function ObjectSearchExplorerPanel(props: Props) {
                     Clear
                   </button>
                   <span className="object-search-livemap-roi-summary">
-                    {annotation.roiCounts
-                      ? `Total ${annotation.roiCounts.total}`
-                      : `Level ${annotation.currentLevel === null ? "-" : annotation.currentLevel}`}
+                    {roiTarget === "keyframes"
+                      ? `${exportSelection.total} keyframes`
+                      : annotation.roiCounts
+                        ? `Total ${annotation.roiCounts.total}`
+                        : `Level ${annotation.currentLevel === null ? "-" : annotation.currentLevel}`}
                   </span>
                 </div>
               </div>
@@ -1641,10 +1676,18 @@ function ObjectSearchExplorerPanel(props: Props) {
                     coneColor={VIEW_CONE_COLOR}
                     roiActive={annotation.roiActive}
                     roiPolygon={annotation.roiPolygon}
-                    onRoiChange={annotation.setRoiPolygon}
+                    onRoiChange={(polygon) => {
+                      annotation.setRoiPolygon(polygon);
+                      // The level is frozen at close time, not read at export time:
+                      // the whole point of a session is drawing on one floor, then
+                      // another.
+                      if (roiTarget === "keyframes" && polygon && exportSession.active) {
+                        exportSession.addRoi(polygon, annotation.currentLevel);
+                      }
+                    }}
                     onLevelChange={annotation.setCurrentLevel}
                     onMarkerContextMenu={handleMarkerContextMenu}
-                    segmentHoverMarkers={graphHoverMarkers}
+                    segmentHoverMarkers={hoverRevealMarkers}
                     onSegmentMarkerClick={selectGraphKeyframe}
                     markerPopover={
                       depthPinPopoverOpen &&
@@ -1711,9 +1754,9 @@ function ObjectSearchExplorerPanel(props: Props) {
                 <p className="map-caption">
                   {status?.marker_count ?? 0} keyframes have a resolvable pose;{" "}
                   {totalKeyframes} match the proposal filters.
-                  {showKeyframeGraph
-                    ? " Hover the graph to reveal the closest keyframe; click the graph or revealed point to filter cutouts."
-                    : " Enable the graph to reveal nearby keyframes on hover."}
+                  {showKeyframeGraph || showKeyframeTrack
+                    ? " Hover an overlay to reveal the closest keyframe; click it or the revealed point to filter cutouts."
+                    : " Enable the track — or the graph, where one exists — to reveal keyframes on hover."}
                 </p>
               </>
             )}

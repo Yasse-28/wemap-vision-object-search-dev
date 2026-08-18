@@ -3,9 +3,15 @@
 For each prompt, every retrieved detection is labelled with its nearest annotation
 within ``--near-m``. Upper-triangle pairs of labelled detections are then split into
 same-object and different-object examples. The report contains distribution
-percentiles and rank AUC for depth-point distance, forward ray-to-ray distance, and
-cutout cosine. Ray pairs whose closest approach is behind either camera are reported
-as unusable rather than silently counted as large distances.
+percentiles and rank AUC for depth-point distance, forward ray-to-ray distance,
+cutout cosine, and keyframe-index adjacency. Ray pairs whose closest approach is
+behind either camera are reported as unusable rather than silently counted as large
+distances.
+
+Every cue is also reported **conditionally on geometry** — restricted to the pairs
+depth distance has already brought under ``--conditional-m``. That is the number that
+decides whether a cue is worth implementing: any cue correlated with spatial proximity
+scores well unconditionally while adding nothing once geometry is known.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ from toolbox.benchmark.object_search_http_benchmark import (
     load_annotations,
 )
 from toolbox.bricks.candidates import EnrichedCandidate
-from toolbox.bricks.localize import _ray_closest_approach_pairs
+from toolbox.bricks.localize import _ray_closest_approach_pairs, angular_gap_ratio
 
 PERCENTILES = (5.0, 25.0, 50.0, 75.0, 95.0)
 
@@ -132,13 +138,32 @@ def _nearest_annotation_labels(
     return labels
 
 
+def _keyframe_order_coherence(
+    delta_id: np.ndarray, distance_m: np.ndarray
+) -> dict[str, float]:
+    """Median metric distance in bands of keyframe-index separation.
+
+    A capture walked in one pass makes distance grow with ``|Δ id|``. A map captured
+    in several sessions does not, and a temporal term would then be meaningless — so
+    this is reported before any AUC is read.
+    """
+    bands = ((1, 1), (2, 3), (4, 10), (11, 50), (51, 1_000_000))
+    coherence: dict[str, float] = {}
+    for low, high in bands:
+        selected = distance_m[(delta_id >= low) & (delta_id <= high)]
+        if selected.size:
+            coherence[f"delta_{low}_{high}"] = float(np.median(selected))
+    return coherence
+
+
 def evaluate_prompt_cues(
     candidates: Sequence[EnrichedCandidate],
     annotations: Sequence[Annotation],
     *,
     near_m: float,
-) -> dict[str, CueReport | int]:
-    """Evaluate all three cues for one prompt's retrieved candidate set."""
+    conditional_m: float = 2.0,
+) -> dict[str, object]:
+    """Evaluate every cue for one prompt's retrieved candidate set."""
     labels = _nearest_annotation_labels(candidates, annotations, near_m)
     labelled_indices = np.flatnonzero(labels >= 0)
     if labelled_indices.size < 2:
@@ -176,19 +201,51 @@ def evaluate_prompt_cues(
         cosine = np.einsum("ij,ij->i", normalized[local_i], normalized[local_j])
         semantic_usable = np.ones(local_i.size, dtype=bool)
 
+    keyframes = np.asarray(
+        [item.video_keyframe_id for item in labelled], dtype=np.int64
+    )
+    delta_id = np.abs(keyframes[local_i] - keyframes[local_j]).astype(np.float64)
+
+    # Intra-panorama layout: the angular gap normalised by the boxes' own extent, the
+    # quantity `matching.cannot_link_pairs` thresholds at 1.5. Only defined for two
+    # boxes of one keyframe, so its usable mask is the same-keyframe mask.
+    layout_gap = angular_gap_ratio(
+        np.asarray([item.theta_center for item in labelled], dtype=np.float64),
+        np.asarray([item.phi_center for item in labelled], dtype=np.float64),
+        np.asarray([item.angular_width for item in labelled], dtype=np.float64),
+        np.asarray([item.angular_height for item in labelled], dtype=np.float64),
+        local_i,
+        local_j,
+    )
+    layout_usable = (keyframes[local_i] == keyframes[local_j]) & np.isfinite(layout_gap)
+    layout_gap = np.where(layout_usable, layout_gap, 0.0)
+
     all_usable = np.ones(local_i.size, dtype=bool)
-    return {
+    # The pairs geometry has already accepted. A cue that does not separate *these*
+    # adds nothing to an association that starts from depth distance.
+    near_geometry = depth <= float(conditional_m)
+    cues = {
+        "depth_distance_m": (depth, all_usable, False),
+        "ray_distance_m": (ray, ray_usable, False),
+        "cutout_cosine": (cosine, semantic_usable, True),
+        "keyframe_delta": (delta_id, all_usable, False),
+        "same_keyframe_gap": (layout_gap, layout_usable, False),
+    }
+    report: dict[str, object] = {
         "labelled_detections": int(labelled_indices.size),
         "same_pairs": int(np.count_nonzero(same_mask)),
         "different_pairs": int(np.count_nonzero(~same_mask)),
-        "depth_distance_m": _cue_report(
-            depth, same_mask, all_usable, higher_is_same=False
-        ),
-        "ray_distance_m": _cue_report(ray, same_mask, ray_usable, higher_is_same=False),
-        "cutout_cosine": _cue_report(
-            cosine, same_mask, semantic_usable, higher_is_same=True
-        ),
+        "near_geometry_pairs": int(np.count_nonzero(near_geometry)),
+        "keyframe_order_coherence_m": _keyframe_order_coherence(delta_id, depth),
     }
+    for name, (values, usable, higher_is_same) in cues.items():
+        report[name] = _cue_report(
+            values, same_mask, usable, higher_is_same=higher_is_same
+        )
+        report[f"{name}_given_geometry"] = _cue_report(
+            values, same_mask, usable & near_geometry, higher_is_same=higher_is_same
+        )
+    return report
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -198,6 +255,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--ann-base-url", required=True)
     parser.add_argument("--prompts", nargs="+", required=True)
     parser.add_argument("--near-m", type=float, default=1.0)
+    parser.add_argument("--conditional-m", type=float, default=2.0)
+    parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--candidate-count", type=int, default=1000)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--refresh", action="store_true")
@@ -220,14 +279,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         map_path,
         args.ann_base_url,
         args.candidate_count,
-        map_path / "benchmark" / "cache" / "pair-cue-separability",
+        args.cache_dir or map_path / "benchmark" / "cache" / "pair-cue-separability",
         args.prompts,
         refresh=args.refresh,
         timeout_s=args.timeout,
     )
     report = {
         prompt: evaluate_prompt_cues(
-            prompt_candidates[prompt], by_prompt_annotations[prompt], near_m=args.near_m
+            prompt_candidates[prompt],
+            by_prompt_annotations[prompt],
+            near_m=args.near_m,
+            conditional_m=args.conditional_m,
         )
         for prompt in prompt_candidates
     }

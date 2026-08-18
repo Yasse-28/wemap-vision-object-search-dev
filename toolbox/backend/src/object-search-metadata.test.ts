@@ -25,6 +25,7 @@ function mapEntry(mapPath: string): MapEntry {
     emmid: null,
     geo_ref_id: 1,
     object_search: null,
+    parent_map: null,
   };
 }
 

@@ -87,6 +87,7 @@ async function createMap(
       emmid: null,
       geo_ref_id: 1,
       object_search: null,
+      parent_map: null,
     },
     cleanup: () => rm(mapPath, { recursive: true, force: true }),
   };

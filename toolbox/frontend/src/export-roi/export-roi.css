@@ -1,0 +1,318 @@
+/* Export selection panel and its dialogs. Plain, like the Matching tab: the counts
+   are the content. Every colour comes from tokens.css. */
+
+.export-roi-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-surface);
+}
+
+.export-roi-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.export-roi-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.export-roi-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--c-border-faint);
+}
+
+.export-roi-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.export-roi-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  border-radius: 4px;
+}
+
+.export-roi-row:hover {
+  background: var(--c-surface-muted);
+}
+
+.export-roi-name {
+  font-weight: 500;
+}
+
+.export-roi-meta {
+  color: var(--c-text-muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.export-roi-per-level {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.export-roi-per-level li {
+  display: flex;
+  justify-content: space-between;
+  color: var(--c-text-muted);
+  font-size: 0.82rem;
+}
+
+.export-roi-total {
+  margin: 6px 0 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--c-border-faint);
+}
+
+.export-roi-actions,
+.export-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Icon buttons are local to this feature; the shell has no such class. */
+.export-roi-panel .icon-button,
+.export-dialog .icon-button,
+.map-row-delete.icon-button {
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 2px 7px;
+  background: none;
+  color: var(--c-text-muted);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.export-roi-panel .icon-button:hover:not(:disabled),
+.export-dialog .icon-button:hover:not(:disabled),
+.map-row-delete.icon-button:hover:not(:disabled) {
+  border-color: var(--c-border);
+  background: var(--c-surface-muted);
+}
+
+.export-roi-panel .icon-button.is-danger:hover:not(:disabled),
+.map-row-delete.icon-button:hover:not(:disabled) {
+  border-color: var(--c-danger-border);
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.export-roi-panel .icon-button:disabled,
+.map-row-delete.icon-button:disabled {
+  color: var(--c-disabled);
+  cursor: not-allowed;
+}
+
+/* --- dialogs ------------------------------------------------------------- */
+
+.export-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgb(17 24 39 / 45%);
+}
+
+.export-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(640px, 100%);
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 16px;
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  background: var(--c-surface);
+}
+
+.export-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.export-dialog-header h3 {
+  margin: 0;
+}
+
+.export-dialog-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 6px;
+  background: var(--c-surface-raised);
+}
+
+.export-dialog-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.export-dialog-breadcrumb code {
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.export-dialog-dirs {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.export-dialog-dirs button {
+  width: 100%;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 6px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.export-dialog-dirs button:hover {
+  background: var(--c-surface-muted);
+}
+
+.export-dialog-newfolder {
+  display: flex;
+  gap: 8px;
+}
+
+.export-dialog-newfolder input {
+  flex: 1;
+}
+
+.export-dialog-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.export-dialog-fields > label > span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--c-text-muted);
+  font-size: 0.82rem;
+}
+
+.export-dialog-fields > label > input {
+  width: 100%;
+}
+
+.export-dialog-count {
+  margin: 4px 0 0;
+}
+
+/* The two counts can legitimately differ; the gap is information, not an error. */
+.export-dialog-mismatch {
+  color: var(--c-warn);
+  font-size: 0.82rem;
+}
+
+.export-dialog-snippet {
+  overflow-x: auto;
+  padding: 8px;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 4px;
+  background: var(--c-surface-muted);
+  font-size: 0.8rem;
+}
+
+.export-dialog-done {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.delete-map-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--c-text-secondary);
+  font-size: 0.88rem;
+}
+
+.delete-map-list li {
+  margin-bottom: 4px;
+}
+
+.delete-map-confirm span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--c-text-muted);
+  font-size: 0.82rem;
+}
+
+.delete-map-confirm input {
+  width: 100%;
+}
+
+.primary-button.is-danger {
+  border-color: var(--c-danger-border);
+  background: var(--c-danger);
+}
+
+.primary-button.is-danger:disabled {
+  border-color: var(--c-border);
+  background: var(--c-disabled);
+}
+
+/* --- the map tree on the home page --------------------------------------- */
+
+.map-tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.map-tree-node .map-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.map-tree-children {
+  /* One indent step per level, with a rule so a deep tree stays readable. */
+  margin-left: 18px;
+  padding-left: 12px;
+  border-left: 1px solid var(--c-border-faint);
+}

@@ -238,6 +238,61 @@ def test_multicut_zero_semantic_weight_ignores_embeddings() -> None:
     np.testing.assert_array_equal(first, second)
 
 
+def _layout_cluster(gap_rad: float, layout_weight: float) -> NDArray[np.int32]:
+    """Two boxes of one keyframe, 1.5 m apart, separated by ``gap_rad`` on the sphere.
+
+    Their combined half-extent is 0.2 rad, so ``gap_rad`` above 0.2 means disjoint
+    boxes and below it means overlapping proposals.
+    """
+    points = np.asarray([[3.0, 0.0, 0.0], [4.5, 0.0, 0.0]], dtype=np.float64)
+    return cluster_detections_multicut(
+        points,
+        np.zeros_like(points),
+        points / np.linalg.norm(points, axis=1, keepdims=True),
+        np.ones(2, dtype=bool),
+        np.asarray([7, 7], dtype=np.int64),
+        None,
+        pair_radius_m=10.0,
+        geo_pivot=1.0,
+        layout_weight=layout_weight,
+        min_keyframes_per_cluster=1,
+        box_angles=np.asarray(
+            [[0.0, 0.0, 0.2, 0.0], [gap_rad, 0.0, 0.2, 0.0]], dtype=np.float64
+        ),
+    )
+
+
+def test_multicut_layout_term_is_attractive_below_one_and_repulsive_above() -> None:
+    # Geometry alone cuts this pair (1.5 m at pivot 1 m => cost -0.5). Overlapping
+    # boxes must be able to overcome that; clearly disjoint ones must not.
+    overlapping = _layout_cluster(0.02, layout_weight=2.0)
+    disjoint = _layout_cluster(0.6, layout_weight=2.0)
+
+    assert overlapping[0] == overlapping[1]
+    assert disjoint[0] != disjoint[1]
+
+
+def test_multicut_zero_layout_weight_ignores_box_angles() -> None:
+    baseline = _layout_cluster(0.02, layout_weight=0.0)
+    swapped = _layout_cluster(0.6, layout_weight=0.0)
+
+    np.testing.assert_array_equal(baseline, swapped)
+
+
+def test_multicut_layout_term_needs_box_angles() -> None:
+    points = np.asarray([[1.0, 0.0, 0.0], [1.1, 0.0, 0.0]], dtype=np.float64)
+    with pytest.raises(ValueError, match="box angles"):
+        cluster_detections_multicut(
+            points,
+            np.zeros_like(points),
+            points / np.linalg.norm(points, axis=1, keepdims=True),
+            np.ones(2, dtype=bool),
+            np.asarray([7, 7], dtype=np.int64),
+            None,
+            layout_weight=1.0,
+        )
+
+
 def test_gaec_equal_cost_ties_use_node_indices_not_edge_order() -> None:
     edges = [(1, 2, 1.0), (0, 1, 1.0), (0, 2, -1.5)]
     forward = greedy_additive_edge_contraction(3, edges)

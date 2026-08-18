@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { fetchMaps, MapSummary } from "./api";
+import DeleteMapDialog from "./export-roi/DeleteMapDialog";
+import { buildMapTree, type MapTreeNode } from "./export-roi/mapTree";
+import "./export-roi/export-roi.css";
 import BenchmarkPanel from "./benchmark/BenchmarkPanel";
 import FeaturePanel from "./FeaturePanel";
+import MatchingPanel from "./matching/MatchingPanel";
 import ObjectSearchExplorerPanel from "./object-search-explorer/ObjectSearchExplorerPanel";
 import ObjectSearchPanel from "./object-search/ObjectSearchPanel";
 
-type Feature =
-  | "object-search"
-  | "object-search-explorer"
-  | "annotation"
-  | "benchmark";
+type Feature = "object-search" | "object-search-explorer" | "matching" | "benchmark";
 
 function getPathMapId(): string | null {
   return parseMapRoute().mapId;
@@ -31,9 +31,12 @@ function parseMapRoute(): { mapId: string | null; feature: Feature } {
   }
   let feature: Feature = "object-search";
   if (segments[1] === "annotation") {
-    feature = "annotation";
+    const base = `/ui/maps/${encodeURIComponent(mapId)}`;
+    window.history.replaceState(null, "", base);
   } else if (segments[1] === "object-search-explorer") {
     feature = "object-search-explorer";
+  } else if (segments[1] === "matching") {
+    feature = "matching";
   } else if (segments[1] === "benchmark") {
     feature = "benchmark";
   }
@@ -45,8 +48,8 @@ function mapExplorerPath(mapId: string, feature: Feature): string {
   if (feature === "object-search-explorer") {
     return `${base}/object-search-explorer`;
   }
-  if (feature === "annotation") {
-    return `${base}/annotation`;
+  if (feature === "matching") {
+    return `${base}/matching`;
   }
   if (feature === "benchmark") {
     return `${base}/benchmark`;
@@ -59,6 +62,9 @@ function App() {
   const [selectedMapId, setSelectedMapId] = useState<string | null>(getPathMapId());
   const [mapsError, setMapsError] = useState<string | null>(null);
   const [isLoadingMaps, setIsLoadingMaps] = useState(true);
+
+  // Bumped after an export or a deletion, to re-read the list the config now holds.
+  const [mapsRevision, setMapsRevision] = useState(0);
 
   useEffect(() => {
     let isMounted = true;
@@ -84,7 +90,7 @@ function App() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [mapsRevision]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -117,6 +123,7 @@ function App() {
           isLoading={isLoadingMaps}
           error={mapsError}
           onOpenMap={openMap}
+          onMapsChanged={() => setMapsRevision((current) => current + 1)}
         />
       ) : (
         <MapExplorer
@@ -130,12 +137,87 @@ function App() {
   );
 }
 
+/** One row of the map tree, plus its children. */
+function MapTreeRow(props: {
+  node: MapTreeNode;
+  onOpenMap: (mapId: string) => void;
+  onDeleteMap: (mapId: string) => void;
+}) {
+  const { map } = props.node;
+  const hasChildren = props.node.children.length > 0;
+  // Only a sub-map is deletable: a map received from production was not produced here
+  // and its pixels come from ../retrieve-map-data. A parent with children is refused
+  // so a subtree cannot be orphaned; `delete_map.py` enforces both again.
+  const deleteTitle = hasChildren
+    ? `Delete its sub-map(s) first: ${props.node.children.map((child) => child.map.id).join(", ")}`
+    : `Delete ${map.id} and its index rows permanently`;
+
+  return (
+    <>
+      <div className="map-tree-node">
+        {map.object_search_available ? (
+          <button className="map-row" type="button" onClick={() => props.onOpenMap(map.id)}>
+            <span>
+              <strong>{map.id}</strong>
+              <small>{map.path}</small>
+            </span>
+            <span aria-hidden="true">Open</span>
+          </button>
+        ) : (
+          <div className="map-row is-unavailable" aria-disabled="true">
+            <span>
+              <strong>{map.id}</strong>
+              <small>{map.path}</small>
+            </span>
+            <span
+              className="map-row-info"
+              title={map.unavailable_reason ?? "This map is not usable."}
+              role="img"
+              aria-label={map.unavailable_reason ?? "This map is not usable."}
+            >
+              ⓘ
+            </span>
+          </div>
+        )}
+        {map.parent_map ? (
+          <button
+            type="button"
+            className="map-row-delete icon-button"
+            title={deleteTitle}
+            aria-label={deleteTitle}
+            disabled={hasChildren}
+            onClick={() => props.onDeleteMap(map.id)}
+          >
+            🗑
+          </button>
+        ) : null}
+      </div>
+      {hasChildren ? (
+        <div className="map-tree-children">
+          {props.node.children.map((child) => (
+            <MapTreeRow
+              key={child.map.id}
+              node={child}
+              onOpenMap={props.onOpenMap}
+              onDeleteMap={props.onDeleteMap}
+            />
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 function HomePage(props: {
   maps: MapSummary[];
   isLoading: boolean;
   error: string | null;
   onOpenMap: (mapId: string) => void;
+  onMapsChanged: () => void;
 }) {
+  const [pendingDeletion, setPendingDeletion] = useState<string | null>(null);
+  const tree = useMemo(() => buildMapTree(props.maps), [props.maps]);
+
   return (
     <section className="page-section">
       <div className="section-heading">
@@ -150,38 +232,26 @@ function HomePage(props: {
       ) : null}
 
       <div className="map-list">
-        {props.maps.map((map) =>
-          map.object_search_available ? (
-            <button
-              className="map-row"
-              type="button"
-              key={map.id}
-              onClick={() => props.onOpenMap(map.id)}
-            >
-              <span>
-                <strong>{map.id}</strong>
-                <small>{map.path}</small>
-              </span>
-              <span aria-hidden="true">Open</span>
-            </button>
-          ) : (
-            <div className="map-row is-unavailable" key={map.id} aria-disabled="true">
-              <span>
-                <strong>{map.id}</strong>
-                <small>{map.path}</small>
-              </span>
-              <span
-                className="map-row-info"
-                title={map.unavailable_reason ?? "This map is not usable."}
-                role="img"
-                aria-label={map.unavailable_reason ?? "This map is not usable."}
-              >
-                ⓘ
-              </span>
-            </div>
-          ),
-        )}
+        {tree.map((node) => (
+          <MapTreeRow
+            key={node.map.id}
+            node={node}
+            onOpenMap={props.onOpenMap}
+            onDeleteMap={setPendingDeletion}
+          />
+        ))}
       </div>
+
+      {pendingDeletion ? (
+        <DeleteMapDialog
+          mapId={pendingDeletion}
+          onClose={() => setPendingDeletion(null)}
+          onDeleted={() => {
+            setPendingDeletion(null);
+            props.onMapsChanged();
+          }}
+        />
+      ) : null}
     </section>
   );
 }
@@ -239,16 +309,16 @@ function MapExplorer(props: {
             type="button"
             onClick={() => selectFeature("object-search-explorer")}
           >
-            Object Search Explorer
+            Explorer
           </button>
           <button
             className={`feature-button${
-              activeFeature === "annotation" ? " is-active" : ""
+              activeFeature === "matching" ? " is-active" : ""
             }`}
             type="button"
-            onClick={() => selectFeature("annotation")}
+            onClick={() => selectFeature("matching")}
           >
-            Annotation
+            Matching
           </button>
           <button
             className={`feature-button${
@@ -274,12 +344,11 @@ function MapExplorer(props: {
           mapId={props.mapId}
           isMapKnown={Boolean(props.map)}
         />
-      ) : activeFeature === "annotation" ? (
-        <ObjectSearchPanel
+      ) : activeFeature === "matching" ? (
+        <MatchingPanel
           map={props.map}
           mapId={props.mapId}
           isMapKnown={Boolean(props.map)}
-          reviewMode
         />
       ) : activeFeature === "benchmark" ? (
         <BenchmarkPanel

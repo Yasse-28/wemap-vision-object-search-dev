@@ -74,6 +74,12 @@ async function mapSummaries(configPath: string): Promise<Record<string, unknown>
         ...map,
         object_search_available: reason == null,
         unavailable_reason: reason,
+        // Resolved here rather than in the UI: the delete control is gated on a map
+        // having no children, and deriving the inverse relation client-side would put
+        // that gate in two places.
+        child_map_ids: maps
+          .filter((other: MapEntry) => other.parent_map === map.id)
+          .map((other: MapEntry) => other.id),
       };
     }),
   );
