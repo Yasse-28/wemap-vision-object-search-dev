@@ -1,5 +1,4 @@
 import {
-  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type CSSProperties,
@@ -66,7 +65,12 @@ import {
   VIEW_CONE_HALF_ANGLE_DEG,
 } from "../theme";
 import BboxPostProcessControls from "./BboxPostProcessControls";
-import { bboxArea, bboxPolygonRatios, postProcessDetections } from "./bboxPostProcess";
+import {
+  bboxArea,
+  bboxPolygonRatios,
+  DEFAULT_BBOX_POST_PROCESS,
+  postProcessDetections,
+} from "./bboxPostProcess";
 import { useBboxPostProcessParams } from "./useBboxPostProcessParams";
 import { buildKeyframeTrack } from "./keyframeTrack";
 import { useEquirectFrameHeight } from "./useEquirectFrameHeight";
@@ -83,6 +87,11 @@ type KeyframeIndexState = "indexed" | "pruned" | "not-prepared" | "unknown";
 
 type SortMode = "keyframe" | "objects-desc" | "objects-asc";
 type PanoramaViewMode = "image" | "depth";
+type ProposalDisplayState = "kept" | "discarded";
+type DisplayedProposal = {
+  row: MetadataRowRecord;
+  state: ProposalDisplayState;
+};
 type DepthImagePin = {
   requestId: string;
   source: "erp" | "cutout";
@@ -111,7 +120,7 @@ type PhotosphereNavigationCandidate = {
 // One ERP and all its proposals form one page. Mixing keyframes made the grid hard
 // to scan and could put well over a thousand thumbnails in the same workspace.
 const KEYFRAMES_PER_PAGE = 1;
-const COLUMN_OPTIONS = [1, 2, 3, 4, 5];
+const COLUMN_OPTIONS = [3, 4, 5, 6];
 const EquirectPhotoSphereViewer = lazy(() => import("./EquirectPhotoSphereViewer"));
 const DEPTH_PIN_MIN_DEPTH_M = 0.25;
 const VISUAL_SPLIT_MIN_PERCENT = 25;
@@ -168,7 +177,9 @@ function ObjectSearchExplorerPanel(props: Props) {
     readStoredBoolean(KEYFRAME_GRAPH_STORAGE_KEY, true),
   );
   const [sortMode, setSortMode] = useState<SortMode>("keyframe");
-  const [columns, setColumns] = useState(3);
+  const [columns, setColumns] = useState(5);
+  const [showKeptProposals, setShowKeptProposals] = useState(true);
+  const [showDiscardedProposals, setShowDiscardedProposals] = useState(false);
   const [page, setPage] = useState(1);
   const [visualSplitPercent, setVisualSplitPercent] = useState(45);
   const [isResizingVisualSplit, setIsResizingVisualSplit] = useState(false);
@@ -203,9 +214,7 @@ function ObjectSearchExplorerPanel(props: Props) {
   } | null>(null);
   const visualSplitRef = useRef<HTMLDivElement | null>(null);
   const inspectorRef = useRef<HTMLElement | null>(null);
-  const detectionRowRefs = useRef(new Map<number, HTMLTableRowElement>());
-  const shouldFocusSelectedDetectionRef = useRef(false);
-  const { params: bboxPostProcess, setParams: setBboxPostProcess, resetParams: resetBboxPostProcess } =
+  const { params: bboxPostProcess, setParams: setBboxPostProcess } =
     useBboxPostProcessParams();
   const [metadataRows, setMetadataRows] = useState<MetadataRowRecord[]>([]);
   const annotation = useExplorerAnnotationWorkspace(props.mapId);
@@ -380,6 +389,16 @@ function ObjectSearchExplorerPanel(props: Props) {
     return out;
   }, [metadataRows, bboxPostProcess]);
 
+  const keptRowIndexes = useMemo(
+    () =>
+      new Set(
+        [...filteredRowsByKeyframe.values()]
+          .flat()
+          .map((row) => row.row_index),
+      ),
+    [filteredRowsByKeyframe],
+  );
+
   const emmid = props.map?.emmid ?? null;
 
   // The ROI tool draws one polygon; what it selects is the choice here. Counting
@@ -446,9 +465,18 @@ function ObjectSearchExplorerPanel(props: Props) {
     includeEmpty,
     keyframeFilter,
   ]);
-  const pageRows = pageKeyframeIds.flatMap(
-    (keyframeId) => filteredRowsByKeyframe.get(keyframeId) ?? [],
-  );
+  const displayedProposals: DisplayedProposal[] = metadataRows.flatMap((row) => {
+    const state: ProposalDisplayState = keptRowIndexes.has(row.row_index)
+      ? "kept"
+      : "discarded";
+    const isVisible =
+      (state === "kept" && showKeptProposals) ||
+      (state === "discarded" && showDiscardedProposals);
+    return isVisible ? [{ row, state }] : [];
+  });
+  const pageRows = displayedProposals.map((proposal) => proposal.row);
+  const pageKeptCount = keptRowIndexes.size;
+  const pageDiscardedCount = Math.max(0, metadataRows.length - pageKeptCount);
   const pageRowIndexKey = pageRows.map((row) => row.row_index).join("|");
   const selectedPageRow =
     pageRows.find((row) => row.row_index === selectedRowIndex) ?? null;
@@ -1083,14 +1111,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     };
   }, [activeKeyframeId, keyframePreviewUrl, panoramaViewMode]);
 
-  useEffect(() => {
-    if (!shouldFocusSelectedDetectionRef.current || selectedRowIndex === null) {
-      return;
-    }
-    shouldFocusSelectedDetectionRef.current = false;
-    detectionRowRefs.current.get(selectedRowIndex)?.focus();
-  }, [selectedRowIndex]);
-
   const livemapFocus = useMemo(() => {
     if (annotation.focusTarget) {
       return annotation.focusTarget;
@@ -1274,42 +1294,6 @@ function ObjectSearchExplorerPanel(props: Props) {
       return;
     }
     selectKeyframe(nextKeyframeId);
-  };
-
-  const selectAdjacentDetection = (direction: -1 | 1) => {
-    if (!filteredDetections.length) {
-      return;
-    }
-    const currentIndex =
-      selectedRowIndex !== null
-        ? filteredDetections.findIndex((item) => item.row_index === selectedRowIndex)
-        : -1;
-    const nextIndex =
-      currentIndex === -1
-        ? direction > 0
-          ? 0
-          : filteredDetections.length - 1
-        : Math.min(
-            filteredDetections.length - 1,
-            Math.max(0, currentIndex + direction),
-          );
-    const nextDetection = filteredDetections[nextIndex];
-    if (nextDetection.row_index !== selectedRowIndex) {
-      shouldFocusSelectedDetectionRef.current = true;
-    }
-    setSelectedRowIndex(nextDetection.row_index);
-  };
-
-  const handleDetectionRowKeyDown = (
-    event: ReactKeyboardEvent<HTMLTableRowElement>,
-  ) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      selectAdjacentDetection(1);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      selectAdjacentDetection(-1);
-    }
   };
 
   const selectProposalAndRevealPreview = (rowIndex: number): void => {
@@ -2036,10 +2020,80 @@ function ObjectSearchExplorerPanel(props: Props) {
       <div id="explorer-proposals" className="explorer-proposals-anchor">
         <CollapsibleSection
           title="Proposal explorer"
-          summary={`${pageRows.length} shown | ${totalKeyframes} keyframes`}
+          summary={`${displayedProposals.length} shown · 1 keyframe`}
           sectionClassName="object-search-explorer-browser"
           defaultOpen
         >
+          <div className="object-search-proposal-toolbar">
+            <fieldset className="object-search-proposal-visibility">
+              <legend>Show proposals</legend>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={showKeptProposals}
+                  onChange={(event) => setShowKeptProposals(event.target.checked)}
+                />
+                Kept <strong>{pageKeptCount}</strong>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={showDiscardedProposals}
+                  onChange={(event) =>
+                    setShowDiscardedProposals(event.target.checked)
+                  }
+                />
+                Discarded <strong>{pageDiscardedCount}</strong>
+              </label>
+            </fieldset>
+
+            <fieldset className="object-search-proposal-visibility">
+              <legend>Detectors</legend>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={bboxPostProcess.showGdino}
+                  onChange={(event) =>
+                    setBboxPostProcess({
+                      ...bboxPostProcess,
+                      showGdino: event.target.checked,
+                    })
+                  }
+                />
+                G-DINO
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={bboxPostProcess.showYolo}
+                  onChange={(event) =>
+                    setBboxPostProcess({
+                      ...bboxPostProcess,
+                      showYolo: event.target.checked,
+                    })
+                  }
+                />
+                YOLO-W
+              </label>
+            </fieldset>
+
+            <BboxPostProcessControls
+              params={bboxPostProcess}
+              areaSliderMax={bboxAreaSliderMax}
+              rawCount={metadataRows.length}
+              filteredCount={pageKeptCount}
+              onChange={setBboxPostProcess}
+              onReset={() => {
+                const { showYolo, showGdino } = bboxPostProcess;
+                setBboxPostProcess({
+                  ...DEFAULT_BBOX_POST_PROCESS,
+                  showYolo,
+                  showGdino,
+                });
+              }}
+            />
+          </div>
+
           <div className="object-search-explorer-layout">
             <div className="object-search-explorer-main">
               <details className="explorer-display-options">
@@ -2115,37 +2169,68 @@ function ObjectSearchExplorerPanel(props: Props) {
             </button>
           </div>
 
-          {!pageRows.length ? (
+          {!showKeptProposals && !showDiscardedProposals ? (
+            <p className="muted">Select Kept or Discarded to show proposals.</p>
+          ) : !pageRows.length ? (
             <p className="muted">
               {summary
                 ? "No proposals match the current filters."
                 : "No proposals: this map has no object-search metadata."}
             </p>
           ) : (
-            <div
-              className="object-search-cutout-grid"
-              style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
-            >
-              {pageRows.map((row) => {
+            <section className="object-search-keyframe-proposals">
+              <header>
+                <div>
+                  <p className="eyebrow">Current page</p>
+                  <h4>Keyframe {pageKeyframeIds[0] ?? "-"}</h4>
+                </div>
+                <span>
+                  {pageKeptCount} kept · {pageDiscardedCount} discarded
+                </span>
+              </header>
+              <div
+                className="object-search-cutout-grid"
+                style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+              >
+              {displayedProposals.map(({ row, state }) => {
                 // The stored thumbnail is the default: it is the only image certain to
                 // be what MetaCLIP2 embedded. A re-render is the fallback for maps
                 // prepared without crops.
                 const previewUrl = row.thumbnail_key
                   ? rowThumbnailUrl(props.mapId, row.thumbnail_key)
                   : rowRenderUrl(props.mapId, row.row_index, { size: 336 });
+                const label = row.label || "Unlabelled proposal";
+                const technicalSummary = [
+                  `Row ${row.row_index}`,
+                  row.detector_source || "unknown source",
+                  row.detection_score === null
+                    ? "unknown score"
+                    : `score ${row.detection_score.toFixed(3)}`,
+                  row.depth === null ? "no depth" : `${row.depth.toFixed(2)} m depth`,
+                ].join(" · ");
                 return (
                   <button
                     className={`object-search-cutout-card${
                       row.row_index === selectedRowIndex ? " is-selected" : ""
-                    }`}
+                    }${state === "discarded" ? " is-discarded" : ""}`}
                     type="button"
                     key={row.row_index}
+                    aria-label={`${label}, ${state}. ${technicalSummary}`}
+                    title={technicalSummary}
                     onClick={() => selectProposalAndRevealPreview(row.row_index)}
                   >
                     <span className="object-search-cutout-image-wrap">
+                      <span className="object-search-proposal-row-badge">
+                        #{row.row_index}
+                      </span>
+                      {state === "discarded" ? (
+                        <span className="object-search-proposal-state-badge">
+                          Discarded
+                        </span>
+                      ) : null}
                       <img
                         src={previewUrl}
-                        alt={`Proposal ${row.row_index}${row.label ? ` (${row.label})` : ""}`}
+                        alt={`Proposal ${row.row_index} (${label})`}
                         title="Click to place a depth pin"
                         loading="lazy"
                         onClick={(event) => {
@@ -2171,23 +2256,14 @@ function ObjectSearchExplorerPanel(props: Props) {
                         />
                       ) : null}
                     </span>
-                    <span className="object-search-cutout-card-meta">
-                      <strong>
-                        {row.row_index} {row.label ? `| ${row.label}` : ""}
-                      </strong>
-                      <small>
-                        keyframe {row.keyframe_id} | {row.detector_source || "?"}
-                        {row.detection_score !== null
-                          ? ` ${row.detection_score.toFixed(2)}`
-                          : ""}
-                        {" | "}
-                        {row.depth !== null ? `${row.depth.toFixed(1)} m` : "no depth"}
-                      </small>
+                    <span className="object-search-cutout-card-label" title={label}>
+                      {label}
                     </span>
                   </button>
                 );
               })}
-            </div>
+              </div>
+            </section>
           )}
         </div>
 
@@ -2266,74 +2342,11 @@ function ObjectSearchExplorerPanel(props: Props) {
                 </CollapsibleSection>
               ) : null}
 
-              <BboxPostProcessControls
-                params={bboxPostProcess}
-                areaSliderMax={bboxAreaSliderMax}
-                rawCount={rawDetections.length}
-                filteredCount={filteredDetections.length}
-                onChange={setBboxPostProcess}
-                onReset={resetBboxPostProcess}
-              />
-
               {rawDetections.length && !filteredDetections.length ? (
                 <p className="info-box">
                   All proposals were removed by the current post-processing filters.
                 </p>
               ) : null}
-
-              <CollapsibleSection
-                title="Proposals in this keyframe"
-                summary={`${filteredDetections.length} kept`}
-                defaultOpen={false}
-              >
-                <div className="table-wrap object-search-box-table">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Row</th>
-                        <th>Label</th>
-                        <th>Source</th>
-                        <th>Score</th>
-                        <th>Area (deg²)</th>
-                        <th>Depth</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredDetections.map((item) => (
-                        <tr
-                          key={item.row_index}
-                          ref={(node) => {
-                            if (node) {
-                              detectionRowRefs.current.set(item.row_index, node);
-                            } else {
-                              detectionRowRefs.current.delete(item.row_index);
-                            }
-                          }}
-                          className={item.row_index === selectedRowIndex ? "is-selected" : ""}
-                          tabIndex={0}
-                          aria-selected={item.row_index === selectedRowIndex}
-                          onClick={(event) => {
-                            setSelectedRowIndex(item.row_index);
-                            event.currentTarget.focus();
-                          }}
-                          onKeyDown={handleDetectionRowKeyDown}
-                        >
-                          <td>{item.row_index}</td>
-                          <td>{item.label || "-"}</td>
-                          <td>{item.detector_source || "-"}</td>
-                          <td>
-                            {item.detection_score === null
-                              ? "-"
-                              : item.detection_score.toFixed(3)}
-                          </td>
-                          <td>{bboxArea(item).toFixed(2)}</td>
-                          <td>{item.depth === null ? "-" : `${item.depth.toFixed(2)} m`}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </CollapsibleSection>
 
             </>
           ) : (

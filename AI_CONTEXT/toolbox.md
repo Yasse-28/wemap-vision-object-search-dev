@@ -85,8 +85,11 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   corridor). It relies on `/object-search-metadata/markers` staying in manifest
   order — sorted by id as a string, `"10"` precedes `"2"` and the track is noise. Reads the parquet
   rows through `/object-search-metadata/*`. Pagination is **keyframe-major** (one ERP
-  and its proposals), and the panel renders as soon as the map is known — the
-  metadata warning is scoped to the row table, not the panel
+  and its proposals); its compact proposal grid can independently show the rows kept
+  or discarded by the current bbox post-processing controls. Detector visibility
+  (G-DINO / YOLO-W) sits beside those filters and remains active when geometric bbox
+  post-processing is disabled. The panel renders as soon as the map is known — the
+  metadata warning is scoped to the proposal grid, not the panel
   (`ObjectSearchExplorerPanel.tsx`, `EquirectPhotoSphereViewer.tsx`, `bboxPostProcess.ts`).
 - `index-explorer/` — `api.ts` + `types.ts` only, shared by both panels. The
   directory name is a leftover of `IndexExplorerPanel.tsx`/`LatentScatter.tsx`, which
