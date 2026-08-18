@@ -108,9 +108,9 @@ type PhotosphereNavigationCandidate = {
   localZ: number;
 };
 
-// Keyframes per page, not proposals: one ERP carries 70-270 proposals, so the old
-// [6, 12, 24, 48] would have put well over a thousand thumbnails in one grid.
-const PAGE_SIZE_OPTIONS = [1, 2, 4, 8];
+// One ERP and all its proposals form one page. Mixing keyframes made the grid hard
+// to scan and could put well over a thousand thumbnails in the same workspace.
+const KEYFRAMES_PER_PAGE = 1;
 const COLUMN_OPTIONS = [1, 2, 3, 4, 5];
 const EquirectPhotoSphereViewer = lazy(() => import("./EquirectPhotoSphereViewer"));
 const DEPTH_PIN_MIN_DEPTH_M = 0.25;
@@ -168,7 +168,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     readStoredBoolean(KEYFRAME_GRAPH_STORAGE_KEY, true),
   );
   const [sortMode, setSortMode] = useState<SortMode>("keyframe");
-  const [pageSize, setPageSize] = useState(1);
   const [columns, setColumns] = useState(3);
   const [page, setPage] = useState(1);
   const [visualSplitPercent, setVisualSplitPercent] = useState(45);
@@ -404,7 +403,10 @@ function ObjectSearchExplorerPanel(props: Props) {
   // Pagination is keyframe-major: one ERP and its proposals is how the panel is
   // actually used, and it keeps the row fetch to one request per page.
   const totalKeyframes = keyframePage?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(totalKeyframes / pageSize));
+  const totalPages = Math.max(
+    1,
+    Math.ceil(totalKeyframes / KEYFRAMES_PER_PAGE),
+  );
   const currentPage = Math.min(page, totalPages);
   const pageKeyframes = keyframeSummaries;
   const pageKeyframeIds = pageKeyframes.map((item) => item.id);
@@ -417,8 +419,8 @@ function ObjectSearchExplorerPanel(props: Props) {
     }
     let cancelled = false;
     fetchMetadataKeyframes(props.mapId, {
-      offset: (currentPage - 1) * pageSize,
-      limit: pageSize,
+      offset: (currentPage - 1) * KEYFRAMES_PER_PAGE,
+      limit: KEYFRAMES_PER_PAGE,
       sort: sortMode === "keyframe" ? "parquet" : sortMode,
       includeEmpty,
       keyframeId: keyframeFilter === "all" ? null : keyframeFilter,
@@ -440,7 +442,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     props.isMapKnown,
     status?.available,
     currentPage,
-    pageSize,
     sortMode,
     includeEmpty,
     keyframeFilter,
@@ -1110,7 +1111,7 @@ function ObjectSearchExplorerPanel(props: Props) {
 
   useEffect(() => {
     setPage(1);
-  }, [includeEmpty, keyframeFilter, pageSize, sortMode]);
+  }, [includeEmpty, keyframeFilter, sortMode]);
 
   useEffect(() => {
     if (currentPage !== page) {
@@ -2045,8 +2046,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                 <summary>
                   Display and paging
                   <span>
-                    {pageSize} keyframe{pageSize === 1 ? "" : "s"} · {columns}{" "}
-                    columns
+                    1 keyframe · {columns} columns
                   </span>
                 </summary>
                 <div className="object-search-explorer-controls">
@@ -2061,22 +2061,6 @@ function ObjectSearchExplorerPanel(props: Props) {
                       <option value="keyframe">Keyframe order</option>
                       <option value="objects-desc">Most proposals first</option>
                       <option value="objects-asc">Fewest proposals first</option>
-                    </select>
-                  </label>
-
-                  <label>
-                    Keyframes per page
-                    <select
-                      value={String(pageSize)}
-                      onChange={(event) =>
-                        setPageSize(Number(event.target.value))
-                      }
-                    >
-                      {PAGE_SIZE_OPTIONS.map((value) => (
-                        <option key={value} value={value}>
-                          {value}
-                        </option>
-                      ))}
                     </select>
                   </label>
 
