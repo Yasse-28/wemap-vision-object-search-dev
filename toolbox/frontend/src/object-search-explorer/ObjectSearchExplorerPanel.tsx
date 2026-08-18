@@ -1579,6 +1579,18 @@ function ObjectSearchExplorerPanel(props: Props) {
           <dt>Proposals</dt>
           <dd>{totalRows}</dd>
         </div>
+        <div
+          title={`${detectorBreakdown.yoloCount} of ${detectorBreakdown.total} proposals across this map.`}
+        >
+          <dt>YOLO-W</dt>
+          <dd>{detectorBreakdown.yoloShare}</dd>
+        </div>
+        <div
+          title={`${detectorBreakdown.gdinoCount} of ${detectorBreakdown.total} proposals across this map.`}
+        >
+          <dt>G-DINO</dt>
+          <dd>{detectorBreakdown.gdinoShare}</dd>
+        </div>
         <div title="Proposals with a resolved depth value available for 3D positioning.">
           <dt>With depth</dt>
           <dd>{summary?.with_depth_count ?? 0}</dd>
@@ -2125,11 +2137,6 @@ function ObjectSearchExplorerPanel(props: Props) {
                   }
                 />
                 YOLO-W
-                <strong
-                  title={`${detectorBreakdown.yoloCount} of ${detectorBreakdown.total} proposals across this map`}
-                >
-                  {detectorBreakdown.yoloShare}
-                </strong>
               </label>
               <label>
                 <input
@@ -2143,11 +2150,6 @@ function ObjectSearchExplorerPanel(props: Props) {
                   }
                 />
                 G-DINO
-                <strong
-                  title={`${detectorBreakdown.gdinoCount} of ${detectorBreakdown.total} proposals across this map`}
-                >
-                  {detectorBreakdown.gdinoShare}
-                </strong>
               </label>
             </fieldset>
 
