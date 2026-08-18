@@ -1480,9 +1480,16 @@ function ObjectSearchExplorerPanel(props: Props) {
       <div className="object-search-explorer-header">
         <div>
           <p className="eyebrow">Object Search Explorer</p>
-          <h2>Proposals and reconstructed boxes</h2>
+          <h2>Inspect proposals in spatial context</h2>
+          <p className="object-search-explorer-intro">
+            Choose a keyframe, compare its map and panorama, then inspect or annotate
+            the detections that matter.
+          </p>
         </div>
-        <p className="path-text">{summary?.metadata_path ?? status?.map_path ?? ""}</p>
+        <details className="object-search-explorer-source">
+          <summary>Data source</summary>
+          <p className="path-text">{summary?.metadata_path ?? status?.map_path ?? ""}</p>
+        </details>
       </div>
 
       {error ? (
@@ -1531,26 +1538,73 @@ function ObjectSearchExplorerPanel(props: Props) {
         numbers, and a third — how many made it into pgvector — differs again.
         Reporting them separately is the whole point of this row.
       */}
-      <div className="metrics-row">
-        <span>Keyframes with a pose {status?.manifest_keyframe_count ?? 0}</span>
-        <span>Matching keyframes {totalKeyframes}</span>
-        <span>Proposals {totalRows}</span>
-        <span>With depth {summary?.with_depth_count ?? 0}</span>
+      <dl className="explorer-health-strip" aria-label="Map processing coverage">
+        <div>
+          <dt>Posed</dt>
+          <dd>{status?.manifest_keyframe_count ?? 0}</dd>
+        </div>
+        <div>
+          <dt>Matching</dt>
+          <dd>{totalKeyframes}</dd>
+        </div>
+        <div>
+          <dt>Proposals</dt>
+          <dd>{totalRows}</dd>
+        </div>
+        <div>
+          <dt>With depth</dt>
+          <dd>{summary?.with_depth_count ?? 0}</dd>
+        </div>
         {summary?.coverage ? (
-          <span>
-            Ingested {summary.coverage.ingested_total}
-            {summary.coverage.no_position_total
-              ? ` (${summary.coverage.no_position_total} without a 3D position)`
-              : ""}
-          </span>
+          <div
+            title={
+              summary.coverage.no_position_total
+                ? `${summary.coverage.no_position_total} without a 3D position`
+                : undefined
+            }
+          >
+            <dt>Ingested</dt>
+            <dd>{summary.coverage.ingested_total}</dd>
+          </div>
         ) : summary ? (
-          <span title="The bricks service did not answer; keyframes show as unknown.">
-            Ingested unknown
-          </span>
+          <div title="The bricks service did not answer; keyframes show as unknown.">
+            <dt>Ingested</dt>
+            <dd>Unknown</dd>
+          </div>
         ) : null}
-      </div>
+      </dl>
 
-      <ExplorerAnnotationControls workspace={annotation} />
+      <div className="explorer-context-rail" aria-label="Explorer workflow">
+        <div className="explorer-context-keyframe">
+          <span className="explorer-context-label">Current keyframe</span>
+          <select
+            aria-label="Current keyframe"
+            value={keyframeFilter}
+            onChange={(event) => setKeyframeFilter(event.target.value)}
+          >
+            <option value="all">Automatic (page selection)</option>
+            {navigableKeyframeIds.map((keyframeId) => {
+              const keyframe = keyframeSummaryById.get(keyframeId);
+              return (
+                <option key={keyframeId} value={keyframeId}>
+                  {keyframeId}
+                  {keyframe ? ` · ${keyframe.row_count} proposals` : ""}
+                  {keyframe?.ingested === 0 ? " · pruned" : ""}
+                </option>
+              );
+            })}
+          </select>
+          {renderKeyframeStepper("keyframe-stepper keyframe-stepper--compact")}
+        </div>
+        <nav
+          className="explorer-workflow-links"
+          aria-label="Jump to Explorer section"
+        >
+          <a href="#explorer-spatial">1 · Locate</a>
+          <a href="#explorer-proposals">2 · Inspect</a>
+          <a href="#explorer-annotation">3 · Annotate</a>
+        </nav>
+      </div>
 
       {roiTarget === "keyframes" ? (
         <ExportRoiPanel
@@ -1575,6 +1629,7 @@ function ObjectSearchExplorerPanel(props: Props) {
       ) : null}
 
       <div
+        id="explorer-spatial"
         ref={visualSplitRef}
         className="object-search-visual-split"
         style={{ "--visual-map-width": `${visualSplitPercent}%` } as CSSProperties}
@@ -1582,66 +1637,84 @@ function ObjectSearchExplorerPanel(props: Props) {
         <div className="object-search-visual-pane">
           <section className="object-search-explorer-livemap">
             <div className="object-search-explorer-livemap-header">
-              <h3>Keyframe map</h3>
-              <div className="object-search-explorer-livemap-toggles">
-                {keyframeGraph?.available ? (
+              <div>
+                <h3>Spatial view</h3>
+                <span className="object-search-section-kicker">
+                  Locate the active capture
+                </span>
+              </div>
+              <details className="explorer-map-options">
+                <summary>Map tools</summary>
+                <div className="object-search-explorer-livemap-toggles">
+                  {keyframeGraph?.available ? (
+                    <label className="inline-check">
+                      <input
+                        type="checkbox"
+                        checked={showKeyframeGraph}
+                        onChange={(event) =>
+                          setShowKeyframeGraph(event.target.checked)
+                        }
+                      />
+                      Show graph ({keyframeGraph.edges.length} edges)
+                    </label>
+                  ) : null}
                   <label className="inline-check">
                     <input
                       type="checkbox"
-                      checked={showKeyframeGraph}
-                      onChange={(event) => setShowKeyframeGraph(event.target.checked)}
+                      checked={showKeyframeTrack}
+                      onChange={(event) =>
+                        setShowKeyframeTrack(event.target.checked)
+                      }
                     />
-                    Show graph ({keyframeGraph.edges.length} edges)
+                    Show track ({keyframeTrackSegments.length} segments)
                   </label>
-                ) : null}
-                <label className="inline-check">
-                  <input
-                    type="checkbox"
-                    checked={showKeyframeTrack}
-                    onChange={(event) => setShowKeyframeTrack(event.target.checked)}
-                  />
-                  Show track ({keyframeTrackSegments.length} segments)
-                </label>
-                <div className="object-search-livemap-roi-toolbar">
-                  <span>ROI</span>
-                  <select
-                    value={roiTarget}
-                    aria-label="What the drawn region selects"
-                    onChange={(event) => {
-                      annotation.clearRoi();
-                      setRoiTarget(event.target.value as "annotations" | "keyframes");
-                    }}
-                  >
-                    <option value="annotations">Count annotations</option>
-                    <option value="keyframes">Select keyframes</option>
-                  </select>
-                  <button
-                    type="button"
-                    className={`secondary-button${
-                      annotation.roiActive ? " is-active" : ""
-                    }`}
-                    aria-pressed={annotation.roiActive}
-                    onClick={annotation.toggleRoi}
-                  >
-                    {annotation.roiActive ? "Drawing..." : "Draw"}
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={!annotation.roiActive && !annotation.roiPolygon}
-                    onClick={annotation.clearRoi}
-                  >
-                    Clear
-                  </button>
-                  <span className="object-search-livemap-roi-summary">
-                    {roiTarget === "keyframes"
-                      ? `${exportSelection.total} keyframes`
-                      : annotation.roiCounts
-                        ? `Total ${annotation.roiCounts.total}`
-                        : `Level ${annotation.currentLevel === null ? "-" : annotation.currentLevel}`}
-                  </span>
+                  <div className="object-search-livemap-roi-toolbar">
+                    <span>ROI</span>
+                    <select
+                      value={roiTarget}
+                      aria-label="What the drawn region selects"
+                      onChange={(event) => {
+                        annotation.clearRoi();
+                        setRoiTarget(
+                          event.target.value as "annotations" | "keyframes",
+                        );
+                      }}
+                    >
+                      <option value="annotations">Count annotations</option>
+                      <option value="keyframes">Select keyframes</option>
+                    </select>
+                    <button
+                      type="button"
+                      className={`secondary-button${
+                        annotation.roiActive ? " is-active" : ""
+                      }`}
+                      aria-pressed={annotation.roiActive}
+                      onClick={annotation.toggleRoi}
+                    >
+                      {annotation.roiActive ? "Drawing..." : "Draw"}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={!annotation.roiActive && !annotation.roiPolygon}
+                      onClick={annotation.clearRoi}
+                    >
+                      Clear
+                    </button>
+                    <span className="object-search-livemap-roi-summary">
+                      {roiTarget === "keyframes"
+                        ? `${exportSelection.total} keyframes`
+                        : annotation.roiCounts
+                          ? `Total ${annotation.roiCounts.total}`
+                          : `Level ${
+                              annotation.currentLevel === null
+                                ? "-"
+                                : annotation.currentLevel
+                            }`}
+                    </span>
+                  </div>
                 </div>
-              </div>
+              </details>
             </div>
             {keyframeGraph?.error ? (
               <p className="map-caption">Keyframe graph unavailable: {keyframeGraph.error}</p>
@@ -1797,10 +1870,13 @@ function ObjectSearchExplorerPanel(props: Props) {
           {keyframePreviewUrl ? (
             <section className="object-search-keyframe-equirect">
               <div className="object-search-keyframe-equirect-header">
-                <h3>Image</h3>
-                <span className="muted">
-                  Keyframe {activeKeyframeId}
-                </span>
+                <div className="object-search-keyframe-heading">
+                  <h3>Panorama</h3>
+                  <span className="object-search-section-kicker">
+                    Keyframe {activeKeyframeId} · {activeKeyframeDetections.length} of{" "}
+                    {activeKeyframeRawDetectionCount} proposals kept
+                  </span>
+                </div>
                 <label className="object-search-panorama-view-selector">
                   View
                   <select
@@ -1813,10 +1889,6 @@ function ObjectSearchExplorerPanel(props: Props) {
                     <option value="depth">Depth</option>
                   </select>
                 </label>
-                <span className="muted">
-                  Proposals {activeKeyframeRawDetectionCount} | Kept{" "}
-                  {activeKeyframeDetections.length}
-                </span>
                 <label className="inline-check">
                   <input
                     type="checkbox"
@@ -1981,98 +2053,84 @@ function ObjectSearchExplorerPanel(props: Props) {
         </div>
       </div>
 
-      <ExplorerAnnotationList workspace={annotation} />
+      <div id="explorer-proposals" className="explorer-proposals-anchor">
+        <CollapsibleSection
+          title="Proposal explorer"
+          summary={`${pageRows.length} shown | ${totalKeyframes} keyframes`}
+          sectionClassName="object-search-explorer-browser"
+          defaultOpen
+        >
+          <div className="object-search-explorer-layout">
+            <div className="object-search-explorer-main">
+              <details className="explorer-display-options">
+                <summary>
+                  Display and paging
+                  <span>
+                    {pageSize} keyframe{pageSize === 1 ? "" : "s"} · {columns}{" "}
+                    columns
+                  </span>
+                </summary>
+                <div className="object-search-explorer-controls">
+                  <label>
+                    Sort
+                    <select
+                      value={sortMode}
+                      onChange={(event) =>
+                        setSortMode(event.target.value as SortMode)
+                      }
+                    >
+                      <option value="keyframe">Keyframe order</option>
+                      <option value="objects-desc">Most proposals first</option>
+                      <option value="objects-asc">Fewest proposals first</option>
+                    </select>
+                  </label>
 
-      <CollapsibleSection
-        title="Proposal explorer"
-        summary={`${pageRows.length} shown | ${totalKeyframes} keyframes`}
-        sectionClassName="object-search-explorer-browser"
-        defaultOpen
-      >
-        <div className="object-search-explorer-layout">
-          <div className="object-search-explorer-main">
-            <div className="keyframe-sticky-bar">
-              <div className="keyframe-filter-control">
-                <div className="keyframe-filter-header">
-                  <span>Keyframe</span>
-                  {renderKeyframeStepper("keyframe-stepper keyframe-stepper--compact")}
+                  <label>
+                    Keyframes per page
+                    <select
+                      value={String(pageSize)}
+                      onChange={(event) =>
+                        setPageSize(Number(event.target.value))
+                      }
+                    >
+                      {PAGE_SIZE_OPTIONS.map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Columns
+                    <select
+                      value={String(columns)}
+                      onChange={(event) =>
+                        setColumns(Number(event.target.value))
+                      }
+                    >
+                      {COLUMN_OPTIONS.map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="checkbox-row">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={includeEmpty}
+                        onChange={(event) =>
+                          setIncludeEmpty(event.target.checked)
+                        }
+                      />
+                      Include keyframes with no proposals
+                    </label>
+                  </div>
                 </div>
-                <select
-                  value={keyframeFilter}
-                  onChange={(event) => setKeyframeFilter(event.target.value)}
-                >
-                  <option value="all">All keyframes</option>
-                  {/*
-                    Every keyframe with a pose, not only the prepared ones: this select
-                    also drives which panorama is shown, and a keyframe with no
-                    proposals is still worth looking at.
-                  */}
-                  {navigableKeyframeIds.map((keyframeId) => {
-                    const keyframe = keyframeSummaryById.get(keyframeId);
-                    return (
-                      <option key={keyframeId} value={keyframeId}>
-                        {keyframeId} |{" "}
-                        {keyframe ? `${keyframe.row_count} proposals` : "summary not loaded"}
-                        {keyframe?.ingested === 0 ? " | pruned" : ""}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-            </div>
-
-            <div className="object-search-explorer-controls">
-              <label>
-                Sort
-                <select
-                  value={sortMode}
-                  onChange={(event) => setSortMode(event.target.value as SortMode)}
-                >
-                  <option value="keyframe">Keyframe order</option>
-                  <option value="objects-desc">Most proposals first</option>
-                  <option value="objects-asc">Fewest proposals first</option>
-                </select>
-              </label>
-
-            <label>
-              Keyframes per page
-              <select
-                value={String(pageSize)}
-                onChange={(event) => setPageSize(Number(event.target.value))}
-              >
-                {PAGE_SIZE_OPTIONS.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Columns
-              <select
-                value={String(columns)}
-                onChange={(event) => setColumns(Number(event.target.value))}
-              >
-                {COLUMN_OPTIONS.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="checkbox-row">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={includeEmpty}
-                  onChange={(event) => setIncludeEmpty(event.target.checked)}
-                />
-                Include keyframes with no proposals
-              </label>
-            </div>
-          </div>
+              </details>
 
           <div className="object-search-explorer-pagination">
             <button
@@ -2319,8 +2377,13 @@ function ObjectSearchExplorerPanel(props: Props) {
             <p className="muted">Select a proposal to inspect it.</p>
           )}
         </aside>
+        </div>
+        </CollapsibleSection>
       </div>
-      </CollapsibleSection>
+      <div id="explorer-annotation" className="explorer-annotation-anchor">
+        <ExplorerAnnotationControls workspace={annotation} />
+      </div>
+      <ExplorerAnnotationList workspace={annotation} />
       {annotationMenu
         ? (() => {
             const menuAnnotation = annotation.annotations.find(

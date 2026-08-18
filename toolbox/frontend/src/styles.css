@@ -696,13 +696,149 @@ tr:last-child td {
   flex-wrap: wrap;
   align-items: start;
   justify-content: space-between;
-  gap: var(--s-3);
+  gap: var(--s-4);
 }
 
-.object-search-explorer-header .path-text {
-  max-width: min(720px, 100%);
-  margin: 0;
+.object-search-explorer-intro {
+  max-width: 720px;
+  margin: 8px 0 0;
+  color: var(--c-text-muted);
+  line-height: 1.45;
+}
+
+.object-search-explorer-source {
+  position: relative;
+  max-width: min(420px, 100%);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.object-search-explorer-source summary,
+.explorer-map-options summary,
+.explorer-display-options summary {
+  cursor: pointer;
+  font-weight: var(--fw-bold);
+}
+
+.object-search-explorer-source summary {
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.object-search-explorer-source .path-text {
+  margin: 8px 0 0;
   text-align: right;
+}
+
+.explorer-health-strip {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-md);
+  background: var(--c-border-subtle);
+}
+
+.explorer-health-strip > div {
+  display: flex;
+  flex: 1 1 120px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-2);
+  min-width: 0;
+  padding: 8px 12px;
+  background: var(--c-surface-raised);
+}
+
+.explorer-health-strip dt {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.explorer-health-strip dd {
+  margin: 0;
+  color: var(--c-text);
+  font-weight: var(--fw-bold);
+}
+
+/* The context rail is the Explorer's signature element: one persistent place to
+   switch capture and jump through the locate → inspect → annotate workflow. */
+.explorer-context-rail {
+  position: sticky;
+  top: 0;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+  min-width: 0;
+  padding: 10px 12px 10px 15px;
+  border: 1px solid var(--c-border-strong);
+  border-left: 4px solid var(--c-accent-strong);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-surface) 96%, transparent);
+  box-shadow: 0 4px 14px rgba(36, 38, 41, 0.1);
+  backdrop-filter: blur(8px);
+}
+
+.explorer-context-keyframe {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 260px;
+}
+
+.explorer-context-label {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.explorer-context-keyframe select {
+  width: min(330px, 34vw);
+  min-height: 44px;
+  padding-block: 6px;
+}
+
+.explorer-workflow-links {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.explorer-workflow-links a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
+  text-decoration: none;
+}
+
+.explorer-workflow-links a:hover {
+  background: var(--c-accent-soft);
+  color: var(--c-accent-text);
+}
+
+#explorer-spatial,
+#explorer-proposals,
+#explorer-annotation {
+  scroll-margin-top: 72px;
 }
 
 .object-search-visual-split {
@@ -924,6 +1060,47 @@ body.explorer-visual-split-dragging {
   gap: 8px 12px;
 }
 
+.object-search-section-kicker {
+  display: block;
+  margin-top: 2px;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+.explorer-map-options {
+  position: relative;
+}
+
+.explorer-map-options > summary {
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  list-style-position: inside;
+}
+
+.explorer-map-options[open] > summary {
+  border-color: var(--c-accent);
+  background: var(--c-accent-soft);
+  color: var(--c-accent-text);
+}
+
+.explorer-map-options > .object-search-explorer-livemap-toggles {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  width: min(520px, 82vw);
+  padding: 12px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-2);
+}
+
 .object-search-explorer-livemap-toggles {
   display: flex;
   flex-wrap: wrap;
@@ -941,7 +1118,7 @@ body.explorer-visual-split-dragging {
 }
 
 .object-search-livemap-roi-toolbar .secondary-button {
-  min-height: 30px;
+  min-height: 44px;
   padding: 0 10px;
 }
 
@@ -1045,6 +1222,108 @@ body.explorer-equirect-dragging {
   }
 }
 
+@media (max-width: 1080px) {
+  .explorer-context-rail {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .explorer-context-keyframe select {
+    width: 100%;
+  }
+
+  .explorer-workflow-links {
+    border-top: 1px solid var(--c-border-subtle);
+    padding-top: var(--s-2);
+  }
+}
+
+@media (max-width: 680px) {
+  .object-search-explorer-panel {
+    padding-inline: 12px;
+  }
+
+  .object-search-explorer-header {
+    display: grid;
+  }
+
+  .object-search-explorer-source {
+    width: 100%;
+    max-width: none;
+  }
+
+  .object-search-explorer-source .path-text {
+    text-align: left;
+  }
+
+  .explorer-health-strip {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .explorer-context-rail {
+    position: static;
+  }
+
+  .explorer-context-keyframe {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    min-width: 0;
+  }
+
+  .explorer-context-label {
+    grid-column: 1 / -1;
+  }
+
+  .explorer-workflow-links {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .explorer-workflow-links a {
+    justify-content: center;
+    padding-inline: 4px;
+    font-size: var(--fs-xs);
+  }
+
+  .explorer-map-options {
+    width: 100%;
+  }
+
+  .explorer-map-options > summary {
+    width: 100%;
+  }
+
+  .explorer-map-options > .object-search-explorer-livemap-toggles {
+    position: static;
+    width: 100%;
+    margin-top: 6px;
+    box-shadow: none;
+  }
+
+  .object-search-livemap-roi-toolbar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .object-search-livemap-roi-toolbar > span:first-child,
+  .object-search-livemap-roi-toolbar select,
+  .object-search-livemap-roi-summary {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .object-search-explorer-panel *,
+  .object-search-explorer-panel *::before,
+  .object-search-explorer-panel *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
 .object-search-keyframe-equirect {
   display: flex;
   flex-direction: column;
@@ -1065,6 +1344,10 @@ body.explorer-equirect-dragging {
 .object-search-keyframe-equirect-header h3 {
   margin: 0;
   font-size: 0.95rem;
+}
+
+.object-search-keyframe-heading {
+  margin-right: auto;
 }
 
 .object-search-panorama-view-selector {
@@ -1101,8 +1384,8 @@ body.explorer-equirect-dragging {
 }
 
 .keyframe-stepper button {
-  width: 30px;
-  height: 30px;
+  width: 44px;
+  height: 44px;
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-md);
   background: var(--c-surface);
@@ -1122,8 +1405,8 @@ body.explorer-equirect-dragging {
 }
 
 .keyframe-stepper--compact button {
-  width: 26px;
-  height: 26px;
+  width: 44px;
+  height: 44px;
   font-size: 0.9rem;
 }
 
@@ -1418,6 +1701,46 @@ body.explorer-equirect-dragging {
     minmax(160px, 0.85fr) minmax(130px, 0.65fr) minmax(110px, 0.55fr) auto;
   gap: var(--s-3);
   align-items: end;
+}
+
+.explorer-display-options {
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-md);
+  background: var(--c-surface-raised);
+}
+
+.explorer-display-options > summary {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: 9px 12px;
+  color: var(--c-text-secondary);
+}
+
+.explorer-display-options > summary span {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.explorer-display-options[open] > summary {
+  border-bottom: 1px solid var(--c-border-subtle);
+}
+
+.explorer-display-options .object-search-explorer-controls {
+  padding: 12px;
+}
+
+.explorer-annotation-anchor,
+.explorer-proposals-anchor {
+  min-width: 0;
+}
+
+.object-search-explorer-panel :where(button, a, input, select, summary, [tabindex]):focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--c-accent) 42%, transparent);
+  outline-offset: 2px;
 }
 
 .object-search-explorer-controls .checkbox-row {
