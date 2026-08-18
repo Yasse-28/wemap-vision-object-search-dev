@@ -166,3 +166,42 @@ columns once (both gains at zero) into its own cache entries, and the gains are 
 applied per configuration. Each prompt's prototype coverage is logged before the sweep
 starts: a prompt with none reproduces the baseline bit for bit, which is the failure
 mode to rule out before concluding the boost did not help.
+
+## Analysing one map, before proposing anything
+
+`map_analysis.py` describes a prepared map rather than a query's results: it reads the
+**whole parquet**, re-places every row in EUS from `depth` and the two ERP angles the
+way ingestion does, and needs no database, no ANN service and no candidate cache. One
+map in, a text report plus a JSON payload out, with `--layers-dir` adding GeoJSON
+layers a livemap can render directly (`map_layers.py`).
+
+```bash
+PYTHONPATH=.:third_party/object_search python -m toolbox.benchmark.map_analysis \
+  --map-path /path/to/map --json-out analysis.json --layers-dir layers/
+```
+
+| section | what it answers |
+|---|---|
+| `s0` | what the map holds, and **what it is missing** — a prepare run that wrote no label or no score makes several sections below silently empty, and a table of zeros looks the same as a measured zero |
+| `s1` | per-detection distributions split by detector: range, angular size and aspect, `phi`/`theta`, score, implied physical size, proposals per panorama |
+| `s2` | the free labels against the ground truth — `P(attached \| label, source)` at several radii **next to the base rate**, `P(label \| class)` and its inverse, normalised mutual information, score calibration, and the embedding neighbourhood purity |
+| `s3` | annotations against detections, **depth-free measurement first** |
+| `s4` | pairwise cues over three deliberately drawn populations, raw and conditional AUC, with the share of pairs each cue applies to |
+| `s5` | intra-view duplicates split by detector and settled by embedding, and the co-visible lower bound on the number of objects |
+
+**Two readings this tool exists to protect.** A label or a cue is only informative
+above the **base rate** — on a densely annotated map half of all detections sit within
+2 m of some annotation, so an uninformative label scores 50 %. And an annotation whose
+source panorama carries no detection at all is not a detector failure: `s3` separates
+that case, the "detected in 2D but placed elsewhere" case and the genuine miss, because
+they have unrelated remedies.
+
+**The depth-free measurement.** An annotation records the panorama and the pixel it was
+clicked in, so asking whether a detection box covers that pixel *in that same panorama*
+is a comparison of two angles in one frame. It owes nothing to the depth map — unlike
+the 3D attachment, which shares the annotation's own construction
+(`ray(u, v) * depth_map(u, v)`) and therefore measures agreement, never accuracy.
+
+**Known limit.** `detection_review` verdicts cannot be joined here: their `target_id` is
+a pgvector candidate id, not a parquet `row_index`. `s0` says so rather than printing an
+empty table.

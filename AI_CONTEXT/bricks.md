@@ -860,6 +860,32 @@ we do not. The index restarts at zero in every manifest, so only the composite
    `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` or `--cutout-batch 4`. Note
    `--batch-size` is the *MetaCLIP* batch and has no effect on this.
 
+## Describing a map before changing it
+
+`toolbox/benchmark/map_analysis.py` + `map_layers.py` analyse **one prepared map** from
+its own directory: the whole `metadata.parquet` re-placed in EUS, the manifest poses,
+the annotations, and `embeddings.npy` (a headerless raw float16 dump — `np.load`
+rejects it, which is why `ingest_cli` reads it with `fromfile`). No database, no ANN
+service, no candidate cache. Six sections (`s0` inventory and what is *missing*, `s1`
+per-detection distributions by detector, `s2` free labels and conditional PDFs, `s3`
+ground truth, `s4` pairwise cues, `s5` co-visible counting), a JSON payload, and
+GeoJSON layers for the livemap. Details and traps in
+[`../toolbox/benchmark/README.md`](../toolbox/benchmark/README.md).
+
+Three facts it established that constrain any pipeline work (2026-08-18, both maps):
+
+- **the ground truth cannot judge placement.** An annotation position is
+  `ray(u, v) * depth_map(u, v)`, the construction of a detection's own position, so it
+  measures agreement rather than accuracy. The tool's primary measurement is therefore
+  angular and depth-free — is the annotated pixel covered by a box *in the panorama it
+  was clicked in*;
+- **a label or a cue only counts above the base rate.** On bbhotel half of all
+  detections sit within 2 m of some annotation. One label out of seventeen beats
+  chance there (`chair`, x4.8) and the winners differ per map (`display` x3.3 on vinci,
+  where `chair` falls to x0.2). Detector score is close to flat against attachment;
+- **the embedding recognises the type, never the instance.** Of the ten nearest cutouts
+  of a detection, 13-16 % sit on the same physical object (45-71 % on the same class).
+
 ## Where images and depths come from
 
 A map directory holds only the manifest; the pixels are fetched separately into
