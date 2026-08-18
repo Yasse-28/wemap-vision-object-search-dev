@@ -135,6 +135,37 @@ table (`reliability`, JSON only) is where the useful shape is — on vinci the s
 monotone up to about 0.95 and then **inverts**, which is why 0.9 has to be re-fitted per
 map.
 
+**Where an object was lost, in three numbers.** `r_obj` is the share of annotations some
+*retrieved candidate* came within `--near-m` of, measured before association and before
+any filter — an annotation missing there is out of reach of everything downstream.
+`recall_at_all` is the share a returned cluster matched, and `recall_at_1` / `recall_at`
+(JSON) the share a caller sees at each cutoff. The gaps are the diagnosis, and today's
+mAP sums all three: on vinci, `r_obj` 0.759 → returned 0.739 → **R@1 0.044**, R@20 0.378.
+Retrieval loses 24 points, association loses 2, and the ranking loses 36. `r_obj` is
+identical across association configurations by construction, which is also a useful
+sanity check on a grid.
+
+**Split and merge, counted outright.** `fragmentation_rate` is the share of well-covered
+annotations whose detections span more than one cluster, `merge_rate` the share of
+clusters holding more than one annotation's. Unlike `mean_clusters_per_annotation` these
+are bounded rates, so the two failure directions are directly comparable: at
+`clustering_eps_m` 0.5 vinci fragments 84 % of annotations and merges 3 % of clusters; at
+3.0 it fragments 15 % and merges 30 %. `homogeneity` and `completeness` are the entropy
+pair over the same partition — the first cannot see splitting and the second cannot see
+merging, which is why neither is reported alone. **Do not fit a radius on `v_measure`**:
+it is biased towards more clusters and reads 0.81–0.91 across configurations that HOTA
+separates cleanly.
+
+**`panoptic_quality` = `segmentation_quality` x `recognition_quality`.** A cluster matches
+an annotation when their detection sets overlap by more than half, which makes the match
+unique with no greedy pass. `recognition_quality` is the half worth having on its own —
+`TP/(TP + FP/2 + FN/2)`, how many objects came out as one whole cluster each, with no
+sensitivity to how precisely they are placed. Clusters the association *dropped* (a
+negative cluster label) are not predictions and are excluded from the false positives:
+counting them would make a filter that removes an outlier score worse than one that keeps
+it. The rest is largely redundant with `hota` by construction, and is kept for that one
+half.
+
 Each grid entry is a `LocalizationParams` override plus a `label`; an unknown key is an
 error, not a silent no-op. Every row carries both ground-truth views (strict and
 grouped, each with its own fitted shared threshold and leave-one-prompt-out estimate)

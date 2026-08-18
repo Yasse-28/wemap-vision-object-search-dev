@@ -390,6 +390,22 @@ p90−p10 of the per-prompt best thresholds, i.e. what a single shared threshold
 absorb. The reliability table in the JSON is the informative part: on vinci the score is
 monotone against correctness up to ~0.95 and **inverts** above it, which is why the
 acceptance threshold has never transferred between maps.
+
+**And recall, split three ways** — `r_obj` (what retrieval reached, before association or
+any filter), `recall_at_all` (what survived it) and `recall_at_{1,5,10,20}`. This is the
+most consequential of the added measurements: on vinci `r_obj` 0.759 → returned 0.739 →
+**R@1 0.044**. Retrieval loses 24 points, association 2, and the **ranking 36**. Work on
+association has been optimising the 2. `r_obj` is invariant across association configs by
+construction, so it also doubles as a grid sanity check.
+
+Split and merge are now bounded rates rather than a mean — `fragmentation_rate` /
+`merge_rate` (84 % / 3 % at `eps` 0.5, 15 % / 30 % at 3.0) — alongside `homogeneity`,
+`completeness` and `v_measure`. **Do not fit on `v_measure`**: 0.81–0.91 across
+configurations HOTA separates cleanly, exactly the bias towards more clusters the
+literature reports. `panoptic_quality` and its two factors are also on every row;
+`recognition_quality` is the half with no equivalent elsewhere ("how many objects came
+out whole"), the rest duplicates `hota`. Dropped detections are excluded from the
+panoptic false positives — otherwise filtering an outlier scores worse than keeping it.
 | **multicut `geo_pivot` 1.5** | 0.270 | 0.596 | 0.533 | **0.523** | 0.702 | 0.710 |
 
 Three things follow.

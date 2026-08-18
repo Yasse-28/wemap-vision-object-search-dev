@@ -66,6 +66,14 @@ VERIFY_TOLERANCE = 1e-9
 CSV_FILENAME = "association_sweep.csv"
 JSON_FILENAME = "association_sweep.json"
 DEFAULT_NEAR_M = 1.0
+#: Cutoffs the returned clusters are scored at. `1` is what a caller showing a single
+#: answer gets; the last one is close enough to "everything returned" that the gap to
+#: `r_obj` is the ranking's fault rather than the cutoff's.
+RECALL_AT_K: tuple[int, ...] = (1, 5, 10, 20)
+#: Overlap above which a cluster *is* an annotation's object, for the panoptic match.
+#: Half is not a tuning knob: above it no annotation can match two clusters, which is
+#: what makes the matching unique without a greedy pass to arbitrate.
+PANOPTIC_OVERLAP = 0.5
 #: Localisation thresholds HOTA averages over. `near_m` alone would turn the score
 #: into a statement about that one radius; the same radii the map report attaches
 #: ground truth at keep the two tools reading the same scale.
@@ -187,6 +195,24 @@ class ConfigMetrics:
     threshold_spread_strict: float = 0.0
     # Reliability diagram, JSON only — the CSV stays one row wide.
     reliability: tuple[tuple[float, float, int], ...] = ()
+    # Where an object was lost. `r_obj` is what retrieval reached before any
+    # association; `recall_at_all` what survived it; `recall_at_1` what a caller
+    # showing one answer sees. See `recall_breakdown`.
+    r_obj: float = 0.0
+    recall_at_all: float = 0.0
+    recall_at_1: float = 0.0
+    # The rest of the cutoffs, JSON only.
+    recall_at: dict[int, float] = field(default_factory=dict)
+    # Split and merge counted outright, the entropy pair, and the panoptic triple.
+    # `v_measure` is biased towards more clusters — see `partition_quality`.
+    fragmentation_rate: float = 0.0
+    merge_rate: float = 0.0
+    homogeneity: float = 0.0
+    completeness: float = 0.0
+    v_measure: float = 0.0
+    segmentation_quality: float = 0.0
+    recognition_quality: float = 0.0
+    panoptic_quality: float = 0.0
     elapsed_s: float = 0.0
 
 
@@ -463,6 +489,175 @@ def hota_metrics(
         det_a=statistics.fmean(det for det, _ in scores),
         ass_a=statistics.fmean(ass for _, ass in scores),
         hota=statistics.fmean(math.sqrt(det * ass) for det, ass in scores),
+    )
+
+
+@dataclass(frozen=True)
+class PartitionQuality:
+    """Three more views of the partition `partition_metrics` scores pairwise.
+
+    Same input, different failure each one is sensitive to. The split and merge rates
+    are counts a reader can act on; the entropy pair says how much of each label the
+    other one determines; the panoptic triple states how many objects came out whole.
+    """
+
+    #: Share of well-covered annotations whose detections span more than one cluster.
+    fragmentation_rate: float
+    #: Share of clusters holding the detections of more than one annotation.
+    merge_rate: float
+    #: `1 - H(annotation | cluster) / H(annotation)`: does a cluster pin down which
+    #: object it is. Over-splitting cannot lower it, which is why it is never read
+    #: alone.
+    homogeneity: float
+    #: `1 - H(cluster | annotation) / H(cluster)`: is an object held in one cluster.
+    completeness: float
+    #: Their harmonic mean. **Biased towards more clusters** — do not fit a radius on
+    #: it; that is what `hota` and the pair metrics are for.
+    v_measure: float
+    #: Mean overlap of the cluster/annotation pairs that did match: how well a found
+    #: object is delineated, once found.
+    segmentation_quality: float
+    #: `TP / (TP + FP/2 + FN/2)` over clusters and annotations: how many objects came
+    #: out as one whole cluster each. The half that answers "how many objects exist",
+    #: uncontaminated by how precisely they are placed.
+    recognition_quality: float
+    #: Their product, the panoptic quality. Largely redundant with `hota` by
+    #: construction — kept because `recognition_quality` alone has no equivalent.
+    panoptic_quality: float
+
+
+def _labelled_contingency(
+    clusters: np.ndarray, annotations: np.ndarray, dropped: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cluster-by-annotation counts over labelled detections, plus two cluster views.
+
+    The size counts unlabelled detections too: a cluster's contamination is part of
+    what an overlap has to be measured against.
+
+    Returns:
+        The contingency table, every cluster's size, and which clusters the
+        association actually returned — the synthetic singletons standing for dropped
+        detections are not predictions and must not be scored as one.
+    """
+    _, cluster_index = np.unique(clusters, return_inverse=True)
+    cluster_size = np.bincount(cluster_index)
+    kept = np.bincount(cluster_index, weights=~dropped, minlength=cluster_size.size)
+    labelled = annotations >= 0
+    _, annotation_index = np.unique(annotations[labelled], return_inverse=True)
+    table = np.zeros((cluster_size.size, annotation_index.max(initial=-1) + 1))
+    np.add.at(table, (cluster_index[labelled], annotation_index), 1)
+    return table, cluster_size, kept > 0
+
+
+def _entropy(counts: np.ndarray) -> float:
+    """Shannon entropy of a count vector, in nats. Zero for a single outcome."""
+    total = counts.sum()
+    if total <= 0:
+        return 0.0
+    share = counts[counts > 0] / total
+    return float(-(share * np.log(share)).sum())
+
+
+def _conditional_entropy(table: np.ndarray, axis: int) -> float:
+    """`H(other | axis)`: entropy of one label given the other, in nats."""
+    total = table.sum()
+    if total <= 0:
+        return 0.0
+    margin = table.sum(axis=1 - axis, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(table > 0, table / np.where(margin > 0, margin, 1.0), 1.0)
+    return float(-(table / total * np.log(ratio)).sum())
+
+
+def partition_quality(
+    cluster_labels: np.ndarray, annotation_labels: np.ndarray, annotation_count: int
+) -> PartitionQuality:
+    """Score one prompt's induced partition three more ways.
+
+    Reuses the labelling that feeds `partition_metrics`, including its convention that
+    a negative cluster label is a singleton of its own rather than one shared noise
+    cluster. An annotation with fewer than two labelled detections is left out of the
+    fragmentation rate only: it is one cluster by construction and would dilute the
+    rate towards zero, exactly as it dilutes `mean_clusters_per_annotation` towards 1.
+
+    Args:
+        cluster_labels: Association labels aligned with the detections.
+        annotation_labels: Nearest-annotation labels, negative when out of range.
+        annotation_count: How many annotations the prompt has, so that one no cluster
+            reached counts as a miss rather than vanishing.
+
+    Returns:
+        The split and merge rates, the entropy pair, and the panoptic triple.
+
+    Raises:
+        ValueError: If the two label vectors have different shapes.
+    """
+    clusters = _split_negative_clusters(cluster_labels)
+    annotations = np.asarray(annotation_labels, dtype=np.int64)
+    if clusters.shape != annotations.shape:
+        raise ValueError("Cluster and annotation labels must have the same shape")
+    dropped = np.asarray(cluster_labels, dtype=np.int64) < 0
+    table, cluster_size, returned = _labelled_contingency(
+        clusters, annotations, dropped
+    )
+    if table.size == 0:
+        return PartitionQuality(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    per_annotation = table.sum(axis=0)
+    clusters_per_annotation = (table > 0).sum(axis=0)
+    covered = per_annotation >= 2
+    annotations_per_cluster = (table > 0).sum(axis=1)
+    touched = annotations_per_cluster > 0
+    fragmentation = (
+        float((clusters_per_annotation[covered] > 1).mean()) if covered.any() else 0.0
+    )
+    merge = (
+        float((annotations_per_cluster[touched] > 1).mean()) if touched.any() else 0.0
+    )
+
+    annotation_entropy = _entropy(per_annotation)
+    cluster_entropy = _entropy(table.sum(axis=1))
+    homogeneity = (
+        1.0 - _conditional_entropy(table, axis=0) / annotation_entropy
+        if annotation_entropy > 0
+        else 1.0
+    )
+    completeness = (
+        1.0 - _conditional_entropy(table, axis=1) / cluster_entropy
+        if cluster_entropy > 0
+        else 1.0
+    )
+    v_measure = (
+        2.0 * homogeneity * completeness / (homogeneity + completeness)
+        if homogeneity + completeness > 0
+        else 0.0
+    )
+
+    union = cluster_size[:, None] + per_annotation[None, :] - table
+    with np.errstate(divide="ignore", invalid="ignore"):
+        overlap = np.where(union > 0, table / np.where(union > 0, union, 1.0), 0.0)
+    # Only a cluster the association returned can be a prediction, so only such a
+    # cluster can be a panoptic false positive. Counting the singletons that stand
+    # for dropped detections would make a filter that removes an outlier look worse
+    # than one that keeps it, which is backwards.
+    matched = (overlap > PANOPTIC_OVERLAP) & returned[:, None]
+    true_positive = int(matched.sum())
+    false_positive = int(returned.sum() - matched.any(axis=1).sum())
+    false_negative = max(annotation_count - true_positive, 0)
+    denominator = true_positive + 0.5 * (false_positive + false_negative)
+    return PartitionQuality(
+        fragmentation_rate=fragmentation,
+        merge_rate=merge,
+        homogeneity=homogeneity,
+        completeness=completeness,
+        v_measure=v_measure,
+        segmentation_quality=(float(overlap[matched].mean()) if true_positive else 0.0),
+        recognition_quality=true_positive / denominator if denominator else 0.0,
+        panoptic_quality=(
+            float(overlap[matched].mean()) * true_positive / denominator
+            if true_positive and denominator
+            else 0.0
+        ),
     )
 
 
@@ -1137,6 +1332,71 @@ def _fit_shared_threshold(
     return best_f1, best_threshold, best_index
 
 
+@dataclass(frozen=True)
+class RecallBreakdown:
+    """Where an object is lost: in the index, in the association, or in the ranking.
+
+    One number cannot say. `r_obj` asks whether retrieval brought back any candidate
+    on the object at all — if it did not, no clustering or rescoring downstream can
+    recover it. `recall_at` asks whether the object then survived association *and*
+    surfaced in the top `k`. The two gaps have unrelated remedies, and today they are
+    summed into one mAP.
+    """
+
+    #: Share of annotations some retrieved candidate landed within `near_m` of.
+    r_obj: float
+    #: Share of annotations a returned cluster matched, per cutoff `k`.
+    recall_at: dict[int, float]
+    #: Same, with every returned cluster allowed. `r_obj` minus this is what
+    #: association and filtering lost; this minus `recall_at[k]` is the ranking's.
+    recall_at_all: float
+
+
+def recall_breakdown(
+    candidate_reach: Mapping[str, float],
+    predictions_by_prompt: Mapping[str, list[Prediction]],
+    annotations_by_prompt: Mapping[str, list[Annotation]],
+    cutoffs: Sequence[int] = RECALL_AT_K,
+) -> RecallBreakdown:
+    """Split recall into what retrieval reached, what survived, and what ranked.
+
+    Macro-averaged over prompts, like every other rate in this file, so a prompt with
+    forty annotations does not decide the figure for one with two.
+
+    Args:
+        candidate_reach: Per prompt, the share of its annotations some retrieved
+            candidate came within `near_m` of.
+        predictions_by_prompt: Returned clusters, in the order the service ranked them.
+        annotations_by_prompt: Ground truth for the same prompt keys.
+        cutoffs: Values of `k` to report.
+
+    Returns:
+        The three views. Every rate is zero when no prompt has an annotation.
+    """
+    at_k: dict[int, list[float]] = {k: [] for k in cutoffs}
+    at_all: list[float] = []
+    for prompt, targets in annotations_by_prompt.items():
+        if not targets:
+            continue
+        ranked = sorted(
+            predictions_by_prompt.get(prompt, []),
+            key=lambda item: item.score,
+            reverse=True,
+        )
+        for k in cutoffs:
+            at_k[k].append(
+                len(match_predictions(ranked[:k], list(targets))) / len(targets)
+            )
+        at_all.append(len(match_predictions(ranked, list(targets))) / len(targets))
+    return RecallBreakdown(
+        r_obj=statistics.fmean(candidate_reach.values()) if candidate_reach else 0.0,
+        recall_at={
+            k: statistics.fmean(values) if values else 0.0 for k, values in at_k.items()
+        },
+        recall_at_all=statistics.fmean(at_all) if at_all else 0.0,
+    )
+
+
 def calibration_metrics(
     predictions_by_prompt: Mapping[str, list[Prediction]],
     annotations_by_prompt: Mapping[str, list[Annotation]],
@@ -1334,6 +1594,8 @@ def evaluate_config(
     grouped_aps: list[float] = []
     partitions: list[PartitionMetrics] = []
     hotas: list[HotaMetrics] = []
+    qualities: list[PartitionQuality] = []
+    candidate_reach: dict[str, float] = {}
     # Pooled over annotations, not averaged over prompts: one fragmented annotation
     # weighs the same wherever it is, which is what makes the per-class split below
     # comparable with the overall figure.
@@ -1341,13 +1603,22 @@ def evaluate_config(
     fragmentation_by_class: dict[str, list[tuple[int, int]]] = {}
 
     for prompt, prompt_annotations in annotations_by_prompt.items():
+        enriched = apply_feedback(
+            candidates_by_prompt[prompt],
+            effective_params,
+            (prototypes_by_prompt or {}).get(prompt),
+            (vlm_scores_by_prompt or {}).get(prompt),
+        )
+        # Before association, and before any filter: what retrieval brought back at
+        # all. An annotation missing here is out of reach of everything downstream.
+        reached = nearest_annotation_labels(enriched, prompt_annotations, near_m)
+        candidate_reach[prompt] = (
+            np.unique(reached[reached >= 0]).size / len(prompt_annotations)
+            if prompt_annotations
+            else 0.0
+        )
         localizations, selected, cluster_labels = localize_from_enriched_candidates(
-            apply_feedback(
-                candidates_by_prompt[prompt],
-                effective_params,
-                (prototypes_by_prompt or {}).get(prompt),
-                (vlm_scores_by_prompt or {}).get(prompt),
-            ),
+            enriched,
             geo_transform,
             effective_params,
             return_cluster_labels=True,
@@ -1355,6 +1626,13 @@ def evaluate_config(
         nearest, distance = nearest_annotation_distances(selected, prompt_annotations)
         annotation_labels = np.where(distance <= near_m, nearest, -1)
         partitions.append(partition_metrics(cluster_labels, annotation_labels))
+        qualities.append(
+            partition_quality(
+                np.asarray(cluster_labels, dtype=np.int64),
+                annotation_labels,
+                len(prompt_annotations),
+            )
+        )
         prompt_hota = hota_metrics(
             np.asarray(cluster_labels, dtype=np.int64),
             nearest,
@@ -1420,6 +1698,18 @@ def evaluate_config(
         group_radius_m=group_radius_m,
     )
     calibration = calibration_metrics(predictions_by_prompt, annotations_by_prompt)
+    recall = recall_breakdown(
+        candidate_reach, predictions_by_prompt, annotations_by_prompt
+    )
+
+    def _quality(name: str) -> float:
+        """Macro-average one `PartitionQuality` field over the prompts."""
+        return (
+            statistics.fmean(getattr(item, name) for item in qualities)
+            if qualities
+            else 0.0
+        )
+
     return ConfigMetrics(
         label="",
         params=asdict(effective_params),
@@ -1487,6 +1777,18 @@ def evaluate_config(
         accuracy_ceiling=calibration.accuracy_ceiling,
         threshold_spread_strict=strict.prompt_threshold_spread,
         reliability=calibration.bins,
+        r_obj=recall.r_obj,
+        recall_at_all=recall.recall_at_all,
+        recall_at_1=recall.recall_at.get(1, 0.0),
+        recall_at=recall.recall_at,
+        fragmentation_rate=_quality("fragmentation_rate"),
+        merge_rate=_quality("merge_rate"),
+        homogeneity=_quality("homogeneity"),
+        completeness=_quality("completeness"),
+        v_measure=_quality("v_measure"),
+        segmentation_quality=_quality("segmentation_quality"),
+        recognition_quality=_quality("recognition_quality"),
+        panoptic_quality=_quality("panoptic_quality"),
         det_a=statistics.fmean(item.det_a for item in hotas) if hotas else 0.0,
         ass_a=statistics.fmean(item.ass_a for item in hotas) if hotas else 0.0,
         hota=statistics.fmean(item.hota for item in hotas) if hotas else 0.0,
@@ -1513,6 +1815,7 @@ def _csv_row(metrics: ConfigMetrics) -> dict[str, Any]:
     row.pop("per_prompt")
     row.pop("fragmentation_by_class")
     row.pop("reliability")
+    row.pop("recall_at")
     return row
 
 

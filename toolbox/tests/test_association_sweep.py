@@ -19,6 +19,8 @@ from toolbox.benchmark.association_sweep import (
     hota_metrics,
     nearest_annotation_labels,
     partition_metrics,
+    partition_quality,
+    recall_breakdown,
     shared_threshold_metrics,
 )
 from toolbox.benchmark.object_search_http_benchmark import Annotation, Prediction
@@ -560,3 +562,73 @@ def test_a_score_that_means_nothing_is_reported_as_overconfident() -> None:
 
 def test_calibration_survives_a_configuration_that_returned_nothing() -> None:
     assert calibration_metrics({}, {}).scored == 0
+
+
+def test_splitting_and_merging_show_up_as_different_rates() -> None:
+    split = partition_quality(
+        np.array([0, 1, 2, 3]), np.array([0, 0, 1, 1]), annotation_count=2
+    )
+    merged = partition_quality(
+        np.array([0, 0, 0, 0]), np.array([0, 0, 1, 1]), annotation_count=2
+    )
+
+    assert (split.fragmentation_rate, split.merge_rate) == (1.0, 0.0)
+    assert (merged.fragmentation_rate, merged.merge_rate) == (0.0, 1.0)
+    # Homogeneity cannot see splitting and completeness cannot see merging, which is
+    # why neither is reported on its own.
+    assert split.homogeneity == 1.0
+    assert merged.completeness == 1.0
+
+
+def test_a_partition_that_is_right_scores_one_everywhere() -> None:
+    quality = partition_quality(
+        np.array([0, 0, 1, 1]), np.array([0, 0, 1, 1]), annotation_count=2
+    )
+
+    assert quality.panoptic_quality == pytest.approx(1.0)
+    assert quality.recognition_quality == pytest.approx(1.0)
+    assert quality.v_measure == pytest.approx(1.0)
+
+
+def test_a_filter_that_drops_a_detection_is_not_charged_a_false_cluster() -> None:
+    # The dropped detection becomes a singleton by convention, so it still costs
+    # fragmentation — but it is not a returned cluster and must not count as a
+    # panoptic false positive, or filtering would always look worse than not
+    # filtering.
+    quality = partition_quality(
+        np.array([0, 0, 1, 1, -1]), np.array([0, 0, 1, 1, 0]), annotation_count=2
+    )
+
+    assert quality.recognition_quality == pytest.approx(1.0)
+    assert quality.fragmentation_rate > 0.0
+
+
+def test_an_annotation_no_cluster_matched_is_a_panoptic_miss() -> None:
+    reached = partition_quality(np.array([0, 0]), np.array([0, 0]), annotation_count=1)
+    missed = partition_quality(np.array([0, 0]), np.array([0, 0]), annotation_count=2)
+
+    assert reached.recognition_quality == pytest.approx(1.0)
+    # One true positive against one false negative: 1 / (1 + 0.5).
+    assert missed.recognition_quality == pytest.approx(2.0 / 3.0)
+
+
+def test_recall_separates_what_retrieval_reached_from_what_ranked() -> None:
+    annotations = {"a": [_annotation("a")]}
+    # The object is returned, but only as the second-ranked cluster.
+    predictions = {
+        "a": [
+            _prediction("fp", 0.95, is_match=False),
+            _prediction("tp", 0.5, is_match=True),
+        ]
+    }
+
+    breakdown = recall_breakdown({"a": 1.0}, predictions, annotations, cutoffs=(1, 5))
+
+    assert breakdown.r_obj == 1.0
+    assert breakdown.recall_at_all == 1.0
+    assert breakdown.recall_at[1] == 0.0
+    assert breakdown.recall_at[5] == 1.0
+
+
+def test_recall_survives_a_prompt_with_no_annotation_at_all() -> None:
+    assert recall_breakdown({}, {}, {"a": []}).recall_at_all == 0.0
