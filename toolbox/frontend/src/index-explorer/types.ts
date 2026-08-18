@@ -180,6 +180,26 @@ export type ProjectWorldPointResponse = {
   point_world_wds: [number, number, number];
 };
 
+export type ProposalNeighborProjection = {
+  keyframe_id: string;
+  distance_from_source_m: number;
+  distance_to_proposal_m: number;
+  erp_u: number;
+  erp_v: number;
+  theta_center: number;
+  phi_center: number;
+  angular_width: number;
+  angular_height: number;
+};
+
+export type ProposalNeighborProjectionsResponse = {
+  row_index: number;
+  source_keyframe_id: string;
+  requested_count: number;
+  projections: ProposalNeighborProjection[];
+  note: string;
+};
+
 export type ViewConeResponse = {
   available: boolean;
   keyframe_id: string;

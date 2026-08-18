@@ -20,6 +20,7 @@ import type {
   MetadataRowsResponse,
   MetadataStatusResponse,
   ProjectWorldPointResponse,
+  ProposalNeighborProjectionsResponse,
   ViewConeResponse,
 } from "./types";
 
@@ -323,6 +324,37 @@ export async function projectWorldPoint(
     },
   );
   return readJson(response);
+}
+
+export async function fetchProposalNeighborProjections(
+  mapId: string,
+  rowIndex: number,
+  count: number,
+): Promise<ProposalNeighborProjectionsResponse> {
+  const params = new URLSearchParams({ count: String(count) });
+  return readJson(
+    await fetch(metadataUrl(mapId, `/rows/${rowIndex}/neighbor-projections`, params)),
+  );
+}
+
+export function proposalNeighborProjectionRenderUrl(
+  mapId: string,
+  rowIndex: number,
+  targetKeyframeId: string,
+  options: { size?: number; fovScale?: number } = {},
+): string {
+  const params = new URLSearchParams();
+  if (options.size != null) {
+    params.set("size", String(options.size));
+  }
+  if (options.fovScale != null) {
+    params.set("fov_scale", String(options.fovScale));
+  }
+  return metadataUrl(
+    mapId,
+    `/rows/${rowIndex}/neighbor-projections/${encodeURIComponent(targetKeyframeId)}.png`,
+    params,
+  );
 }
 
 export async function resolveViewCone(

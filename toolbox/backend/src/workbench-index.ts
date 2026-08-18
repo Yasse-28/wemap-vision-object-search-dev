@@ -18,6 +18,7 @@ import {
   formatLevel,
   loadMapManifest,
   manifestKeyframeToWorldToCameraWds,
+  type ManifestKeyframe,
   type MapManifest,
 } from "./map-manifest.js";
 import {
@@ -43,6 +44,8 @@ const VIEW_CONE_ARC_STEPS = 48;
 /** Default long side of a re-rendered proposal view, in pixels. */
 const DEFAULT_ROW_RENDER_SIZE = 512;
 const MAX_ROW_RENDER_SIZE = 2048;
+const DEFAULT_NEIGHBOR_PROJECTION_COUNT = 5;
+const MAX_NEIGHBOR_PROJECTION_COUNT = 12;
 /** How long the status route waits on the bricks service for pgvector coverage. */
 const COVERAGE_TIMEOUT_MS = 2500;
 
@@ -1044,6 +1047,169 @@ function rowAngles(row: MetadataRow): ErpViewAngles {
   };
 }
 
+export type ProposalNeighborProjection = {
+  keyframe_id: string;
+  distance_from_source_m: number;
+  distance_to_proposal_m: number;
+  erp_u: number;
+  erp_v: number;
+  theta_center: number;
+  phi_center: number;
+  angular_width: number;
+  angular_height: number;
+};
+
+type ProposalProjectionGeometry = {
+  row: MetadataRow;
+  manifest: MapManifest;
+  pointWorldWds: [number, number, number];
+  sourceOriginWorldWds: [number, number, number];
+  physicalWidthM: number;
+  physicalHeightM: number;
+};
+
+function keyframeOriginWorldWds(keyframe: ManifestKeyframe): [number, number, number] {
+  return transformPoint4(invertRigid4(manifestKeyframeToWorldToCameraWds(keyframe)), [0, 0, 0]);
+}
+
+function proposalProjectionGeometry(
+  row: MetadataRow,
+  manifest: MapManifest,
+): ProposalProjectionGeometry {
+  if (row.depth === null || !Number.isFinite(row.depth) || row.depth <= 0) {
+    throw new WorkbenchRouteError(
+      422,
+      `Row ${row.rowIndex} has no positive depth, so it cannot be projected into neighbours.`,
+    );
+  }
+  const angles = rowAngles(row);
+  if (!isRenderableGnomonic(angles)) {
+    throw new WorkbenchRouteError(
+      422,
+      `Row ${row.rowIndex} has a degenerate angular extent and cannot be projected.`,
+    );
+  }
+  const sourceKeyframe = manifest.keyframeById.get(row.videoKeyframeId);
+  if (!sourceKeyframe) {
+    throw new WorkbenchRouteError(
+      404,
+      `GeoRef pose not found for source keyframe ${row.videoKeyframeId}.`,
+    );
+  }
+  const sourcePose = manifestKeyframeToWorldToCameraWds(sourceKeyframe);
+  const [u, v] = yawPitchToEquirectUv(row.thetaCenter, row.phiCenter);
+  const ray = equirectUvToRay(u, v);
+  const pointWorldWds = transformPoint4(invertRigid4(sourcePose), [
+    ray[0] * row.depth,
+    ray[1] * row.depth,
+    ray[2] * row.depth,
+  ]);
+  return {
+    row,
+    manifest,
+    pointWorldWds,
+    sourceOriginWorldWds: keyframeOriginWorldWds(sourceKeyframe),
+    physicalWidthM: 2 * row.depth * Math.tan(row.angularWidth / 2),
+    physicalHeightM: 2 * row.depth * Math.tan(row.angularHeight / 2),
+  };
+}
+
+function projectProposalIntoKeyframe(
+  geometry: ProposalProjectionGeometry,
+  target: ManifestKeyframe,
+): ProposalNeighborProjection | null {
+  const targetPose = manifestKeyframeToWorldToCameraWds(target);
+  const pointKeyframe = transformPoint4(targetPose, geometry.pointWorldWds);
+  const uv = cameraPointToEquirectUv(pointKeyframe);
+  if (!uv) {
+    return null;
+  }
+  const distanceToProposal = Math.hypot(
+    pointKeyframe[0],
+    pointKeyframe[1],
+    pointKeyframe[2],
+  );
+  const targetOrigin = keyframeOriginWorldWds(target);
+  const distanceFromSource = Math.hypot(
+    targetOrigin[0] - geometry.sourceOriginWorldWds[0],
+    targetOrigin[1] - geometry.sourceOriginWorldWds[1],
+    targetOrigin[2] - geometry.sourceOriginWorldWds[2],
+  );
+  const angularWidth = 2 * Math.atan(geometry.physicalWidthM / (2 * distanceToProposal));
+  const angularHeight = 2 * Math.atan(geometry.physicalHeightM / (2 * distanceToProposal));
+  return {
+    keyframe_id: String(target.keyframeId),
+    distance_from_source_m: distanceFromSource,
+    distance_to_proposal_m: distanceToProposal,
+    erp_u: uv[0],
+    erp_v: uv[1],
+    theta_center: (uv[0] - 0.5) * 2 * Math.PI,
+    phi_center: (uv[1] - 0.5) * Math.PI,
+    angular_width: angularWidth,
+    angular_height: angularHeight,
+  };
+}
+
+/** Project one depth-backed proposal into the nearest manifest camera poses. */
+export function projectProposalIntoNearestKeyframes(
+  row: MetadataRow,
+  manifest: MapManifest,
+  requestedCount: number = DEFAULT_NEIGHBOR_PROJECTION_COUNT,
+): ProposalNeighborProjection[] {
+  const geometry = proposalProjectionGeometry(row, manifest);
+  const count = Math.max(
+    1,
+    Math.min(MAX_NEIGHBOR_PROJECTION_COUNT, Math.round(requestedCount)),
+  );
+  return manifest.keyframes
+    .filter((keyframe) => keyframe.keyframeId !== row.videoKeyframeId)
+    .map((keyframe) => projectProposalIntoKeyframe(geometry, keyframe))
+    .filter((item): item is ProposalNeighborProjection => item !== null)
+    .sort(
+      (a, b) =>
+        a.distance_from_source_m - b.distance_from_source_m
+        || Number(a.keyframe_id) - Number(b.keyframe_id),
+    )
+    .slice(0, count);
+}
+
+async function proposalProjectionSource(
+  map: MapEntry,
+  rowIndex: number,
+): Promise<{ row: MetadataRow; manifest: MapManifest }> {
+  const metadata = await requireMetadata(map).catch(asRouteError);
+  const row = rowByIndex(metadata, rowIndex);
+  if (!row) {
+    throw new WorkbenchRouteError(404, `Row ${rowIndex} not found in ${metadata.metadataPath}.`);
+  }
+  let manifest: MapManifest;
+  try {
+    manifest = await loadMapManifest(map.path);
+  } catch (error) {
+    throw new WorkbenchRouteError(404, error instanceof Error ? error.message : String(error));
+  }
+  return { row, manifest };
+}
+
+export async function proposalNeighborProjectionsPayload(
+  map: MapEntry,
+  rowIndex: number,
+  requestedCount: number,
+): Promise<Record<string, unknown>> {
+  const { row, manifest } = await proposalProjectionSource(map, rowIndex);
+  const projections = projectProposalIntoNearestKeyframes(row, manifest, requestedCount);
+  return {
+    row_index: row.rowIndex,
+    source_keyframe_id: String(row.videoKeyframeId),
+    requested_count: Math.max(
+      1,
+      Math.min(MAX_NEIGHBOR_PROJECTION_COUNT, Math.round(requestedCount)),
+    ),
+    projections,
+    note: "Geometric reprojection only; visibility and occlusion are not verified.",
+  };
+}
+
 /**
  * Re-render one proposal's rectilinear view from the keyframe's ERP.
  *
@@ -1059,26 +1225,23 @@ function rowAngles(row: MetadataRow): ErpViewAngles {
  * true angular extent, not the masked square on disk — the UI must say which it is
  * showing.
  */
-async function rowRenderPng(
+async function renderGnomonicPng(
   map: MapEntry,
-  row: MetadataRow,
+  keyframeId: string,
+  angles: ErpViewAngles,
   options: { size?: number; fovScale?: number },
 ): Promise<Buffer> {
-  if (!isRenderableGnomonic(rowAngles(row))) {
+  if (!isRenderableGnomonic(angles)) {
     throw new WorkbenchRouteError(
       422,
-      `Row ${row.rowIndex} spans ${(row.angularWidth * 180 / Math.PI).toFixed(1)}x`
-      + `${(row.angularHeight * 180 / Math.PI).toFixed(1)} degrees, so no rectilinear view `
-      + "of it exists (a gnomonic projection diverges at 180). The stored thumbnail is "
-      + "degenerate for the same reason — this is an upstream property of the proposal, "
-      + "not a rendering limit.",
+      "The requested angular extent cannot be rendered as a rectilinear view.",
     );
   }
-  const sourceImagePath = await resolveSourceImagePath(map, String(row.videoKeyframeId));
+  const sourceImagePath = await resolveSourceImagePath(map, keyframeId);
   if (!sourceImagePath) {
     throw new WorkbenchRouteError(
       404,
-      `Equirectangular source image not found for keyframe ${row.videoKeyframeId}.`,
+      `Equirectangular source image not found for keyframe ${keyframeId}.`,
     );
   }
   const source = await imageSize(sourceImagePath);
@@ -1092,10 +1255,10 @@ async function rowRenderPng(
     Math.min(MAX_ROW_RENDER_SIZE, Math.round(options.size ?? DEFAULT_ROW_RENDER_SIZE)),
   );
   const fovScale = Math.max(1, Math.min(8, options.fovScale ?? 1));
-  const filter = gnomonicFfmpegFilter(rowAngles(row), { size, fovScale });
+  const filter = gnomonicFfmpegFilter(angles, { size, fovScale });
 
   const sourceMtime = (await stat(sourceImagePath)).mtimeMs;
-  const cacheKey = `${sourceImagePath}:${sourceMtime}:${row.rowIndex}:${filter}`;
+  const cacheKey = `${sourceImagePath}:${sourceMtime}:${filter}`;
   const cached = cutoutPreviewCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -1130,6 +1293,29 @@ async function rowRenderPng(
     cutoutPreviewCache.delete(cutoutPreviewCache.keys().next().value as string);
   }
   return promise;
+}
+
+async function rowRenderPng(
+  map: MapEntry,
+  row: MetadataRow,
+  options: { size?: number; fovScale?: number },
+): Promise<Buffer> {
+  if (!isRenderableGnomonic(rowAngles(row))) {
+    throw new WorkbenchRouteError(
+      422,
+      `Row ${row.rowIndex} spans ${(row.angularWidth * 180 / Math.PI).toFixed(1)}x`
+      + `${(row.angularHeight * 180 / Math.PI).toFixed(1)} degrees, so no rectilinear view `
+      + "of it exists (a gnomonic projection diverges at 180). The stored thumbnail is "
+      + "degenerate for the same reason — this is an upstream property of the proposal, "
+      + "not a rendering limit.",
+    );
+  }
+  return renderGnomonicPng(
+    map,
+    String(row.videoKeyframeId),
+    rowAngles(row),
+    options,
+  );
 }
 
 /**
@@ -1252,6 +1438,44 @@ export async function metadataRowRenderPng(
     throw new WorkbenchRouteError(404, `Row ${rowIndex} not found in ${metadata.metadataPath}.`);
   }
   return rowRenderPng(map, row, options);
+}
+
+export async function proposalNeighborProjectionRenderPng(
+  map: MapEntry,
+  rowIndex: number,
+  targetKeyframeId: string,
+  options: { size?: number; fovScale?: number },
+): Promise<Buffer> {
+  const { row, manifest } = await proposalProjectionSource(map, rowIndex);
+  const geometry = proposalProjectionGeometry(row, manifest);
+  const target = manifest.keyframeById.get(Number(targetKeyframeId));
+  if (!target) {
+    throw new WorkbenchRouteError(
+      404,
+      `GeoRef pose not found for target keyframe ${targetKeyframeId}.`,
+    );
+  }
+  if (target.keyframeId === row.videoKeyframeId) {
+    throw new WorkbenchRouteError(400, "The source keyframe is not a neighbour.");
+  }
+  const projection = projectProposalIntoKeyframe(geometry, target);
+  if (!projection) {
+    throw new WorkbenchRouteError(
+      422,
+      `The proposal coincides with target keyframe ${targetKeyframeId}.`,
+    );
+  }
+  return renderGnomonicPng(
+    map,
+    targetKeyframeId,
+    {
+      thetaCenter: projection.theta_center,
+      phiCenter: projection.phi_center,
+      angularWidth: projection.angular_width,
+      angularHeight: projection.angular_height,
+    },
+    options,
+  );
 }
 
 /**

@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import type { MapEntry } from "./config.js";
+import { parseManifest } from "./map-manifest.js";
+import type { MetadataRow } from "./object-search-metadata.js";
 import {
   columnarKeyframeMarkers,
   indexProjectWorldPointPayload,
@@ -13,6 +15,7 @@ import {
   objectSearchMetadataMarkersPayload,
   objectSearchMetadataStatusPayload,
   previewFromPathPng,
+  projectProposalIntoNearestKeyframes,
   WorkbenchRouteError,
 } from "./workbench-index.js";
 
@@ -111,6 +114,71 @@ function asRecord(value: unknown): Record<string, unknown> {
   assert.ok(value && typeof value === "object" && !Array.isArray(value));
   return value as Record<string, unknown>;
 }
+
+function proposalProjectionFixture(): {
+  manifest: ReturnType<typeof parseManifest>;
+  row: MetadataRow;
+} {
+  const keyframe = (x: number, image: string) => ({
+    x,
+    y: 0,
+    z: 0,
+    orientation: [0, 0, 1, 0],
+    image_url: `https://e/images/${image}`,
+    depth_url: `https://e/depths/${image.replace(/\.jpg$/, ".tif")}`,
+  });
+  const manifest = parseManifest(
+    "/tmp/projection_1_20260101_000000.json",
+    JSON.stringify({
+      local_origin: [6, 45, 100],
+      map: { name: "projection", uuid: "projection", venue_type: "rail" },
+      geo_levels: [
+        { value: 0, min_altitude: -10, max_altitude: 10, geo_ref: 1 },
+      ],
+      geo_keyframes: [
+        keyframe(0, "0.jpg"),
+        keyframe(1, "1.jpg"),
+        keyframe(3, "2.jpg"),
+      ],
+    }),
+  );
+  return {
+    manifest,
+    row: {
+      rowIndex: 7,
+      videoKeyframeId: 0,
+      thetaCenter: 0,
+      phiCenter: 0,
+      angularWidth: 0.4,
+      angularHeight: 0.2,
+      detectorSource: "yolo",
+      label: "lamp",
+      detectionScore: 0.8,
+      thumbnailKey: null,
+      depth: 5,
+    },
+  };
+}
+
+test("projects a proposal into the nearest camera before farther poses", () => {
+  const { manifest, row } = proposalProjectionFixture();
+  const projections = projectProposalIntoNearestKeyframes(row, manifest, 1);
+  assert.equal(projections.length, 1);
+  assert.equal(projections[0].keyframe_id, "1");
+  assert.equal(projections[0].distance_from_source_m, 1);
+  assert.ok(Math.abs(projections[0].distance_to_proposal_m - Math.sqrt(26)) < 1e-12);
+  assert.ok(projections[0].erp_u > 0.5);
+  assert.equal(projections[0].erp_v, 0.5);
+  assert.ok(projections[0].angular_width < row.angularWidth);
+});
+
+test("refuses neighbour projection when a proposal has no depth", () => {
+  const { manifest, row } = proposalProjectionFixture();
+  assert.throws(
+    () => projectProposalIntoNearestKeyframes({ ...row, depth: null }, manifest, 5),
+    (error: unknown) => error instanceof WorkbenchRouteError && error.status === 422,
+  );
+});
 
 test("status leaves marker and keyframe tables on their own routes", async () => {
   const fixture = await createMetadataMap();

@@ -33,9 +33,11 @@ import {
   fetchMetadataMarkers,
   fetchMetadataRows,
   fetchMetadataStatus,
+  fetchProposalNeighborProjections,
   indexKeyframeDepthPreviewUrl,
   indexKeyframeEquirectPreviewUrl,
   projectWorldPoint,
+  proposalNeighborProjectionRenderUrl,
   resolveDepthPin,
   rowRenderUrl,
   rowThumbnailUrl,
@@ -49,6 +51,7 @@ import type {
   MetadataRowRecord,
   MetadataStatusResponse,
   MetadataSummary,
+  ProposalNeighborProjectionsResponse,
 } from "../index-explorer/types";
 import {
   KEYFRAME_GRAPH_COLOR,
@@ -198,6 +201,11 @@ function ObjectSearchExplorerPanel(props: Props) {
   const [isResizingVisualSplit, setIsResizingVisualSplit] = useState(false);
 
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
+  const [neighborProjectionCount, setNeighborProjectionCount] = useState(5);
+  const [neighborProjections, setNeighborProjections] =
+    useState<ProposalNeighborProjectionsResponse | null>(null);
+  const [neighborProjectionLoading, setNeighborProjectionLoading] = useState(false);
+  const [neighborProjectionError, setNeighborProjectionError] = useState<string | null>(null);
   const [equirectPreviewError, setEquirectPreviewError] = useState<string | null>(null);
   const [equirectPreviewSrc, setEquirectPreviewSrc] = useState<string | null>(null);
   const [equirectPreviewKeyframeId, setEquirectPreviewKeyframeId] = useState<string | null>(null);
@@ -230,6 +238,7 @@ function ObjectSearchExplorerPanel(props: Props) {
   } | null>(null);
   const visualSplitRef = useRef<HTMLDivElement | null>(null);
   const inspectorRef = useRef<HTMLElement | null>(null);
+  const neighborProjectionRequestRef = useRef(0);
   const { params: bboxPostProcess, setParams: setBboxPostProcess } =
     useBboxPostProcessParams();
   const [metadataRows, setMetadataRows] = useState<MetadataRowRecord[]>([]);
@@ -259,6 +268,10 @@ function ObjectSearchExplorerPanel(props: Props) {
 
   useEffect(() => {
     setSelectedPreviewCursor(null);
+    neighborProjectionRequestRef.current += 1;
+    setNeighborProjections(null);
+    setNeighborProjectionError(null);
+    setNeighborProjectionLoading(false);
   }, [selectedRowIndex]);
 
   const summary: MetadataSummary | null = status?.summary ?? null;
@@ -1371,6 +1384,39 @@ function ObjectSearchExplorerPanel(props: Props) {
     });
   };
 
+  const loadNeighborProjections = async (): Promise<void> => {
+    if (!selectedDetection || selectedDetection.depth === null) {
+      return;
+    }
+    const requestId = neighborProjectionRequestRef.current + 1;
+    neighborProjectionRequestRef.current = requestId;
+    setNeighborProjectionLoading(true);
+    setNeighborProjectionError(null);
+    try {
+      const payload = await fetchProposalNeighborProjections(
+        props.mapId,
+        selectedDetection.row_index,
+        neighborProjectionCount,
+      );
+      if (neighborProjectionRequestRef.current === requestId) {
+        setNeighborProjections(payload);
+      }
+    } catch (projectionError) {
+      if (neighborProjectionRequestRef.current === requestId) {
+        setNeighborProjections(null);
+        setNeighborProjectionError(
+          projectionError instanceof Error
+            ? projectionError.message
+            : String(projectionError),
+        );
+      }
+    } finally {
+      if (neighborProjectionRequestRef.current === requestId) {
+        setNeighborProjectionLoading(false);
+      }
+    }
+  };
+
   const updateResolvedDepthPin = (
     requestId: string,
     payload: DepthPinResponse,
@@ -2415,6 +2461,100 @@ function ObjectSearchExplorerPanel(props: Props) {
                 </span>
                 <figcaption>Context re-render · 2× FOV · Ctrl+click to place a depth pin</figcaption>
               </figure>
+
+              <CollapsibleSection
+                title="Project into nearby keyframes"
+                summary={
+                  selectedDetection.depth === null
+                    ? "Depth required"
+                    : neighborProjections
+                      ? `${neighborProjections.projections.length} views`
+                      : `${neighborProjectionCount} nearest`
+                }
+                defaultOpen={false}
+              >
+                <div className="object-search-neighbor-projection-controls">
+                  <label>
+                    Neighbours
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={neighborProjectionCount}
+                      onChange={(event) =>
+                        setNeighborProjectionCount(
+                          Math.max(1, Math.min(12, Number(event.target.value) || 1)),
+                        )
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={
+                      selectedDetection.depth === null || neighborProjectionLoading
+                    }
+                    onClick={() => void loadNeighborProjections()}
+                  >
+                    {neighborProjectionLoading ? "Projecting..." : "Project"}
+                  </button>
+                </div>
+
+                {selectedDetection.depth === null ? (
+                  <p className="muted">
+                    This proposal has no depth, so it cannot be lifted into 3D.
+                  </p>
+                ) : null}
+                {neighborProjectionError ? (
+                  <p className="warning-box" role="alert">
+                    {neighborProjectionError}
+                  </p>
+                ) : null}
+                {neighborProjections ? (
+                  <>
+                    <p className="map-caption">{neighborProjections.note}</p>
+                    {neighborProjections.projections.length ? (
+                      <div className="object-search-neighbor-projection-grid">
+                        {neighborProjections.projections.map((projection) => (
+                          <figure key={projection.keyframe_id}>
+                            <span className="object-search-neighbor-projection-stage">
+                              <img
+                                src={proposalNeighborProjectionRenderUrl(
+                                  props.mapId,
+                                  selectedDetection.row_index,
+                                  projection.keyframe_id,
+                                  { size: 384, fovScale: 2 },
+                                )}
+                                alt={`Proposal ${selectedDetection.row_index} projected into keyframe ${projection.keyframe_id}`}
+                                loading="lazy"
+                              />
+                              <span
+                                className="object-search-neighbor-projection-box"
+                                aria-hidden="true"
+                              />
+                              <span
+                                className="object-search-depth-projection-cursor"
+                                aria-hidden="true"
+                                style={{ left: "50%", top: "50%" }}
+                              />
+                            </span>
+                            <figcaption>
+                              <strong>Keyframe {projection.keyframe_id}</strong>
+                              <span>
+                                {projection.distance_from_source_m.toFixed(1)} m from
+                                source · {projection.distance_to_proposal_m.toFixed(1)} m
+                                to proposal
+                              </span>
+                            </figcaption>
+                          </figure>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="muted">No neighbouring keyframe is available.</p>
+                    )}
+                  </>
+                ) : null}
+              </CollapsibleSection>
 
               {selectedDetection.thumbnail_key ? (
                 <CollapsibleSection
