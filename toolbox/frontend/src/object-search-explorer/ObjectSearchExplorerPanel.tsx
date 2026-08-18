@@ -1539,19 +1539,19 @@ function ObjectSearchExplorerPanel(props: Props) {
         Reporting them separately is the whole point of this row.
       */}
       <dl className="explorer-health-strip" aria-label="Map processing coverage">
-        <div>
+        <div title="Keyframes with a valid pose in the map manifest.">
           <dt>Posed</dt>
           <dd>{status?.manifest_keyframe_count ?? 0}</dd>
         </div>
-        <div>
+        <div title="Keyframes matching the current Explorer filters. This is not an ML similarity score.">
           <dt>Matching</dt>
           <dd>{totalKeyframes}</dd>
         </div>
-        <div>
+        <div title="Object-detection proposals stored in the map metadata.">
           <dt>Proposals</dt>
           <dd>{totalRows}</dd>
         </div>
-        <div>
+        <div title="Proposals with a resolved depth value available for 3D positioning.">
           <dt>With depth</dt>
           <dd>{summary?.with_depth_count ?? 0}</dd>
         </div>
@@ -1559,8 +1559,8 @@ function ObjectSearchExplorerPanel(props: Props) {
           <div
             title={
               summary.coverage.no_position_total
-                ? `${summary.coverage.no_position_total} without a 3D position`
-                : undefined
+                ? `Proposals stored in the search index. ${summary.coverage.no_position_total} have no 3D position.`
+                : "Proposals stored in the search index."
             }
           >
             <dt>Ingested</dt>

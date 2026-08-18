@@ -754,6 +754,7 @@ tr:last-child td {
   min-width: 0;
   padding: 8px 12px;
   background: var(--c-surface-raised);
+  cursor: help;
 }
 
 .explorer-health-strip dt {
