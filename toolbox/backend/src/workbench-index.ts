@@ -46,6 +46,7 @@ const DEFAULT_ROW_RENDER_SIZE = 512;
 const MAX_ROW_RENDER_SIZE = 2048;
 const DEFAULT_NEIGHBOR_PROJECTION_COUNT = 5;
 const MAX_NEIGHBOR_PROJECTION_COUNT = 12;
+const MIN_NEIGHBOR_PROJECTION_BASELINE_M = 0.5;
 /** How long the status route waits on the bricks service for pgvector coverage. */
 const COVERAGE_TIMEOUT_MS = 2500;
 
@@ -1068,6 +1069,11 @@ type ProposalProjectionGeometry = {
   physicalHeightM: number;
 };
 
+type ProposalProjectionCandidate = {
+  projection: ProposalNeighborProjection;
+  originWorldWds: [number, number, number];
+};
+
 function keyframeOriginWorldWds(keyframe: ManifestKeyframe): [number, number, number] {
   return transformPoint4(invertRigid4(manifestKeyframeToWorldToCameraWds(keyframe)), [0, 0, 0]);
 }
@@ -1150,7 +1156,18 @@ function projectProposalIntoKeyframe(
   };
 }
 
-/** Project one depth-backed proposal into the nearest manifest camera poses. */
+function cameraBaselineM(
+  left: ProposalProjectionCandidate,
+  right: ProposalProjectionCandidate,
+): number {
+  return Math.hypot(
+    left.originWorldWds[0] - right.originWorldWds[0],
+    left.originWorldWds[1] - right.originWorldWds[1],
+    left.originWorldWds[2] - right.originWorldWds[2],
+  );
+}
+
+/** Project one depth-backed proposal into nearby, spatially distinct camera poses. */
 export function projectProposalIntoNearestKeyframes(
   row: MetadataRow,
   manifest: MapManifest,
@@ -1161,16 +1178,43 @@ export function projectProposalIntoNearestKeyframes(
     1,
     Math.min(MAX_NEIGHBOR_PROJECTION_COUNT, Math.round(requestedCount)),
   );
-  return manifest.keyframes
+  const candidates = manifest.keyframes
     .filter((keyframe) => keyframe.keyframeId !== row.videoKeyframeId)
-    .map((keyframe) => projectProposalIntoKeyframe(geometry, keyframe))
-    .filter((item): item is ProposalNeighborProjection => item !== null)
+    .flatMap((keyframe): ProposalProjectionCandidate[] => {
+      const projection = projectProposalIntoKeyframe(geometry, keyframe);
+      return projection
+        ? [{ projection, originWorldWds: keyframeOriginWorldWds(keyframe) }]
+        : [];
+    })
     .sort(
       (a, b) =>
-        a.distance_from_source_m - b.distance_from_source_m
-        || Number(a.keyframe_id) - Number(b.keyframe_id),
-    )
-    .slice(0, count);
+        a.projection.distance_from_source_m - b.projection.distance_from_source_m
+        || Number(a.projection.keyframe_id) - Number(b.projection.keyframe_id),
+    );
+
+  const selected: ProposalProjectionCandidate[] = [];
+  const deferred: ProposalProjectionCandidate[] = [];
+  for (const candidate of candidates) {
+    if (
+      candidate.projection.distance_from_source_m >= MIN_NEIGHBOR_PROJECTION_BASELINE_M
+      && selected.every(
+        (other) => cameraBaselineM(candidate, other) >= MIN_NEIGHBOR_PROJECTION_BASELINE_M,
+      )
+    ) {
+      selected.push(candidate);
+    } else {
+      deferred.push(candidate);
+    }
+    if (selected.length === count) {
+      break;
+    }
+  }
+  // Dense or very small captures may not offer N distinct origins. Preserve the
+  // requested result count by falling back to the nearest deferred poses.
+  if (selected.length < count) {
+    selected.push(...deferred.slice(0, count - selected.length));
+  }
+  return selected.map((candidate) => candidate.projection);
 }
 
 async function proposalProjectionSource(
@@ -1206,7 +1250,9 @@ export async function proposalNeighborProjectionsPayload(
       Math.min(MAX_NEIGHBOR_PROJECTION_COUNT, Math.round(requestedCount)),
     ),
     projections,
-    note: "Geometric reprojection only; visibility and occlusion are not verified.",
+    note:
+      "Nearby views are spaced by at least 0.5 m when possible. Geometric "
+      + "reprojection only; visibility and occlusion are not verified.",
   };
 }
 

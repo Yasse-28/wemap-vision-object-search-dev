@@ -2209,13 +2209,32 @@ body.explorer-equirect-dragging {
   gap: var(--s-2);
 }
 
-.object-search-neighbor-projection-grid figure {
+.object-search-neighbor-projection-card {
   min-width: 0;
-  margin: 0;
+  padding: 0;
   overflow: hidden;
   border: 1px solid var(--c-border-subtle);
   border-radius: var(--r-sm);
   background: var(--c-surface-raised);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.object-search-neighbor-projection-card:hover {
+  border-color: var(--c-accent);
+  box-shadow: 0 5px 14px rgba(17, 24, 39, 0.12);
+  transform: translateY(-1px);
+}
+
+.object-search-neighbor-projection-card:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--c-accent) 35%, transparent);
+  outline-offset: 2px;
 }
 
 .object-search-neighbor-projection-stage {
@@ -2241,7 +2260,7 @@ body.explorer-equirect-dragging {
   pointer-events: none;
 }
 
-.object-search-neighbor-projection-grid figcaption {
+.object-search-neighbor-projection-caption {
   display: grid;
   gap: 2px;
   padding: 7px 8px 8px;
@@ -2250,9 +2269,25 @@ body.explorer-equirect-dragging {
   line-height: 1.25;
 }
 
-.object-search-neighbor-projection-grid figcaption strong {
+.object-search-neighbor-projection-caption strong {
   color: var(--c-text);
   font-size: var(--fs-xs);
+}
+
+.object-search-neighbor-projection-action {
+  margin-top: 3px;
+  color: var(--c-accent-text);
+  font-weight: var(--fw-bold);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .object-search-neighbor-projection-card {
+    transition: none;
+  }
+
+  .object-search-neighbor-projection-card:hover {
+    transform: none;
+  }
 }
 
 @media (max-width: 520px) {

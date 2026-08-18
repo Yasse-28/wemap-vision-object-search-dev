@@ -138,7 +138,9 @@ function proposalProjectionFixture(): {
       geo_keyframes: [
         keyframe(0, "0.jpg"),
         keyframe(1, "1.jpg"),
-        keyframe(3, "2.jpg"),
+        keyframe(1.1, "2.jpg"),
+        keyframe(3, "3.jpg"),
+        keyframe(0.1, "4.jpg"),
       ],
     }),
   );
@@ -170,6 +172,15 @@ test("projects a proposal into the nearest camera before farther poses", () => {
   assert.ok(projections[0].erp_u > 0.5);
   assert.equal(projections[0].erp_v, 0.5);
   assert.ok(projections[0].angular_width < row.angularWidth);
+});
+
+test("prefers spatially distinct neighbours over nearly duplicate poses", () => {
+  const { manifest, row } = proposalProjectionFixture();
+  const projections = projectProposalIntoNearestKeyframes(row, manifest, 2);
+  assert.deepEqual(
+    projections.map((projection) => projection.keyframe_id),
+    ["1", "3"],
+  );
 });
 
 test("refuses neighbour projection when a proposal has no depth", () => {

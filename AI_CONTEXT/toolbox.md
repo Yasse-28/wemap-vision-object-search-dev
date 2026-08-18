@@ -43,7 +43,7 @@ The annotation ownership boundary is recorded in
 | `GET /object-search-metadata/rows` | Flat row table: `keyframe_ids`, `offset`, `limit`, `detector_source`, `label`, `with_depth`. One request per explorer page. |
 | `GET /object-search-metadata/rows/{row_index}` | One row + `preview_path` (its `thumbnail_key`) + `preview_debug`. |
 | `GET /object-search-metadata/rows/{row_index}/render.png` | Re-render from the ERP (`size`, `fov_scale`). **Not** the default preview — 422 for a proposal spanning ≥180°. |
-| `GET /object-search-metadata/rows/{row_index}/neighbor-projections?count=N` | Lift the proposal centre through its stored depth, select the N nearest other manifest poses (1–12), and return its projected centre and apparent angular extent in each target keyframe. Geometric only: visibility and occlusion are not checked. |
+| `GET /object-search-metadata/rows/{row_index}/neighbor-projections?count=N` | Lift the proposal centre through its stored depth, select N nearby manifest poses (1–12) with a 0.5 m baseline from the source and each other when possible, and return its projected centre and apparent angular extent in each target keyframe. Geometric only: visibility and occlusion are not checked. |
 | `GET /object-search-metadata/rows/{row_index}/neighbor-projections/{target_keyframe_id}.png` | Rectilinear context render (`size`, `fov_scale`) centred on one of those projected target views. |
 | `GET /object-search-metadata/keyframes/{id}/equirect-preview.png` | Bare ERP (`draw_boxes=false`, JPEG) or with reconstructed boxes (PNG). |
 | `GET /object-search-metadata/keyframes/{id}/depth-preview.png`, `POST …/depth-pin`, `…/view-cone`, `…/project-world-point` | Manifest-only, except `depth-pin` with `projection: "cutout"`, which needs `row_index`. |
@@ -95,10 +95,12 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   proposal's context preview with Ctrl+click; while Ctrl is held, the same red depth
   cursor as the panorama follows the pointer. Proposal cards only change selection.
   The selected-proposal inspector can project a depth-bearing proposal into 1–12
-  nearest camera poses: it lifts the source centre to 3D, transfers the proposal's
-  approximate physical extent, and renders centred target cutouts. Those cards are
-  geometric hypotheses, not visibility claims; the UI explicitly warns that
-  occlusion is not verified.
+  nearest camera poses, preferring a 0.5 m baseline between views when the capture
+  permits it: it lifts the source centre to 3D, transfers the proposal's approximate
+  physical extent, and renders centred target cutouts. Clicking a target opens that
+  keyframe in the panorama and faces the projected centre. Those cards are geometric
+  hypotheses, not visibility claims; the UI explicitly warns that occlusion is not
+  verified.
   The panel renders as soon as the map is known — the
   metadata warning is scoped to the proposal grid, not the panel
   (`ObjectSearchExplorerPanel.tsx`, `EquirectPhotoSphereViewer.tsx`, `bboxPostProcess.ts`).

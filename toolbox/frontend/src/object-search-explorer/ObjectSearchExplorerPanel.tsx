@@ -51,6 +51,7 @@ import type {
   MetadataRowRecord,
   MetadataStatusResponse,
   MetadataSummary,
+  ProposalNeighborProjection,
   ProposalNeighborProjectionsResponse,
 } from "../index-explorer/types";
 import {
@@ -1417,6 +1418,21 @@ function ObjectSearchExplorerPanel(props: Props) {
     }
   };
 
+  const openNeighborProjection = (projection: ProposalNeighborProjection): void => {
+    setPhotosphereOrient((previous) => ({
+      yawRad: projection.theta_center,
+      token: (previous?.token ?? 0) + 1,
+    }));
+    selectKeyframe(projection.keyframe_id);
+    const prefersReducedMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    document.getElementById("explorer-spatial")?.scrollIntoView({
+      behavior: prefersReducedMotion ? "auto" : "smooth",
+      block: "start",
+    });
+  };
+
   const updateResolvedDepthPin = (
     requestId: string,
     payload: DepthPinResponse,
@@ -2469,7 +2485,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                     ? "Depth required"
                     : neighborProjections
                       ? `${neighborProjections.projections.length} views`
-                      : `${neighborProjectionCount} nearest`
+                      : `${neighborProjectionCount} diverse views`
                 }
                 defaultOpen={false}
               >
@@ -2516,7 +2532,13 @@ function ObjectSearchExplorerPanel(props: Props) {
                     {neighborProjections.projections.length ? (
                       <div className="object-search-neighbor-projection-grid">
                         {neighborProjections.projections.map((projection) => (
-                          <figure key={projection.keyframe_id}>
+                          <button
+                            key={projection.keyframe_id}
+                            type="button"
+                            className="object-search-neighbor-projection-card"
+                            aria-label={`Open keyframe ${projection.keyframe_id} in the panorama`}
+                            onClick={() => openNeighborProjection(projection)}
+                          >
                             <span className="object-search-neighbor-projection-stage">
                               <img
                                 src={proposalNeighborProjectionRenderUrl(
@@ -2538,15 +2560,18 @@ function ObjectSearchExplorerPanel(props: Props) {
                                 style={{ left: "50%", top: "50%" }}
                               />
                             </span>
-                            <figcaption>
+                            <span className="object-search-neighbor-projection-caption">
                               <strong>Keyframe {projection.keyframe_id}</strong>
                               <span>
                                 {projection.distance_from_source_m.toFixed(1)} m from
                                 source · {projection.distance_to_proposal_m.toFixed(1)} m
                                 to proposal
                               </span>
-                            </figcaption>
-                          </figure>
+                              <span className="object-search-neighbor-projection-action">
+                                Open in panorama →
+                              </span>
+                            </span>
+                          </button>
                         ))}
                       </div>
                     ) : (
