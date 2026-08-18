@@ -69,6 +69,7 @@ import {
   bboxArea,
   bboxPolygonRatios,
   DEFAULT_BBOX_POST_PROCESS,
+  detectorSourceFamily,
   postProcessDetections,
 } from "./bboxPostProcess";
 import { useBboxPostProcessParams } from "./useBboxPostProcessParams";
@@ -140,6 +141,14 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
   } catch {
     return fallback;
   }
+}
+
+function formatProposalShare(count: number, total: number): string {
+  if (total <= 0) {
+    return "0%";
+  }
+  const percentage = (count / total) * 100;
+  return `${percentage.toFixed(1).replace(/\.0$/, "")}%`;
 }
 
 /**
@@ -510,6 +519,28 @@ function ObjectSearchExplorerPanel(props: Props) {
   const pageRows = displayedProposals.map((proposal) => proposal.row);
   const pageKeptCount = keptRowIndexes.size;
   const pageDiscardedCount = Math.max(0, metadataRows.length - pageKeptCount);
+  const detectorBreakdown = useMemo(() => {
+    let yoloCount = 0;
+    let gdinoCount = 0;
+    for (const [source, count] of Object.entries(
+      summary?.detector_source_counts ?? {},
+    )) {
+      const family = detectorSourceFamily(source);
+      if (family === "yolo") {
+        yoloCount += count;
+      } else if (family === "gdino") {
+        gdinoCount += count;
+      }
+    }
+    const total = summary?.row_count ?? 0;
+    return {
+      total,
+      yoloCount,
+      gdinoCount,
+      yoloShare: formatProposalShare(yoloCount, total),
+      gdinoShare: formatProposalShare(gdinoCount, total),
+    };
+  }, [summary]);
   const pageRowIndexKey = pageRows.map((row) => row.row_index).join("|");
   const selectedPageRow =
     pageRows.find((row) => row.row_index === selectedRowIndex) ?? null;
@@ -2085,19 +2116,6 @@ function ObjectSearchExplorerPanel(props: Props) {
               <label>
                 <input
                   type="checkbox"
-                  checked={bboxPostProcess.showGdino}
-                  onChange={(event) =>
-                    setBboxPostProcess({
-                      ...bboxPostProcess,
-                      showGdino: event.target.checked,
-                    })
-                  }
-                />
-                G-DINO
-              </label>
-              <label>
-                <input
-                  type="checkbox"
                   checked={bboxPostProcess.showYolo}
                   onChange={(event) =>
                     setBboxPostProcess({
@@ -2107,6 +2125,29 @@ function ObjectSearchExplorerPanel(props: Props) {
                   }
                 />
                 YOLO-W
+                <strong
+                  title={`${detectorBreakdown.yoloCount} of ${detectorBreakdown.total} proposals across this map`}
+                >
+                  {detectorBreakdown.yoloShare}
+                </strong>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={bboxPostProcess.showGdino}
+                  onChange={(event) =>
+                    setBboxPostProcess({
+                      ...bboxPostProcess,
+                      showGdino: event.target.checked,
+                    })
+                  }
+                />
+                G-DINO
+                <strong
+                  title={`${detectorBreakdown.gdinoCount} of ${detectorBreakdown.total} proposals across this map`}
+                >
+                  {detectorBreakdown.gdinoShare}
+                </strong>
               </label>
             </fieldset>
 

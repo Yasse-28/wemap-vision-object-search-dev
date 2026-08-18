@@ -143,8 +143,10 @@ function detectionScore(item: MetadataRowRecord): number {
   return item.detection_score ?? bboxArea(item);
 }
 
-function detectionSourceFamily(item: MetadataRowRecord): "yolo" | "gdino" | "other" {
-  const source = item.detector_source.toLowerCase();
+export function detectorSourceFamily(
+  detectorSource: string,
+): "yolo" | "gdino" | "other" {
+  const source = detectorSource.toLowerCase();
   if (source.includes("yolo")) {
     return "yolo";
   }
@@ -159,7 +161,7 @@ export function postProcessDetections(
   params: BboxPostProcessParams,
 ): MetadataRowRecord[] {
   const filteredBySourceAndArea = detections.filter((item) => {
-    const family = detectionSourceFamily(item);
+    const family = detectorSourceFamily(item.detector_source);
     if (family === "yolo" && !params.showYolo) {
       return false;
     }

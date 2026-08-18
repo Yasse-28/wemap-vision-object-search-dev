@@ -87,7 +87,8 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   rows through `/object-search-metadata/*`. Pagination is **keyframe-major** (one ERP
   and its proposals); its compact proposal grid can independently show the rows kept
   or discarded by the current bbox post-processing controls. Detector visibility
-  (G-DINO / YOLO-W) sits beside those filters and remains active when geometric bbox
+  (G-DINO / YOLO-W) sits beside those filters, shows each detector's share of all
+  raw proposals across the map, and remains active when geometric bbox
   post-processing is disabled. Cutout depth pins are placed only from the selected
   proposal's context preview with Ctrl+click; while Ctrl is held, the same red depth
   cursor as the panorama follows the pointer. Proposal cards only change selection.
