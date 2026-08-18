@@ -1575,21 +1575,27 @@ function ObjectSearchExplorerPanel(props: Props) {
           <dt>Matching</dt>
           <dd>{totalKeyframes}</dd>
         </div>
-        <div title="Object-detection proposals stored in the map metadata.">
+        <div
+          className="explorer-health-proposals"
+          title="Object-detection proposals stored in the map metadata."
+        >
           <dt>Proposals</dt>
           <dd>{totalRows}</dd>
-        </div>
-        <div
-          title={`${detectorBreakdown.yoloCount} of ${detectorBreakdown.total} proposals across this map.`}
-        >
-          <dt>YOLO-W</dt>
-          <dd>{detectorBreakdown.yoloShare}</dd>
-        </div>
-        <div
-          title={`${detectorBreakdown.gdinoCount} of ${detectorBreakdown.total} proposals across this map.`}
-        >
-          <dt>G-DINO</dt>
-          <dd>{detectorBreakdown.gdinoShare}</dd>
+          <dd
+            className="explorer-health-proposal-breakdown"
+            aria-label="Detector share of proposals across this map"
+          >
+            <span
+              title={`${detectorBreakdown.yoloCount} of ${detectorBreakdown.total} proposals across this map.`}
+            >
+              YOLO-W <strong>{detectorBreakdown.yoloShare}</strong>
+            </span>
+            <span
+              title={`${detectorBreakdown.gdinoCount} of ${detectorBreakdown.total} proposals across this map.`}
+            >
+              G-DINO <strong>{detectorBreakdown.gdinoShare}</strong>
+            </span>
+          </dd>
         </div>
         <div title="Proposals with a resolved depth value available for 3D positioning.">
           <dt>With depth</dt>

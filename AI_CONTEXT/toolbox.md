@@ -89,7 +89,7 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   or discarded by the current bbox post-processing controls. Detector visibility
   (G-DINO / YOLO-W) sits beside those filters and remains active when geometric bbox
   post-processing is disabled; each detector's share of all raw proposals across the
-  map appears in the top health strip. Cutout depth pins are placed only from the selected
+  map appears below the proposal total in the top health strip. Cutout depth pins are placed only from the selected
   proposal's context preview with Ctrl+click; while Ctrl is held, the same red depth
   cursor as the panorama follows the pointer. Proposal cards only change selection.
   The panel renders as soon as the map is known — the

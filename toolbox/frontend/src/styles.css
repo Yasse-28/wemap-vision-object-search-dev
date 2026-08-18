@@ -771,6 +771,39 @@ tr:last-child td {
   font-weight: var(--fw-bold);
 }
 
+.explorer-health-strip > .explorer-health-proposals {
+  display: grid;
+  flex: 1.8 1 260px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: 5px;
+}
+
+.explorer-health-proposal-breakdown {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 5px;
+  border-top: 1px solid var(--c-border-subtle);
+  color: var(--c-text-muted) !important;
+  font-size: 10px;
+  font-weight: var(--fw-bold) !important;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.explorer-health-proposal-breakdown span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.explorer-health-proposal-breakdown strong {
+  color: var(--c-text);
+  font-size: var(--fs-xs);
+}
+
 /* The context rail is the Explorer's signature element: one persistent place to
    switch capture and jump through the locate → inspect → annotate workflow. */
 .explorer-context-rail {
@@ -1266,6 +1299,10 @@ body.explorer-equirect-dragging {
   .explorer-health-strip {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .explorer-health-strip > .explorer-health-proposals {
+    grid-column: 1 / -1;
   }
 
   .explorer-context-rail {
