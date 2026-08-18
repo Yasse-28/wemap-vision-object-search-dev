@@ -330,8 +330,12 @@ export async function fetchProposalNeighborProjections(
   mapId: string,
   rowIndex: number,
   count: number,
+  diverseViews: boolean = true,
 ): Promise<ProposalNeighborProjectionsResponse> {
-  const params = new URLSearchParams({ count: String(count) });
+  const params = new URLSearchParams({
+    count: String(count),
+    diverse: String(diverseViews),
+  });
   return readJson(
     await fetch(metadataUrl(mapId, `/rows/${rowIndex}/neighbor-projections`, params)),
   );

@@ -426,6 +426,7 @@ export async function handleWorkbenchUiMapRoute(
           map,
           Number(suffix.split("/")[3]),
           queryNumber(url, "count", 5),
+          url.searchParams.get("diverse") !== "false",
         ),
       );
       return true;

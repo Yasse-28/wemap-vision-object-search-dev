@@ -329,6 +329,7 @@ function ObjectSearchExplorerPanel(props: Props) {
 
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
   const [neighborProjectionCount, setNeighborProjectionCount] = useState(5);
+  const [ignoreNeighborMinDistance, setIgnoreNeighborMinDistance] = useState(false);
   const [neighborProjections, setNeighborProjections] =
     useState<ProposalNeighborProjectionsResponse | null>(null);
   const [neighborProjectionLoading, setNeighborProjectionLoading] = useState(false);
@@ -1524,6 +1525,7 @@ function ObjectSearchExplorerPanel(props: Props) {
         props.mapId,
         selectedDetection.row_index,
         neighborProjectionCount,
+        !ignoreNeighborMinDistance,
       );
       if (neighborProjectionRequestRef.current === requestId) {
         setNeighborProjections(payload);
@@ -2611,7 +2613,9 @@ function ObjectSearchExplorerPanel(props: Props) {
                     ? "Depth required"
                     : neighborProjections
                       ? `${neighborProjections.projections.length} views`
-                      : `${neighborProjectionCount} diverse views`
+                      : `${neighborProjectionCount} ${
+                          ignoreNeighborMinDistance ? "nearest" : "diverse"
+                        } views`
                 }
                 defaultOpen={false}
               >
@@ -2629,6 +2633,23 @@ function ObjectSearchExplorerPanel(props: Props) {
                         )
                       }
                     />
+                  </label>
+                  <label
+                    className="object-search-neighbor-distance-toggle"
+                    title="Return the closest keyframes even when their camera positions are less than 0.5 m apart."
+                  >
+                    <input
+                      type="checkbox"
+                      checked={ignoreNeighborMinDistance}
+                      onChange={(event) => {
+                        setIgnoreNeighborMinDistance(event.target.checked);
+                        setNeighborProjections(null);
+                      }}
+                    />
+                    <span>
+                      Closest only
+                      <small>No 0.5 m spacing</small>
+                    </span>
                   </label>
                   <button
                     type="button"

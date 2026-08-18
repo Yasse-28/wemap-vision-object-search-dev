@@ -189,6 +189,16 @@ test("prefers spatially distinct neighbours over nearly duplicate poses", () => 
   assert.ok(projections[0].viewpoint_angle_deg < projections[1].viewpoint_angle_deg);
 });
 
+test("can return the strictly nearest poses without the diversity baseline", () => {
+  const { manifest, row } = proposalProjectionFixture();
+  const projections = projectProposalIntoNearestKeyframes(row, manifest, 2, false);
+  assert.deepEqual(
+    projections.map((projection) => projection.keyframe_id),
+    ["4", "1"],
+  );
+  assert.ok(projections[0].distance_from_source_m < 0.5);
+});
+
 test("occlusion confidence separates a matching surface from a foreground obstacle", () => {
   const clear = projectionOcclusionAssessment(5, 4.8);
   assert.equal(clear.occlusion_status, "clear");

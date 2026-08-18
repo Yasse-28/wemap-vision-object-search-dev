@@ -213,6 +213,7 @@ export type ProposalNeighborProjectionsResponse = {
   row_index: number;
   source_keyframe_id: string;
   requested_count: number;
+  minimum_baseline_m: number;
   projections: ProposalNeighborProjection[];
   note: string;
 };

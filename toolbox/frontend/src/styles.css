@@ -2185,9 +2185,9 @@ body.explorer-equirect-dragging {
 }
 
 .object-search-neighbor-projection-controls {
-  display: flex;
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) auto;
   align-items: end;
-  justify-content: space-between;
   gap: var(--s-3);
 }
 
@@ -2201,6 +2201,32 @@ body.explorer-equirect-dragging {
 
 .object-search-neighbor-projection-controls input {
   width: 84px;
+}
+
+.object-search-neighbor-projection-controls .object-search-neighbor-distance-toggle {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: var(--s-2);
+  min-width: 0;
+  cursor: pointer;
+}
+
+.object-search-neighbor-distance-toggle input {
+  flex: 0 0 auto;
+  width: auto;
+}
+
+.object-search-neighbor-distance-toggle span {
+  display: grid;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.object-search-neighbor-distance-toggle small {
+  color: var(--c-text-muted);
+  font-size: 10px;
+  font-weight: var(--fw-regular);
 }
 
 .object-search-neighbor-projection-grid {

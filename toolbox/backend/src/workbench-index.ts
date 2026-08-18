@@ -1299,6 +1299,7 @@ export function projectProposalIntoNearestKeyframes(
   row: MetadataRow,
   manifest: MapManifest,
   requestedCount: number = DEFAULT_NEIGHBOR_PROJECTION_COUNT,
+  enforceMinimumBaseline: boolean = true,
 ): ProposalNeighborProjection[] {
   const geometry = proposalProjectionGeometry(row, manifest);
   const count = Math.max(
@@ -1318,6 +1319,10 @@ export function projectProposalIntoNearestKeyframes(
         a.projection.distance_from_source_m - b.projection.distance_from_source_m
         || Number(a.projection.keyframe_id) - Number(b.projection.keyframe_id),
     );
+
+  if (!enforceMinimumBaseline) {
+    return candidates.slice(0, count).map((candidate) => candidate.projection);
+  }
 
   const selected: ProposalProjectionCandidate[] = [];
   const deferred: ProposalProjectionCandidate[] = [];
@@ -1366,12 +1371,14 @@ export async function proposalNeighborProjectionsPayload(
   map: MapEntry,
   rowIndex: number,
   requestedCount: number,
+  enforceMinimumBaseline: boolean = true,
 ): Promise<Record<string, unknown>> {
   const { row, manifest } = await proposalProjectionSource(map, rowIndex);
   const baseProjections = projectProposalIntoNearestKeyframes(
     row,
     manifest,
     requestedCount,
+    enforceMinimumBaseline,
   );
   const [occlusionScored, featureAssessments] = await Promise.all([
     scoreProjectionOcclusion(map, baseProjections),
@@ -1388,9 +1395,14 @@ export async function proposalNeighborProjectionsPayload(
       1,
       Math.min(MAX_NEIGHBOR_PROJECTION_COUNT, Math.round(requestedCount)),
     ),
+    minimum_baseline_m: enforceMinimumBaseline
+      ? MIN_NEIGHBOR_PROJECTION_BASELINE_M
+      : 0,
     projections,
     note:
-      "Nearby views are spaced by at least 0.5 m when possible. Geometric "
+      `${enforceMinimumBaseline
+        ? "Nearby views are spaced by at least 0.5 m when possible."
+        : "Views are the strictly nearest keyframes; no minimum spacing is applied."} Geometric `
       + "confidence combines distance, viewpoint angle and apparent size. Visibility "
       + "compares the projected distance with target depth. Feature match uses "
       + "COLMAP-style SIFT ratio matching with geometric verification. Appearance "
