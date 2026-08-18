@@ -16,6 +16,24 @@ export function bearingDegrees(
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
+/**
+ * Ground distance in metres between two lng/lat points.
+ *
+ * Equirectangular approximation, not haversine: it is used to decide whether two
+ * consecutive keyframes are close enough to join with a line, over tens of metres
+ * inside one venue, where the two agree to well under a centimetre.
+ */
+export function metresBetween(
+  from: { latitude: number; longitude: number },
+  to: { latitude: number; longitude: number },
+): number {
+  const toRad = Math.PI / 180;
+  const meanLat = ((from.latitude + to.latitude) / 2) * toRad;
+  const dLat = (to.latitude - from.latitude) * toRad;
+  const dLon = (to.longitude - from.longitude) * toRad * Math.cos(meanLat);
+  return Math.hypot(dLat, dLon) * EARTH_RADIUS_M;
+}
+
 export function projectKeyframeToLocalFloor(
   source: {
     latitude: number;

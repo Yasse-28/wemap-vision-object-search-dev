@@ -55,6 +55,7 @@ import type {
 } from "../index-explorer/types";
 import {
   KEYFRAME_GRAPH_COLOR,
+  KEYFRAME_TRACK_COLOR,
   KEYFRAME_LINK_COLOR,
   KEYFRAME_MARKER_COLOR,
   KEYFRAME_MARKER_PRUNED_COLOR,
@@ -69,6 +70,7 @@ import {
 import BboxPostProcessControls from "./BboxPostProcessControls";
 import { bboxArea, bboxPolygonRatios, postProcessDetections } from "./bboxPostProcess";
 import { useBboxPostProcessParams } from "./useBboxPostProcessParams";
+import { buildKeyframeTrack } from "./keyframeTrack";
 import { useEquirectFrameHeight } from "./useEquirectFrameHeight";
 import { useLivemapFrameHeight } from "./useLivemapFrameHeight";
 
@@ -117,6 +119,7 @@ const DEPTH_PIN_MIN_DEPTH_M = 0.25;
 const VISUAL_SPLIT_MIN_PERCENT = 25;
 const VISUAL_SPLIT_MAX_PERCENT = 75;
 const KEYFRAME_GRAPH_STORAGE_KEY = "object-search-gui.showKeyframeGraph";
+const KEYFRAME_TRACK_STORAGE_KEY = "object-search-gui.showKeyframeTrack";
 const PHOTOSPHERE_NAVIGATION_MAX_DISTANCE_M = 40;
 
 function readStoredBoolean(key: string, fallback: boolean): boolean {
@@ -158,6 +161,9 @@ function ObjectSearchExplorerPanel(props: Props) {
   const [showPhotosphereBoxes, setShowPhotosphereBoxes] = useState(false);
   const [panoramaViewMode, setPanoramaViewMode] =
     useState<PanoramaViewMode>("image");
+  const [showKeyframeTrack, setShowKeyframeTrack] = useState(() =>
+    readStoredBoolean(KEYFRAME_TRACK_STORAGE_KEY, false),
+  );
   const [showKeyframeGraph, setShowKeyframeGraph] = useState(() =>
     readStoredBoolean(KEYFRAME_GRAPH_STORAGE_KEY, true),
   );
@@ -320,6 +326,14 @@ function ObjectSearchExplorerPanel(props: Props) {
   }, [showKeyframeGraph]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(KEYFRAME_TRACK_STORAGE_KEY, String(showKeyframeTrack));
+    } catch {
+      /* ignore */
+    }
+  }, [showKeyframeTrack]);
+
+  useEffect(() => {
     if (!props.isMapKnown) {
       setKeyframeGraph(null);
       return;
@@ -451,8 +465,14 @@ function ObjectSearchExplorerPanel(props: Props) {
     markers?.find((marker) => marker.id === activeKeyframeId) ?? null;
 
   useEffect(() => {
+    // The export's ROI count reads this table too: without it the panel would report
+    // zero selected keyframes rather than "not loaded", which is the worse failure.
     const needsMarkerTable =
-      showKeyframeGraph || activeKeyframeId !== null || keyframeLink !== null;
+      showKeyframeGraph ||
+      showKeyframeTrack ||
+      roiTarget === "keyframes" ||
+      activeKeyframeId !== null ||
+      keyframeLink !== null;
     if (!props.isMapKnown || !needsMarkerTable || markers !== null) {
       return;
     }
@@ -481,6 +501,8 @@ function ObjectSearchExplorerPanel(props: Props) {
     props.mapId,
     props.isMapKnown,
     showKeyframeGraph,
+    showKeyframeTrack,
+    roiTarget,
     activeKeyframeId,
     keyframeLink,
     markers,
@@ -525,8 +547,10 @@ function ObjectSearchExplorerPanel(props: Props) {
     annotation.markers,
   ]);
 
-  const graphHoverMarkers: LivemapMarker[] = useMemo(() => {
-    if (!showKeyframeGraph || !markers?.length) {
+  // The markers the hover-reveal picks from. Nothing renders them all: an overlay is
+  // shown as lines, and the point under the cursor is the one that appears.
+  const hoverRevealMarkers: LivemapMarker[] = useMemo(() => {
+    if ((!showKeyframeGraph && !showKeyframeTrack) || !markers?.length) {
       return [];
     }
     // Only the current server page has summaries. Every other pose remains visible
@@ -553,6 +577,7 @@ function ObjectSearchExplorerPanel(props: Props) {
     });
   }, [
     showKeyframeGraph,
+    showKeyframeTrack,
     markers,
     keyframeSummaryById,
     selectedKeyframeForMap,
@@ -659,6 +684,11 @@ function ObjectSearchExplorerPanel(props: Props) {
     }));
     return [...annotation.polygons, ...sessionPolygons];
   }, [annotation.polygons, exportSession.rois]);
+  const keyframeTrackSegments: LivemapSegment[] = useMemo(
+    () => (showKeyframeTrack ? buildKeyframeTrack(markers, KEYFRAME_TRACK_COLOR) : []),
+    [showKeyframeTrack, markers],
+  );
+
   const keyframeGraphSegments: LivemapSegment[] = useMemo(() => {
     if (!showKeyframeGraph || !keyframeGraph?.available) {
       return [];
@@ -710,8 +740,8 @@ function ObjectSearchExplorerPanel(props: Props) {
     ];
   }, [keyframeLink, annotation.annotations, markers]);
   const livemapSegments: LivemapSegment[] = useMemo(
-    () => [...keyframeGraphSegments, ...keyframeLinkSegments],
-    [keyframeGraphSegments, keyframeLinkSegments],
+    () => [...keyframeTrackSegments, ...keyframeGraphSegments, ...keyframeLinkSegments],
+    [keyframeTrackSegments, keyframeGraphSegments, keyframeLinkSegments],
   );
 
   const selectGraphKeyframe = useCallback(
@@ -1562,6 +1592,14 @@ function ObjectSearchExplorerPanel(props: Props) {
                     Show graph ({keyframeGraph.edges.length} edges)
                   </label>
                 ) : null}
+                <label className="inline-check">
+                  <input
+                    type="checkbox"
+                    checked={showKeyframeTrack}
+                    onChange={(event) => setShowKeyframeTrack(event.target.checked)}
+                  />
+                  Show track ({keyframeTrackSegments.length} segments)
+                </label>
                 <div className="object-search-livemap-roi-toolbar">
                   <span>ROI</span>
                   <select
@@ -1647,7 +1685,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                     }}
                     onLevelChange={annotation.setCurrentLevel}
                     onMarkerContextMenu={handleMarkerContextMenu}
-                    segmentHoverMarkers={graphHoverMarkers}
+                    segmentHoverMarkers={hoverRevealMarkers}
                     onSegmentMarkerClick={selectGraphKeyframe}
                     markerPopover={
                       depthPinPopoverOpen &&
@@ -1714,9 +1752,9 @@ function ObjectSearchExplorerPanel(props: Props) {
                 <p className="map-caption">
                   {status?.marker_count ?? 0} keyframes have a resolvable pose;{" "}
                   {totalKeyframes} match the proposal filters.
-                  {showKeyframeGraph
-                    ? " Hover the graph to reveal the closest keyframe; click the graph or revealed point to filter cutouts."
-                    : " Enable the graph to reveal nearby keyframes on hover."}
+                  {showKeyframeGraph || showKeyframeTrack
+                    ? " Hover an overlay to reveal the closest keyframe; click it or the revealed point to filter cutouts."
+                    : " Enable the track — or the graph, where one exists — to reveal keyframes on hover."}
                 </p>
               </>
             )}

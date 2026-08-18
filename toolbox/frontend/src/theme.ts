@@ -13,3 +13,5 @@ export const VIEW_CONE_COLOR = KEYFRAME_MARKER_SELECTED_COLOR;
 /** Saved export regions. Distinct from the in-progress ROI's blue, and from every
     marker state, so a region is never read as a keyframe class. */
 export const EXPORT_ROI_COLOR = "#0f766e";
+/** The capture path joining consecutive keyframes, when no 360-viewer graph exists. */
+export const KEYFRAME_TRACK_COLOR = "#0ea5e9";

@@ -75,7 +75,15 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   needs the two angles `toolbox/bricks/localize.py` adds to each observation, so it
   stays empty against a remote production endpoint.
 - `object-search-explorer/` — proposals, keyframes, previews; livemap + photosphere
-  side-by-side; bbox post-process controls; depth-based annotation. Reads the parquet
+  side-by-side; bbox post-process controls; depth-based annotation. **"Show track"**
+  (`keyframeTrack.ts`) joins consecutive keyframes in manifest order — the route the
+  capture walked — for the maps with no `360-viewer/graph.geojson`, which is most of
+  them. It is drawn as lines only: the keyframe under the cursor is revealed by the
+  same hover mechanism the graph uses, so nothing renders ten thousand markers. Two
+  cuts, both silent if wrong: a floor change (a segment carries one level and the
+  livemap filters by floor) and a gap over 15 m (a break between captures, not a
+  corridor). It relies on `/object-search-metadata/markers` staying in manifest
+  order — sorted by id as a string, `"10"` precedes `"2"` and the track is noise. Reads the parquet
   rows through `/object-search-metadata/*`. Pagination is **keyframe-major** (one ERP
   and its proposals), and the panel renders as soon as the map is known — the
   metadata warning is scoped to the row table, not the panel
