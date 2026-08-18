@@ -1412,7 +1412,8 @@ export async function proposalNeighborProjectionsPayload(
       + "confidence combines distance, viewpoint angle and apparent size. Visibility "
       + "compares the projected distance with target depth. Feature match uses "
       + "COLMAP-style SIFT ratio matching with geometric verification. Edge NCC "
-      + "compares proposal gradients and rejects low-structure regions.",
+      + "compares proposal gradients across Gaussian scales and rejects "
+      + "low-structure regions.",
   };
 }
 
@@ -1821,11 +1822,38 @@ def channel_ncc(left, right):
     return float(np.sum(left_centered * right_centered) / (left_norm * right_norm))
 
 
-def edge_ncc(source_edges, target_edges):
-    correlation = channel_ncc(source_edges, target_edges)
-    if correlation is None:
+def gaussian_edge_pyramid(edges):
+    return [
+        (cv2.GaussianBlur(edges, (0, 0), sigma), weight)
+        for sigma, weight in ((0.8, 0.2), (2.0, 0.3), (4.0, 0.5))
+    ]
+
+
+def edge_ncc(
+    source_pyramid,
+    target_pyramid,
+    source_y,
+    source_x,
+    target_y,
+    target_x,
+):
+    weighted = 0.0
+    total_weight = 0.0
+    for (source_edges, weight), (target_edges, _) in zip(
+        source_pyramid,
+        target_pyramid,
+    ):
+        correlation = channel_ncc(
+            source_edges[source_y, source_x],
+            target_edges[target_y, target_x],
+        )
+        if correlation is None:
+            continue
+        weighted += max(0.0, min(1.0, correlation)) * weight
+        total_weight += weight
+    if total_weight <= 0.0:
         return None
-    return max(0.0, min(1.0, correlation))
+    return weighted / total_weight
 
 
 def has_structure(edges):
@@ -1842,6 +1870,8 @@ def aligned_edge_ncc(source, target):
     target_edges = gradient_map(target_small)
     if not has_structure(source_edges) or not has_structure(target_edges):
         return None
+    source_pyramid = gaussian_edge_pyramid(source_edges)
+    target_pyramid = gaussian_edge_pyramid(target_edges)
     max_shift = 8
     best = 0.0
     for dy in (-max_shift, -max_shift // 2, 0, max_shift // 2, max_shift):
@@ -1851,8 +1881,12 @@ def aligned_edge_ncc(source, target):
             source_x = slice(max(0, dx), min(size, size + dx))
             target_x = slice(max(0, -dx), min(size, size - dx))
             correlation = edge_ncc(
-                source_edges[source_y, source_x],
-                target_edges[target_y, target_x],
+                source_pyramid,
+                target_pyramid,
+                source_y,
+                source_x,
+                target_y,
+                target_x,
             )
             if correlation is None:
                 continue

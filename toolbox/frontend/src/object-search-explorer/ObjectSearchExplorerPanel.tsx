@@ -215,7 +215,7 @@ function ProjectionConfidence(props: {
     ? "The proposal region does not contain enough edge structure for NCC."
     : edgeNccScore === null
       ? "Edge NCC comparison is unavailable."
-      : "Conservative gradient correlation over the proposal region; low scores can result from viewpoint changes.";
+      : "Gaussian multi-scale gradient correlation over the proposal region; low scores can still result from viewpoint changes.";
 
   return (
     <span className="object-search-projection-confidence">
