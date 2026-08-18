@@ -8,6 +8,7 @@ import type { MapEntry } from "./config.js";
 import { parseManifest } from "./map-manifest.js";
 import type { MetadataRow } from "./object-search-metadata.js";
 import {
+  appearanceSsimAssessment,
   columnarKeyframeMarkers,
   featureMatchAssessment,
   indexProjectWorldPointPayload,
@@ -215,6 +216,21 @@ test("feature confidence requires both verified support and a clean inlier ratio
   const textureless = featureMatchAssessment(0, 0, false);
   assert.equal(textureless.feature_match_status, "no_features");
   assert.equal(textureless.feature_match_score, 0);
+});
+
+test("SSIM confidence clamps similarity and reports availability", () => {
+  assert.deepEqual(appearanceSsimAssessment(0.824), {
+    appearance_ssim_score: 82,
+    appearance_ssim_status: "matched",
+  });
+  assert.deepEqual(appearanceSsimAssessment(-0.4), {
+    appearance_ssim_score: 0,
+    appearance_ssim_status: "weak",
+  });
+  assert.deepEqual(appearanceSsimAssessment(null), {
+    appearance_ssim_score: null,
+    appearance_ssim_status: "unavailable",
+  });
 });
 
 test("refuses neighbour projection when a proposal has no depth", () => {

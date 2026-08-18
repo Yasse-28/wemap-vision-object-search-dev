@@ -1075,6 +1075,8 @@ export type ProposalNeighborProjection = {
   feature_inliers: number;
   feature_inlier_ratio: number | null;
   feature_match_status: "matched" | "weak" | "no_features" | "unavailable";
+  appearance_ssim_score: number | null;
+  appearance_ssim_status: "matched" | "weak" | "unavailable";
 };
 
 type ProposalProjectionGeometry = {
@@ -1216,6 +1218,8 @@ function projectProposalIntoKeyframe(
     feature_inliers: 0,
     feature_inlier_ratio: null,
     feature_match_status: "unavailable",
+    appearance_ssim_score: null,
+    appearance_ssim_status: "unavailable",
   };
 }
 
@@ -1271,6 +1275,22 @@ export function featureMatchAssessment(
     feature_inlier_ratio: inlierRatio,
     feature_match_status:
       inliers >= 8 && inlierRatio >= 0.25 ? "matched" : "weak",
+  };
+}
+
+export function appearanceSsimAssessment(
+  rawScore: number | null,
+): AppearanceSsimAssessment {
+  if (rawScore === null || !Number.isFinite(rawScore)) {
+    return {
+      appearance_ssim_score: null,
+      appearance_ssim_status: "unavailable",
+    };
+  }
+  const score = confidencePercent(rawScore);
+  return {
+    appearance_ssim_score: score,
+    appearance_ssim_status: score >= 60 ? "matched" : "weak",
   };
 }
 
@@ -1373,7 +1393,8 @@ export async function proposalNeighborProjectionsPayload(
       "Nearby views are spaced by at least 0.5 m when possible. Geometric "
       + "confidence combines distance, viewpoint angle and apparent size. Visibility "
       + "compares the projected distance with target depth. Feature match uses "
-      + "COLMAP-style SIFT ratio matching with geometric verification.",
+      + "COLMAP-style SIFT ratio matching with geometric verification. Appearance "
+      + "uses translation-aligned SSIM on the projected proposal region.",
   };
 }
 
@@ -1698,10 +1719,18 @@ type FeatureMatchAssessment = Pick<
   | "feature_match_status"
 >;
 
+type AppearanceSsimAssessment = Pick<
+  ProposalNeighborProjection,
+  "appearance_ssim_score" | "appearance_ssim_status"
+>;
+
+type ProjectionVisualAssessment = FeatureMatchAssessment & AppearanceSsimAssessment;
+
 type RawFeatureMatch = {
   matches: number;
   inliers: number;
   has_features: boolean;
+  ssim: number | null;
 };
 
 const FEATURE_MATCH_SCRIPT = String.raw`
@@ -1742,8 +1771,79 @@ def proposal_region(image):
     ]
 
 
-def match_target(source_keypoints, source_descriptors, target_encoded):
-    target = proposal_region(decode_gray(target_encoded))
+def appearance_region(image):
+    # The exact proposal spans half of a 2x-FOV render. SSIM uses that region,
+    # while SIFT keeps the slightly wider crop above for geometric tolerance.
+    height, width = image.shape[:2]
+    quarter_height = max(1, height // 4)
+    quarter_width = max(1, width // 4)
+    center_y = height // 2
+    center_x = width // 2
+    return image[
+        center_y - quarter_height:center_y + quarter_height,
+        center_x - quarter_width:center_x + quarter_width,
+    ]
+
+
+def ssim(left, right):
+    left_float = left.astype(np.float32)
+    right_float = right.astype(np.float32)
+    mu_left = cv2.GaussianBlur(left_float, (11, 11), 1.5)
+    mu_right = cv2.GaussianBlur(right_float, (11, 11), 1.5)
+    mu_left_sq = mu_left * mu_left
+    mu_right_sq = mu_right * mu_right
+    mu_cross = mu_left * mu_right
+    sigma_left = cv2.GaussianBlur(left_float * left_float, (11, 11), 1.5) - mu_left_sq
+    sigma_right = (
+        cv2.GaussianBlur(right_float * right_float, (11, 11), 1.5)
+        - mu_right_sq
+    )
+    sigma_cross = (
+        cv2.GaussianBlur(left_float * right_float, (11, 11), 1.5)
+        - mu_cross
+    )
+    c1 = (0.01 * 255.0) ** 2
+    c2 = (0.03 * 255.0) ** 2
+    numerator = (2.0 * mu_cross + c1) * (2.0 * sigma_cross + c2)
+    denominator = (mu_left_sq + mu_right_sq + c1) * (
+        sigma_left + sigma_right + c2
+    )
+    return float(np.mean(numerator / np.maximum(denominator, 1e-6)))
+
+
+def aligned_ssim(source, target):
+    # Projection already normalises scale and centre. A small translation search
+    # absorbs residual pose/depth error without letting unrelated context win.
+    size = 160
+    source_small = cv2.resize(source, (size, size), interpolation=cv2.INTER_AREA)
+    target_small = cv2.resize(target, (size, size), interpolation=cv2.INTER_AREA)
+    max_shift = 8
+    best = -1.0
+    for dy in (-max_shift, -max_shift // 2, 0, max_shift // 2, max_shift):
+        for dx in (-max_shift, -max_shift // 2, 0, max_shift // 2, max_shift):
+            source_y = slice(max(0, dy), min(size, size + dy))
+            target_y = slice(max(0, -dy), min(size, size - dy))
+            source_x = slice(max(0, dx), min(size, size + dx))
+            target_x = slice(max(0, -dx), min(size, size - dx))
+            best = max(
+                best,
+                ssim(
+                    source_small[source_y, source_x],
+                    target_small[target_y, target_x],
+                ),
+            )
+    return max(0.0, min(1.0, best))
+
+
+def match_target(
+    source_keypoints,
+    source_descriptors,
+    source_appearance,
+    target_encoded,
+):
+    target_full = decode_gray(target_encoded)
+    target = proposal_region(target_full)
+    appearance = aligned_ssim(source_appearance, appearance_region(target_full))
     target_keypoints, target_descriptors = extract_sift(target)
     if (
         source_descriptors is None
@@ -1751,7 +1851,12 @@ def match_target(source_keypoints, source_descriptors, target_encoded):
         or len(source_descriptors) < 2
         or len(target_descriptors) < 2
     ):
-        return {"matches": 0, "inliers": 0, "has_features": False}
+        return {
+            "matches": 0,
+            "inliers": 0,
+            "has_features": False,
+            "ssim": appearance,
+        }
 
     # COLMAP's SIFT_BRUTEFORCE matcher uses L2 descriptors and a 0.8 ratio test.
     pairs = cv2.BFMatcher(cv2.NORM_L2).knnMatch(
@@ -1783,15 +1888,27 @@ def match_target(source_keypoints, source_descriptors, target_encoded):
         if mask is not None:
             inliers = int(mask.ravel().sum())
 
-    return {"matches": len(matches), "inliers": inliers, "has_features": True}
+    return {
+        "matches": len(matches),
+        "inliers": inliers,
+        "has_features": True,
+        "ssim": appearance,
+    }
 
 
 def main():
     request = json.loads(sys.stdin.read())
-    source = proposal_region(decode_gray(request["source_png"]))
+    source_full = decode_gray(request["source_png"])
+    source = proposal_region(source_full)
+    source_appearance = appearance_region(source_full)
     source_keypoints, source_descriptors = extract_sift(source)
     results = [
-        match_target(source_keypoints, source_descriptors, encoded)
+        match_target(
+            source_keypoints,
+            source_descriptors,
+            source_appearance,
+            encoded,
+        )
         for encoded in request["target_pngs"]
     ]
     print(json.dumps(results))
@@ -2044,7 +2161,7 @@ async function runFeatureMatchPython(
   pythonBin: string,
   sourcePng: Buffer,
   targetPngs: Buffer[],
-): Promise<FeatureMatchAssessment[]> {
+): Promise<ProjectionVisualAssessment[]> {
   const child = spawn(pythonBin, ["-c", FEATURE_MATCH_SCRIPT], {
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -2064,9 +2181,10 @@ async function runFeatureMatchPython(
     throw new Error(Buffer.concat(stderr).toString("utf8").trim() || `python exited with ${code}`);
   }
   const raw = JSON.parse(Buffer.concat(stdout).toString("utf8")) as RawFeatureMatch[];
-  return raw.map((item) =>
-    featureMatchAssessment(item.matches, item.inliers, item.has_features),
-  );
+  return raw.map((item) => ({
+    ...featureMatchAssessment(item.matches, item.inliers, item.has_features),
+    ...appearanceSsimAssessment(item.ssim),
+  }));
 }
 
 async function runDepthPreviewPython(
@@ -2215,7 +2333,7 @@ async function scoreProjectionFeatures(
   map: MapEntry,
   row: MetadataRow,
   projections: ProposalNeighborProjection[],
-): Promise<FeatureMatchAssessment[] | null> {
+): Promise<ProjectionVisualAssessment[] | null> {
   let sourcePng: Buffer;
   let targetPngs: Buffer[];
   try {

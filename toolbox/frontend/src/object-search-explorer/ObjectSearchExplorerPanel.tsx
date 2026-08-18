@@ -184,13 +184,21 @@ function confidenceBand(score: number): { label: string; tone: "high" | "medium"
 function ProjectionConfidence(props: {
   projection: ProposalNeighborProjection;
 }): ReactElement {
+  const featureScore = typeof props.projection.feature_match_score === "number"
+    ? props.projection.feature_match_score
+    : null;
+  const featureStatus = props.projection.feature_match_status ?? "unavailable";
+  const ssimScore = typeof props.projection.appearance_ssim_score === "number"
+    ? props.projection.appearance_ssim_score
+    : null;
   const geometry = confidenceBand(props.projection.geometric_confidence);
   const visibility = props.projection.occlusion_confidence === null
     ? null
     : confidenceBand(props.projection.occlusion_confidence);
-  const features = props.projection.feature_match_score === null
+  const features = featureScore === null
     ? null
-    : confidenceBand(props.projection.feature_match_score);
+    : confidenceBand(featureScore);
+  const appearance = ssimScore === null ? null : confidenceBand(ssimScore);
   const geometryTitle = [
     `Source distance ${props.projection.distance_score}%`,
     `view angle ${props.projection.view_angle_score}% (${props.projection.viewpoint_angle_deg.toFixed(1)}°)`,
@@ -199,9 +207,12 @@ function ProjectionConfidence(props: {
   const visibilityTitle = props.projection.observed_depth_m === null
     ? "No target depth sample is available."
     : `Expected ${props.projection.distance_to_proposal_m.toFixed(2)} m · observed ${props.projection.observed_depth_m.toFixed(2)} m`;
-  const featureTitle = props.projection.feature_match_score === null
+  const featureTitle = featureScore === null
     ? "SIFT matching is unavailable."
     : `${props.projection.feature_inliers} geometric inliers from ${props.projection.feature_matches} ratio-test matches`;
+  const appearanceTitle = ssimScore === null
+    ? "SSIM appearance comparison is unavailable."
+    : "Translation-aligned structural similarity over the projected proposal region.";
 
   return (
     <span className="object-search-projection-confidence">
@@ -243,7 +254,7 @@ function ProjectionConfidence(props: {
       </span>
       <span
         className={`object-search-confidence-score is-${
-          props.projection.feature_match_status === "no_features"
+          featureStatus === "no_features"
             ? "unknown"
             : features?.tone ?? "unknown"
         }`}
@@ -252,16 +263,32 @@ function ProjectionConfidence(props: {
         <span className="object-search-confidence-heading">
           <span>Features</span>
           <strong>
-            {props.projection.feature_match_status === "unavailable"
+            {featureStatus === "unavailable"
               ? "Unavailable"
-              : props.projection.feature_match_status === "no_features"
+              : featureStatus === "no_features"
                 ? "No features"
-                : `${props.projection.feature_match_status === "weak" ? "Weak" : features?.label} · ${props.projection.feature_match_score}%`}
+                : `${featureStatus === "weak" ? "Weak" : features?.label} · ${featureScore}%`}
           </strong>
         </span>
         <span className="object-search-confidence-meter" aria-hidden="true">
-          {props.projection.feature_match_score !== null ? (
-            <span style={{ width: `${props.projection.feature_match_score}%` }} />
+          {featureScore !== null ? (
+            <span style={{ width: `${featureScore}%` }} />
+          ) : null}
+        </span>
+      </span>
+      <span
+        className={`object-search-confidence-score is-${appearance?.tone ?? "unknown"}`}
+        title={appearanceTitle}
+      >
+        <span className="object-search-confidence-heading">
+          <span>SSIM</span>
+          <strong>
+            {appearance ? `${appearance.label} · ${ssimScore}%` : "Unavailable"}
+          </strong>
+        </span>
+        <span className="object-search-confidence-meter" aria-hidden="true">
+          {ssimScore !== null ? (
+            <span style={{ width: `${ssimScore}%` }} />
           ) : null}
         </span>
       </span>
