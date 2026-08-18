@@ -88,7 +88,9 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   and its proposals); its compact proposal grid can independently show the rows kept
   or discarded by the current bbox post-processing controls. Detector visibility
   (G-DINO / YOLO-W) sits beside those filters and remains active when geometric bbox
-  post-processing is disabled. The panel renders as soon as the map is known — the
+  post-processing is disabled. Cutout depth pins are placed only from the selected
+  proposal's context preview with Ctrl+click; proposal cards only change selection.
+  The panel renders as soon as the map is known — the
   metadata warning is scoped to the proposal grid, not the panel
   (`ObjectSearchExplorerPanel.tsx`, `EquirectPhotoSphereViewer.tsx`, `bboxPostProcess.ts`).
 - `index-explorer/` — `api.ts` + `types.ts` only, shared by both panels. The

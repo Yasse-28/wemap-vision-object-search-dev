@@ -2132,6 +2132,11 @@ body.explorer-equirect-dragging {
   background: #111;
 }
 
+.object-search-context-preview .object-search-depth-pin-stage {
+  display: block;
+  width: 100%;
+}
+
 .object-search-context-preview figcaption,
 .object-search-embedded-preview figcaption {
   font-size: 11px;

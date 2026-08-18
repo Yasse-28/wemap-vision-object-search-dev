@@ -2231,30 +2231,8 @@ function ObjectSearchExplorerPanel(props: Props) {
                       <img
                         src={previewUrl}
                         alt={`Proposal ${row.row_index} (${label})`}
-                        title="Click to place a depth pin"
                         loading="lazy"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          selectProposalAndRevealPreview(row.row_index);
-                          const { xRatio, yRatio } = readClickRatio(event);
-                          placeDepthPin(
-                            "cutout",
-                            row.keyframe_id,
-                            xRatio,
-                            yRatio,
-                            row.row_index,
-                          );
-                        }}
                       />
-                      {depthPin?.source === "cutout" && depthPin.rowIndex === row.row_index ? (
-                        <span
-                          className={`object-search-depth-pin is-${depthPin.status}`}
-                          style={{
-                            left: `${depthPin.xRatio * 100}%`,
-                            top: `${depthPin.yRatio * 100}%`,
-                          }}
-                        />
-                      ) : null}
                     </span>
                     <span className="object-search-cutout-card-label" title={label}>
                       {label}
@@ -2304,25 +2282,41 @@ function ObjectSearchExplorerPanel(props: Props) {
                 useful delta: the proposal's true angular extent at a widened FOV.
               */}
               <figure className="object-search-context-preview">
-                <img
-                  src={rowRenderUrl(props.mapId, selectedDetection.row_index, {
-                    size: 512,
-                    fovScale: 2,
-                  })}
-                  alt={`Context view for proposal ${selectedDetection.row_index}`}
-                  loading="lazy"
-                  onClick={(event) => {
-                    const { xRatio, yRatio } = readClickRatio(event);
-                    placeDepthPin(
-                      "cutout",
-                      selectedDetection.keyframe_id,
-                      xRatio,
-                      yRatio,
-                      selectedDetection.row_index,
-                    );
-                  }}
-                />
-                <figcaption>Context re-render · 2× FOV</figcaption>
+                <span className="object-search-depth-pin-stage">
+                  <img
+                    src={rowRenderUrl(props.mapId, selectedDetection.row_index, {
+                      size: 512,
+                      fovScale: 2,
+                    })}
+                    alt={`Context view for proposal ${selectedDetection.row_index}`}
+                    title="Ctrl+click to place a depth pin"
+                    loading="lazy"
+                    onClick={(event) => {
+                      if (!event.ctrlKey) {
+                        return;
+                      }
+                      const { xRatio, yRatio } = readClickRatio(event);
+                      placeDepthPin(
+                        "cutout",
+                        selectedDetection.keyframe_id,
+                        xRatio,
+                        yRatio,
+                        selectedDetection.row_index,
+                      );
+                    }}
+                  />
+                  {depthPin?.source === "cutout" &&
+                  depthPin.rowIndex === selectedDetection.row_index ? (
+                    <span
+                      className={`object-search-depth-pin is-${depthPin.status}`}
+                      style={{
+                        left: `${depthPin.xRatio * 100}%`,
+                        top: `${depthPin.yRatio * 100}%`,
+                      }}
+                    />
+                  ) : null}
+                </span>
+                <figcaption>Context re-render · 2× FOV · Ctrl+click to place a depth pin</figcaption>
               </figure>
 
               {selectedDetection.thumbnail_key ? (
