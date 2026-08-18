@@ -11,6 +11,7 @@ import {
 
 import type { DepthPinResponse } from "../index-explorer/types";
 import CollapsibleSection from "./CollapsibleSection";
+import { canonicalLevel, pointInPolygon } from "./geometry";
 import {
   newAnnotationId,
   parseAnnotationGeoJSON,
@@ -1239,44 +1240,6 @@ function clampAccuracy(value: number): number {
 
 export type RoiClassCount = { name: string; color: string; count: number };
 export type RoiCounts = { perClass: RoiClassCount[]; total: number };
-
-/**
- * Normalize a level value to the same canonical form the livemap uses for its
- * indoor-level feature filter (numeric levels collapse to their number string),
- * so annotation levels compare equal to the map's reported current level.
- */
-function canonicalLevel(value: string | null | undefined): string | null {
-  if (value === null || value === undefined || value === "") {
-    return null;
-  }
-  const asNumber = Number(value);
-  return Number.isNaN(asNumber) ? String(value) : String(asNumber);
-}
-
-/**
- * Ray-casting point-in-polygon test against an open ring of vertices (the first
- * vertex is treated as reconnected to the last).
- */
-function pointInPolygon(
-  longitude: number,
-  latitude: number,
-  ring: RoiPolygon,
-): boolean {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i].longitude;
-    const yi = ring[i].latitude;
-    const xj = ring[j].longitude;
-    const yj = ring[j].latitude;
-    const intersects =
-      yi > latitude !== yj > latitude &&
-      longitude < ((xj - xi) * (latitude - yi)) / (yj - yi) + xi;
-    if (intersects) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
 
 /**
  * Count point annotations whose location falls within `polygon`, grouped by

@@ -154,6 +154,7 @@ test(
       emmid: null,
       geo_ref_id: 1,
       object_search: null,
+      parent_map: null,
     };
     const metadata = await requireMetadata(map);
     const manifest = await loadMapManifest(map.path);

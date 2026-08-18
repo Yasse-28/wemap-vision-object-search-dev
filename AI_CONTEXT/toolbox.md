@@ -19,12 +19,14 @@ The annotation ownership boundary is recorded in
 |---|---|---|
 | `main.ts` | Entry: HTTP server; routes `/ui/api/...`, serves UI, proxies `/{map_id}/object-search/…` to the bricks service | `server.listen(options.port…)`, `isObjectSearchRoute`, `mapSummaries`, `proxyRequest` |
 | `http-utils.ts` | Options/args, static serving, proxy | `parseArgs`, `WorkbenchOptions`; `pythonApiBaseUrl` = **bricks** service (`OBJECT_SEARCH_PYTHON_API`, :45678), `annApiBaseUrl` = **mirrored online** service (`OBJECT_SEARCH_ANN_URL`, :45677), `repoRoot`, `OBJECT_SEARCH_WORKBENCH_PORT=45700` |
-| `config.ts` | Load map config | `loadMapEntries`, `loadGlobalObjectSearch`, `MapEntry` (`id, path, emmid, geo_ref_id, object_search`) |
+| `config.ts` | Load map config, and add/remove one entry **textually** — the reader strips comments before `JSON.parse`, so re-serialising would delete every comment in the file. Keys are written quoted for the same reason: it is JSON-with-comments, not full JSON5. Backs up to `{config}.bak`, writes atomically, and refuses to guess when the `maps` array cannot be located. | `loadMapEntries`, `loadGlobalObjectSearch`, `appendMapEntry`, `removeMapEntry`, `MapEntry` (`id, path, emmid, geo_ref_id, object_search, parent_map`) |
 | `annotation-store.ts` | Integrated per-map SQLite annotation CRUD, legacy migration, one-shot benchmark GeoJSON import, ground-truth assembly, and the reference detection partition | `annotationDatabasePath`, `listAnnotations`, `upsertDetectionReview`, `deleteDetectionReview`, `buildGroundTruth`, `listDetectionGroups`, `upsertDetectionGroupLabel`, `deleteDetectionGroupLabel` |
 | `object-search-metadata.ts` | **Reads `{map}/object-search/metadata.parquet` natively** (`hyparquet`, pure JS) into typed numeric columns and dictionary-coded strings; rows are materialised only on demand. Replaces the retired `object-search.db` reader: no cutout→objects hierarchy, one row *is* one proposal and one detection. Caches two maps by mtime and **drops the entry when the read fails**. | `resolveMetadataPath`, `loadMetadata`, `requireMetadata`, `rowsForKeyframe`, `rowSlice`, `rowByIndex`, `MetadataRow`, `LoadedMetadata`, `MetadataError` |
 | `erp-geometry.ts` | The only place the four stored angle columns become something drawable. Replaces the cubemap algebra. | `erpBboxRatios`, `erpRectsWrapped`, `cutoutRatioToErpUv`, `assertEquirect2to1`, `gnomonicFfmpegFilter`, `paddingMask`, `isRenderableGnomonic`, `angularAreaDeg2` |
 | `workbench-index.ts` | Manifest-backed routes (keyframe markers, depth pin, view cone, world-point projection, ERP + depth previews, `previewFromPathPng`) **plus** the parquet-backed row routes. The manifest half needs no metadata and must never be gated on it. | `objectSearchMetadataStatusPayload`, `metadataRowsPayload`, `metadataRowPayload`, `metadataRowRenderPng`, `indexKeyframeEquirectPreviewPng`, `indexDepthPinPayload`, `indexViewConePayload`, `indexProjectWorldPointPayload`, `keyframeMetadataPayload`, `previewFromPathPng`, `rowFilterParamsFromQuery`, `keyframeHeadingDegreesFromPose`; shells to a Python interp for uint16-TIFF depth decode (`OBJECT_SEARCH_WORKBENCH_PYTHON`) and to `ffmpeg`/`convert` for renders |
-| `workbench-api.ts` | `/ui/api/...` route handling | `isWorkbenchUiMapRoute`, `handleWorkbenchUiMapRoute` |
+| `workbench-api.ts` | `/ui/api/...` route handling | `isWorkbenchUiMapRoute` (its trailing segment is optional, so `DELETE /ui/api/maps/{id}` reaches the same dispatcher), `handleWorkbenchUiMapRoute` |
+| `python-process.ts` | One place for the interpreter search order and PYTHONPATH, which `benchmark-runner.ts` and `workbench-index.ts` each held a copy of | `pythonBinaryCandidates`, `pythonEnv`, `runPython`, `lastJsonLine` |
+| `export-roi.ts` | ROI export + map deletion routes. Thin: the work is `toolbox/bricks/export_roi.py` and `delete_map.py` — the geometry lives beside the manifest reader, and this backend has no Postgres client. Job shape copied from `benchmark-runner.ts` (202 + poll), one export at a time so two runs cannot allocate the same `geo_ref_id`. The directory browser is **confined** to the source map's parent and the config directory. | `listDirectoriesPayload`, `createDirectoryPayload`, `exportPreviewPayload`, `startExportRun`, `exportStatusPayload`, `deletionPreviewPayload`, `deleteMapPayload` |
 | `keyframe-graph.ts` | 360-viewer graph payload, read straight from `360-viewer/graph.geojson` — no pose source involved | `parseKeyframeGraph`, `keyframeGraphPayload` |
 | `map-manifest.ts` | **The v2 manifest reader**, mirroring `toolbox/bricks/map_manifest.py`, plus the EUS→WDS pose adapter every route below depends on | `loadMapManifest`, `findManifest`, `parseManifest`, `MANIFEST_PATTERN`, `assetBasename`, `formatLevel`, `quaternionToMatrix3`, `manifestKeyframeToWorldToCameraWds` |
 | `benchmark-runner.ts` | Run the HTTP benchmark and synchronously score one prompt | **Spawns the bricks service** (`python -m toolbox.bricks.service --config <the toolbox config>`) when unreachable, and keeps it alive across runs. **Only health-checks the mirrored online service** — never spawns it (it loads MetaCLIP on the GPU); `assertAnnServiceReachable` fails early with instructions. Before each run or prompt score exports the integrated annotation SQLite store to `{map}/benchmark/annotations.geojson` atomically (best-effort: falls back to the file on disk). Spawns `toolbox/benchmark/object_search_http_benchmark.py` with `cwd=repoRoot` and `PYTHONPATH` set by `pythonEnv()`. Full results live in `{map_path}/benchmark/{runId}/`; prompt scores live one level deeper under `benchmark/prompt-scores/<slug>/` so `listRuns` cannot expose them. | `startBenchmarkRun`, `scorePromptPayload`, `benchmark{Run,Status}Payload` |
@@ -47,6 +49,10 @@ The annotation ownership boundary is recorded in
 | `GET /preview.png?preview_path=` | Serves a file from the map directory. **The default preview** for a proposal (`thumbnail_key`) and for a search result. `object-search/rows/{row_index}.png` is a **virtual** key with no file behind it: a v1-converted index has no crops, so the route re-renders that row from the ERP instead (`VIRTUAL_ROW_PREVIEW`). |
 | `GET /review-annotations`, `POST\|DELETE /review-annotations/detection-review` | Integrated review annotations in `{map}/object-search-annotations.db`; no external service. |
 | `GET /group-annotations`, `POST\|DELETE /group-annotations/label` | The **reference partition**: which detections are one physical object, in `detection_group_label` of the same DB. Query-independent (unlike a review), keyed by `(keyframe_id, theta_center, phi_center)` at 6 decimals, `group_name` NULL = "not an object". Exists to score an association algorithm's partition against a human's — pair F1, not mAP. Not part of the benchmark's ground truth. |
+| `GET\|POST /export-roi/directories` | The save dialog's folder browser and its "New folder". Confined to the source map's parent directory and the config directory; a `..` that escapes is 403. |
+| `POST /export-roi/preview` | Synchronous `--dry-run`: the **authoritative** keyframe count, the per-level split, and the allocated `geo_ref_id`. |
+| `POST /export-roi`, `GET /export-roi/status` | 202 + poll, as the benchmark does. |
+| `GET /deletion-preview`, `DELETE /ui/api/maps/{id}` | What deletion would remove, then the deletion. `DELETE` requires `{confirm_id}` equal to the map id — re-checked server-side, so the typed confirmation is not only cosmetic. 409 when the map is not a sub-map or still has children. |
 | `POST /benchmark/score-prompt` | Runs the existing Python evaluator for one ground-truth prompt with the Annotation panel's current localization parameters; returns 404 when that prompt has no benchmark ground truth. |
 
 The prefix was `/object-search-index`, which promised a database that no longer
@@ -108,9 +114,26 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   `basket.ts` holds the session-scoped set of detections an inspection runs over
   (item = a keyframe direction with a `rays` list, so a SAM2 mask fits later). Both
   are filled from the Object Search cluster list, which is why they live outside it.
+- `export-roi/` — the selection session and the two dialogs. The ROI toolbar in the
+  Explorer gained a **target**: *count annotations* (what it always did) or *select
+  keyframes*. Drawing is unchanged — one polygon, `LivemapAnnotation`'s existing
+  tool — and a closed ring in keyframe mode joins the session with the current level
+  **frozen at close time**, which is the whole point: draw on one floor, switch,
+  draw again. Saved regions ride the existing `polygons` prop, so Mapbox's per-floor
+  filter displays them for free. The session lives in `localStorage` per map
+  (`session.ts`), like `matching/basket.ts` and for the same reason — `App.tsx`
+  mounts one panel at a time. `selection.ts` is the live client-side count;
+  `mapTree.ts` nests sub-maps under their parent on the home page, tolerating a
+  missing parent and a `parent_map` cycle. `ExportDialog.tsx` shows **two counts**:
+  its own and python's, which resolves the floor from the manifest's altitude bands
+  rather than from the Wemap SDK. A gap between them is displayed, not hidden — it
+  would mean the two floor definitions disagree.
 - `annotations/` — point/polygon annotations → `annotations/annotations.geojson`
   (`ExplorerAnnotationWorkspace.tsx`, `geojson.ts`, `LivemapAnnotation.tsx`,
-  `livemapHost.ts`).
+  `livemapHost.ts`). `canonicalLevel` and `pointInPolygon` moved out to
+  `annotations/geometry.ts` when the export needed the same floor rule and the
+  same ray cast; two copies that must agree with the backend's is exactly the
+  drift this file exists to prevent.
 - `object-search-review/` — detection-review API client, review controls, and
   per-query TP/FP state with undo/redo whose history survives a re-search. Its
   per-query annotation list is independent of displayed results, and counters
@@ -177,6 +200,14 @@ created **once per `emmid`** in a detached `<div>` and cached:
 
 - Backend is plain `node:http` (no framework); routes are matched manually in
   `workbench-api.ts` / `main.ts`.
+- **A map's `geo_ref_id` comes from its manifest, and it partitions a shared table.**
+  Deleting a map means `DELETE ... WHERE geo_ref_id = %s` on rows every map lives in,
+  so both the export (allocate a free id) and the deletion (refuse a shared one) are
+  built around that. See gotcha 12 in [`bricks.md`](bricks.md).
+- **Only a map with `parent_map` is deletable from the UI.** A map received from
+  production was not produced here and its pixels come from `../retrieve-map-data`;
+  the repo could not rebuild it. The rule is enforced in `delete_map.py`, not in the
+  React component.
 - **Map availability means the map directory exists and its v2 manifest parses.** A
   map that passes but was never prepared or ingested shows up as an empty result list,
   not an error; the explorer's own status route is where that shows (`available`,

@@ -22,6 +22,11 @@ import {
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
 import type { LivemapMarker, LivemapPolygon, LivemapSegment } from "../annotations/types";
 import DismissibleAlert from "../DismissibleAlert";
+import ExportDialog from "../export-roi/ExportDialog";
+import ExportRoiPanel from "../export-roi/ExportRoiPanel";
+import { keyframesInRois, roisForRequest } from "../export-roi/selection";
+import { useExportSession } from "../export-roi/session";
+import "../export-roi/export-roi.css";
 import { bearingDegrees, projectKeyframeToLocalFloor } from "../geo";
 import {
   fetchKeyframeGraph,
@@ -57,6 +62,7 @@ import {
   KEYFRAME_MARKER_SELECTED_COLOR,
   KEYFRAME_MARKER_SELECTED_RADIUS,
   KEYFRAME_MARKER_UNKNOWN_COLOR,
+  EXPORT_ROI_COLOR,
   VIEW_CONE_COLOR,
   VIEW_CONE_HALF_ANGLE_DEG,
 } from "../theme";
@@ -363,6 +369,17 @@ function ObjectSearchExplorerPanel(props: Props) {
   }, [metadataRows, bboxPostProcess]);
 
   const emmid = props.map?.emmid ?? null;
+
+  // The ROI tool draws one polygon; what it selects is the choice here. Counting
+  // annotations was its only job until the export needed the same gesture over
+  // keyframes, so the drawing stays single and the target is switched.
+  const [roiTarget, setRoiTarget] = useState<"annotations" | "keyframes">("annotations");
+  const exportSession = useExportSession(props.mapId);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const exportSelection = useMemo(
+    () => keyframesInRois(markers, exportSession.rois),
+    [markers, exportSession.rois],
+  );
   const { height: livemapFrameHeight, isDragging: isResizingLivemap, startResize: startLivemapResize } =
     useLivemapFrameHeight();
   const { height: equirectFrameHeight, isDragging: isResizingEquirect, startResize: startEquirectResize } =
@@ -628,10 +645,20 @@ function ObjectSearchExplorerPanel(props: Props) {
     };
   }, [activeKeyframeMarker, photosphereViewKeyframeId, activeKeyframeId, photosphereYawRad]);
 
-  const livemapPolygons: LivemapPolygon[] = useMemo(
-    () => annotation.polygons,
-    [annotation.polygons],
-  );
+  const livemapPolygons: LivemapPolygon[] = useMemo(() => {
+    // Saved regions ride the existing polygon overlay: `LivemapPolygon` carries a
+    // level and Mapbox already filters on it, so per-floor display costs nothing.
+    const sessionPolygons: LivemapPolygon[] = exportSession.rois.map((roi) => ({
+      id: `export-roi-${roi.id}`,
+      coordinates: roi.ring.map((point) => [point.longitude, point.latitude]),
+      color: EXPORT_ROI_COLOR,
+      level: roi.level,
+      opacity: 0.16,
+      lineOpacity: 0.9,
+      lineWidth: 2,
+    }));
+    return [...annotation.polygons, ...sessionPolygons];
+  }, [annotation.polygons, exportSession.rois]);
   const keyframeGraphSegments: LivemapSegment[] = useMemo(() => {
     if (!showKeyframeGraph || !keyframeGraph?.available) {
       return [];
@@ -1493,6 +1520,28 @@ function ObjectSearchExplorerPanel(props: Props) {
 
       <ExplorerAnnotationControls workspace={annotation} />
 
+      {roiTarget === "keyframes" ? (
+        <ExportRoiPanel
+          session={exportSession}
+          selection={exportSelection}
+          currentLevel={annotation.currentLevel}
+          onExport={() => {
+            exportSession.stop();
+            setExportDialogOpen(true);
+          }}
+        />
+      ) : null}
+
+      {exportDialogOpen ? (
+        <ExportDialog
+          mapId={props.mapId}
+          rois={roisForRequest(exportSession.rois)}
+          liveTotal={exportSelection.total}
+          onClose={() => setExportDialogOpen(false)}
+          onExported={() => exportSession.clear()}
+        />
+      ) : null}
+
       <div
         ref={visualSplitRef}
         className="object-search-visual-split"
@@ -1515,6 +1564,17 @@ function ObjectSearchExplorerPanel(props: Props) {
                 ) : null}
                 <div className="object-search-livemap-roi-toolbar">
                   <span>ROI</span>
+                  <select
+                    value={roiTarget}
+                    aria-label="What the drawn region selects"
+                    onChange={(event) => {
+                      annotation.clearRoi();
+                      setRoiTarget(event.target.value as "annotations" | "keyframes");
+                    }}
+                  >
+                    <option value="annotations">Count annotations</option>
+                    <option value="keyframes">Select keyframes</option>
+                  </select>
                   <button
                     type="button"
                     className={`secondary-button${
@@ -1534,9 +1594,11 @@ function ObjectSearchExplorerPanel(props: Props) {
                     Clear
                   </button>
                   <span className="object-search-livemap-roi-summary">
-                    {annotation.roiCounts
-                      ? `Total ${annotation.roiCounts.total}`
-                      : `Level ${annotation.currentLevel === null ? "-" : annotation.currentLevel}`}
+                    {roiTarget === "keyframes"
+                      ? `${exportSelection.total} keyframes`
+                      : annotation.roiCounts
+                        ? `Total ${annotation.roiCounts.total}`
+                        : `Level ${annotation.currentLevel === null ? "-" : annotation.currentLevel}`}
                   </span>
                 </div>
               </div>
@@ -1574,7 +1636,15 @@ function ObjectSearchExplorerPanel(props: Props) {
                     coneColor={VIEW_CONE_COLOR}
                     roiActive={annotation.roiActive}
                     roiPolygon={annotation.roiPolygon}
-                    onRoiChange={annotation.setRoiPolygon}
+                    onRoiChange={(polygon) => {
+                      annotation.setRoiPolygon(polygon);
+                      // The level is frozen at close time, not read at export time:
+                      // the whole point of a session is drawing on one floor, then
+                      // another.
+                      if (roiTarget === "keyframes" && polygon && exportSession.active) {
+                        exportSession.addRoi(polygon, annotation.currentLevel);
+                      }
+                    }}
                     onLevelChange={annotation.setCurrentLevel}
                     onMarkerContextMenu={handleMarkerContextMenu}
                     segmentHoverMarkers={graphHoverMarkers}

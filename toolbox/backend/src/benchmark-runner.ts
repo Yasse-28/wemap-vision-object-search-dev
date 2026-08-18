@@ -31,6 +31,7 @@ import path from "node:path";
 import { buildGroundTruth } from "./annotation-store.js";
 import type { MapEntry } from "./config.js";
 import type { WorkbenchOptions } from "./http-utils.js";
+import { pythonBinaryCandidates, pythonEnv } from "./python-process.js";
 import { WorkbenchRouteError } from "./workbench-index.js";
 
 const RUN_ID_PATTERN = /^[0-9A-Za-z._-]+$/;
@@ -109,16 +110,6 @@ let cleanupRegistered = false;
 // Helpers
 // ---------------------------------------------------------------------------
 
-function pythonBinaryCandidates(): string[] {
-  return [
-    process.env.OBJECT_SEARCH_WORKBENCH_PYTHON,
-    process.env.PYTHON,
-    "/home/yacine/anaconda3/envs/wemap-vision/bin/python",
-    "python3",
-    "python",
-  ].filter((item): item is string => Boolean(item));
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -182,23 +173,6 @@ function registerCleanup(): void {
 // ---------------------------------------------------------------------------
 // Python service management
 // ---------------------------------------------------------------------------
-
-/**
- * Environment for a spawned python process: the mirrored trees are not a src/
- * layout, so `prepare`/`inference`/`indexing` only import with
- * third_party/object_search on PYTHONPATH — plus the repo root for `toolbox.*`.
- */
-function pythonEnv(options: WorkbenchOptions): NodeJS.ProcessEnv {
-  const roots = [
-    options.repoRoot,
-    path.join(options.repoRoot, "third_party", "object_search"),
-  ];
-  const existing = process.env.PYTHONPATH;
-  return {
-    ...process.env,
-    PYTHONPATH: existing ? [...roots, existing].join(path.delimiter) : roots.join(path.delimiter),
-  };
-}
 
 /**
  * Spawn the bricks service. Unlike the standalone service it replaces, it reads the

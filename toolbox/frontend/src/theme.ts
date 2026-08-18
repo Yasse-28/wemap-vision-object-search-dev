@@ -10,3 +10,6 @@ export const KEYFRAME_GRAPH_COLOR = "#64748b";
 export const KEYFRAME_LINK_COLOR = "#9333ea";
 export const VIEW_CONE_HALF_ANGLE_DEG = 25;
 export const VIEW_CONE_COLOR = KEYFRAME_MARKER_SELECTED_COLOR;
+/** Saved export regions. Distinct from the in-progress ROI's blue, and from every
+    marker state, so a region is never read as a keyframe class. */
+export const EXPORT_ROI_COLOR = "#0f766e";

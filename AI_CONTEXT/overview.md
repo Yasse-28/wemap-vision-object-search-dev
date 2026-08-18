@@ -28,6 +28,7 @@ Anything that is *not* in production lives in `toolbox/` (dev-only, maintained) 
 | **Mirror: online service** | `third_party/object_search/services/object_search_online/` | Python | GPU FastAPI: embed + HNSW → flat `[{id, similarity}]`. **Copy of production.** |
 | **Mirror: annotation service** | `third_party/object_search/annotation_service/` | Python | Production annotation CRUD + ground-truth export mirror. The dev Toolbox uses its own compatible integrated SQLite store. |
 | **Bricks** | `toolbox/bricks/` | Python | Dev-only port of the four things Django owns in production: 3D lifting + pgvector ingest, candidate enrichment, clustering/ranking, and the depth bridge. |
+| **Map export** | `toolbox/bricks/{export_roi,delete_map}.py` | Python | Dev-only: cut a drawn region out of a map into a new one, and delete a map so produced. **The only code here that writes — or removes — a map directory.** |
 | **Pose reader** | `toolbox/bricks/map_manifest.py` | Python | Dev-only, replacing the Django ORM: reads the v2 map manifest. Mirrored in TS by `toolbox/backend/src/map-manifest.ts`. |
 | **Benchmark** | `toolbox/benchmark/` | Python | Dev-only: HTTP benchmark scoring localize against ground truth, for full runs or an explicitly filtered single prompt. |
 | **Toolbox UI** | `toolbox/{backend,frontend}/` | TypeScript | Dev tool: inspect, search, annotate, benchmark. Proxies the Python services; does no ML. |
@@ -121,10 +122,13 @@ gap 2 of ADR 0001; **gap 1 remains** — livemap calls
 
 ## Pose source and coordinate frames
 
-One format: the **v2 manifest** (`{map_id}_{version}_{date}_{time}.json`), a dump of
-the production objects. `x/y/z` are already EUS and `orientation` is already the
-`[w, x, y, z]` OpenGL→EUS quaternion, so **no conversion applies**. It also carries
-`venue_type` and the real `geo_ref_id`. See `toolbox/bricks/map_manifest.py`.
+One format: the **v2 manifest** (`{map_id}_{version}_{date}_{time}.json`), normally a
+dump of the production objects — with one exception since the ROI export:
+`toolbox/bricks/export_roi.py` writes one, for a map cut out of another. `x/y/z`
+are already EUS and `orientation` is already the `[w, x, y, z]` OpenGL→EUS
+quaternion, so **no conversion applies**. It also carries `venue_type` and the
+`geo_ref_id` — the real one from production, or an allocated one for an exported
+map. See `toolbox/bricks/map_manifest.py`.
 
 Keyframe ids are **indices into `geo_keyframes`** — the manifest has no integer id.
 Re-exporting it renumbers everything, so prepare and ingest must be re-run together.
@@ -165,7 +169,13 @@ All three are covered by tests; read ADR 0002 §Traps before touching them.
    candidates attach to whichever keyframes share those ids. Use
    `toolbox.bricks.prepare_runner`, which resolves real ids first.
 5. **Re-exporting a v2 manifest renumbers keyframes** — ids are `geo_keyframes`
-   indices. Re-run prepare *and* ingest together after a new export.
+   indices. Re-run prepare *and* ingest together after a new export. The ROI export
+   renumbers by construction (a subset is a new indexing) and records the old→new
+   table in `export-provenance.json`.
+6. **`geo_ref_id` partitions a shared table, it does not name one.** An exported map
+   that kept its source's id would erase the source from pgvector on its next ingest.
+   `export_roi.allocate_geo_ref_id` takes the next free value and
+   `bricks/service.py::load_map_entries` refuses a config where two maps collide.
 
 **Toolbox state.** `localize-offline` is gone for good. Text search and
 `localize-online` both work — text search reads the rows the bricks `text` endpoint

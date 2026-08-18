@@ -19,6 +19,14 @@ export type MapSummary = {
   /** Whether the map directory and a parseable v2 manifest are present. */
   object_search_available: boolean;
   unavailable_reason: string | null;
+  /**
+   * The map this one was exported from, or null when it came from production. It is
+   * what makes a map a sub-map: the home page nests it under its parent, and only a
+   * map with one may be deleted.
+   */
+  parent_map: string | null;
+  /** Ids declaring this map as their parent. Resolved server-side, see `main.ts`. */
+  child_map_ids: string[];
 };
 
 export type MapsResponse = {
@@ -37,5 +45,7 @@ export async function fetchMaps(): Promise<MapSummary[]> {
     geo_ref_id: map.geo_ref_id ?? 1,
     object_search_available: map.object_search_available ?? true,
     unavailable_reason: map.unavailable_reason ?? null,
+    parent_map: map.parent_map ?? null,
+    child_map_ids: map.child_map_ids ?? [],
   }));
 }

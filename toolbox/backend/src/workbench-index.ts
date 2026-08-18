@@ -31,6 +31,7 @@ import {
   type LoadedMetadata,
   type MetadataRow,
 } from "./object-search-metadata.js";
+import { pythonBinaryCandidates } from "./python-process.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -87,16 +88,6 @@ function convertBinary(): string {
 
 function identifyBinary(): string {
   return process.env.OBJECT_SEARCH_WORKBENCH_IDENTIFY ?? "identify";
-}
-
-function pythonBinaryCandidates(): string[] {
-  return [
-    process.env.OBJECT_SEARCH_WORKBENCH_PYTHON,
-    process.env.PYTHON,
-    "/home/yacine/anaconda3/envs/wemap-vision/bin/python",
-    "python3",
-    "python",
-  ].filter((item): item is string => Boolean(item));
 }
 
 function asNumber(value: unknown, fallback = 0): number {

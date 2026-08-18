@@ -5,7 +5,8 @@
     "dev:workbench": "VITE_API_PROXY_TARGET=http://127.0.0.1:45700 vite --host 0.0.0.0",
     "build": "tsc && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@types/three": "^0.179.0",

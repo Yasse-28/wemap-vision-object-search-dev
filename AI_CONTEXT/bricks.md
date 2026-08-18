@@ -30,6 +30,8 @@ diverge, production wins. A "small improvement" here is a bug.
 | `prepare_runner.py` | `object_search_prepare.py` (its `image_entries` construction) | `collect_image_entries`, `run` |
 | `prepare_postprocess.py` | `object_search_prepare.py::_sample_depths` | `postprocess_metadata`, `sample_depths` |
 | `map_manifest.py` | *(no counterpart — replaces the ORM)* | `load_map_manifest`, `find_manifest`, `MapManifest`, `ManifestKeyframe` |
+| `export_roi.py` | *(none — dev-only)* | `select_keyframes`, `export_roi`, `build_manifest_document`, `allocate_geo_ref_id`, `Roi`, `Selection`, `PROVENANCE_FILENAME`. **The only module that writes a map directory.** Keyframes inside the drawn lng/lat rings, matched on the level the manifest's altitude bands give (EUS up, never WGS84 alt) → a new manifest with dense ids restarting at 0, hardlinked `images/`+`depths/` (copy on `EXDEV`), optionally a subset `object-search/` with `video_keyframe_id`, `row_index`, `embeddings.npy` rows and `thumbnail_key` all remapped together, plus `export-provenance.json` carrying the old→new id table. Staged in `.{name}.partial-*` and `os.replace`d, because a half-written directory still satisfies `find_manifest`. `--dry-run` answers the count the UI shows as authoritative. `allocate_geo_ref_id` takes the next free value across every configured manifest and, when the database answers, both tables — see the gotcha below. |
+| `delete_map.py` | *(none — dev-only)* | `plan_deletion`, `delete_map`, `purge_database`, `children_of`, `ConfiguredMap`, `DeletionRefused`. The toolbox's only destructive path, so it is all gates: refuses a map with no `parent_map` (not produced here), one that still has children, and one whose `geo_ref_id` another configured map shares. Database first, then the directory — an orphaned row cannot be traced back to what it described, an orphaned directory can. Skips the `rmtree` when there is no `export-provenance.json`. |
 | `v1_index_convert.py` | *(dev-only — no production counterpart)* | `convert`, `load_keyframe_map`, `ConversionStats`, `SCHEMA` — re-shapes a `legacy/` SQLite index into `metadata.parquet` + `embeddings.npy` |
 | `vendored/proposal_cutouts.py` | overrides the **mirror's** `prepare/proposal_cutouts.py` | `create_proposal_cutouts`, `install`, `DEFAULT_CUTOUT_BATCH=10` — memory-only delta, see gotcha 11 |
 | `georef_source.py` | *(no counterpart — replaces the ORM)* | `load_pose_source`, `PoseSource`, `KeyframePose` — a thin façade over `map_manifest` |
@@ -653,6 +655,14 @@ indices and `2.tif` would silently match the wrong keyframe. The sibling repo
 `../retrieve-map-data` does that (`retrieve_map_data.py <map_dir>`), reading the
 same manifest and using the same basename rule. `scripts/build-index.sh` fails
 early and by name when either directory is absent.
+
+12. **`geo_ref_id` is a column, not a table.** `object_search_candidate` and
+    `geokeyframe` hold every map, and `ingest_cli` opens with
+    `DELETE ... WHERE geo_ref_id = %s`. Two maps sharing one therefore erase each
+    other on ingest, silently. Production manifests carry distinct ids, so this only
+    became reachable when `export_roi` started writing manifests here: it allocates
+    the next free id, and `service.load_map_entries` now refuses a config where two
+    maps collide.
 
 ## Cross-refs
 

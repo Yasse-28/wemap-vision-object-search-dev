@@ -13,6 +13,7 @@
     "build:frontend": "npm run build -w frontend",
     "build:backend": "npm run build -w backend",
     "type-check": "npm run type-check -w frontend && npm run type-check -w backend",
-    "start": "npm run start -w backend --"
+    "start": "npm run start -w backend --",
+    "test": "npm run test -w frontend && npm run test -w backend"
   }
 }

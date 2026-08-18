@@ -30,6 +30,7 @@ async function createMap(): Promise<{
     emmid: null,
     geo_ref_id: 1,
     object_search: null,
+    parent_map: null,
   };
   return {
     map,

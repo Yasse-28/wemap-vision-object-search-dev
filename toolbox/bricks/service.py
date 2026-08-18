@@ -177,6 +177,29 @@ def load_map_entries(config_path: Path) -> dict[str, MapEntry]:
             )
         logger.info("Map '%s': geo_ref_id %s from its manifest.", map_id, geo_ref_id)
         entries[map_id] = MapEntry(id=map_id, path=map_path, geo_ref_id=int(geo_ref_id))
+
+    # `geo_ref_id` is a column, not a table: `object_search_candidate` and
+    # `geokeyframe` hold every map, and `ingest_cli` opens with
+    # `DELETE ... WHERE geo_ref_id = %s`. Two maps sharing one therefore erase each
+    # other on ingest and answer each other's queries in between — with no error at
+    # any point. Production manifests carry distinct ids; a locally exported map is
+    # the case that can collide, so the collision is checked rather than assumed.
+    by_geo_ref: dict[int, list[str]] = {}
+    for entry in entries.values():
+        by_geo_ref.setdefault(entry.geo_ref_id, []).append(entry.id)
+    collisions = {
+        geo_ref_id: ids for geo_ref_id, ids in by_geo_ref.items() if len(ids) > 1
+    }
+    if collisions:
+        detail = "; ".join(
+            f"geo_ref_id {geo_ref_id}: {', '.join(sorted(ids))}"
+            for geo_ref_id, ids in sorted(collisions.items())
+        )
+        raise ValueError(
+            f"Several maps share a geo_ref_id ({detail}). They index into the same "
+            "rows, so ingesting one deletes the other. Re-export or re-ingest one of "
+            "them under a free geo_ref_id."
+        )
     return entries
 
 
@@ -692,6 +715,7 @@ def create_app() -> FastAPI:
                     status_code=422,
                     detail="Each item needs keyframe_id, theta_center and phi_center.",
                 ) from exc
+
         def _number(key: str, default: float | None) -> float | None:
             raw = body.get(key, default)
             if raw is None:
