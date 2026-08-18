@@ -92,6 +92,10 @@ type DisplayedProposal = {
   row: MetadataRowRecord;
   state: ProposalDisplayState;
 };
+type ImageCursorRatio = {
+  xRatio: number;
+  yRatio: number;
+};
 type DepthImagePin = {
   requestId: string;
   source: "erp" | "cutout";
@@ -192,6 +196,9 @@ function ObjectSearchExplorerPanel(props: Props) {
   const [photosphereViewKeyframeId, setPhotosphereViewKeyframeId] = useState<string | null>(null);
   const [depthPin, setDepthPin] = useState<DepthImagePin | null>(null);
   const [depthPinPopoverOpen, setDepthPinPopoverOpen] = useState(false);
+  const [selectedPreviewCursor, setSelectedPreviewCursor] =
+    useState<ImageCursorRatio | null>(null);
+  const [isDepthModifierPressed, setIsDepthModifierPressed] = useState(false);
   const [annotationMenu, setAnnotationMenu] = useState<{
     annotationId: string;
     x: number;
@@ -218,6 +225,32 @@ function ObjectSearchExplorerPanel(props: Props) {
     useBboxPostProcessParams();
   const [metadataRows, setMetadataRows] = useState<MetadataRowRecord[]>([]);
   const annotation = useExplorerAnnotationWorkspace(props.mapId);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Control") {
+        setIsDepthModifierPressed(true);
+      }
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Control") {
+        setIsDepthModifierPressed(false);
+      }
+    };
+    const clearDepthModifier = () => setIsDepthModifierPressed(false);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", clearDepthModifier);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", clearDepthModifier);
+    };
+  }, []);
+
+  useEffect(() => {
+    setSelectedPreviewCursor(null);
+  }, [selectedRowIndex]);
 
   const summary: MetadataSummary | null = status?.summary ?? null;
   const keyframeSummaries = keyframePage?.keyframes ?? [];
@@ -2291,6 +2324,11 @@ function ObjectSearchExplorerPanel(props: Props) {
                     alt={`Context view for proposal ${selectedDetection.row_index}`}
                     title="Ctrl+click to place a depth pin"
                     loading="lazy"
+                    onMouseMove={(event) => {
+                      setSelectedPreviewCursor(readClickRatio(event));
+                      setIsDepthModifierPressed(event.ctrlKey);
+                    }}
+                    onMouseLeave={() => setSelectedPreviewCursor(null)}
                     onClick={(event) => {
                       if (!event.ctrlKey) {
                         return;
@@ -2305,6 +2343,16 @@ function ObjectSearchExplorerPanel(props: Props) {
                       );
                     }}
                   />
+                  {isDepthModifierPressed && selectedPreviewCursor ? (
+                    <span
+                      className="object-search-depth-projection-cursor"
+                      aria-hidden="true"
+                      style={{
+                        left: `${selectedPreviewCursor.xRatio * 100}%`,
+                        top: `${selectedPreviewCursor.yRatio * 100}%`,
+                      }}
+                    />
+                  ) : null}
                   {depthPin?.source === "cutout" &&
                   depthPin.rowIndex === selectedDetection.row_index ? (
                     <span
