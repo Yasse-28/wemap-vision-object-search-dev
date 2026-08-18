@@ -161,8 +161,10 @@ function ObjectSearchExplorerPanel(props: Props) {
   const [showPhotosphereBoxes, setShowPhotosphereBoxes] = useState(false);
   const [panoramaViewMode, setPanoramaViewMode] =
     useState<PanoramaViewMode>("image");
+  // On by default: without it the livemap shows an empty floor plan on any map with
+  // no 360-viewer graph, which is most of them.
   const [showKeyframeTrack, setShowKeyframeTrack] = useState(() =>
-    readStoredBoolean(KEYFRAME_TRACK_STORAGE_KEY, false),
+    readStoredBoolean(KEYFRAME_TRACK_STORAGE_KEY, true),
   );
   const [showKeyframeGraph, setShowKeyframeGraph] = useState(() =>
     readStoredBoolean(KEYFRAME_GRAPH_STORAGE_KEY, true),
