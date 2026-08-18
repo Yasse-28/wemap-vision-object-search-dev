@@ -2274,6 +2274,59 @@ body.explorer-equirect-dragging {
   font-size: var(--fs-xs);
 }
 
+.object-search-projection-confidence {
+  display: grid;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.object-search-confidence-score {
+  --confidence-color: var(--c-disabled);
+  display: grid;
+  gap: 3px;
+}
+
+.object-search-confidence-score.is-high {
+  --confidence-color: var(--c-ok);
+}
+
+.object-search-confidence-score.is-medium {
+  --confidence-color: var(--c-warn);
+}
+
+.object-search-confidence-score.is-low {
+  --confidence-color: var(--c-danger-border);
+}
+
+.object-search-confidence-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--c-text-muted);
+  font-size: 9px;
+}
+
+.object-search-confidence-heading strong {
+  color: var(--confidence-color);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.object-search-confidence-meter {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--c-border-subtle);
+}
+
+.object-search-confidence-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--confidence-color);
+}
+
 .object-search-neighbor-projection-action {
   margin-top: 3px;
   color: var(--c-accent-text);

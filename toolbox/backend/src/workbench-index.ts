@@ -47,6 +47,8 @@ const MAX_ROW_RENDER_SIZE = 2048;
 const DEFAULT_NEIGHBOR_PROJECTION_COUNT = 5;
 const MAX_NEIGHBOR_PROJECTION_COUNT = 12;
 const MIN_NEIGHBOR_PROJECTION_BASELINE_M = 0.5;
+const PROJECTION_DISTANCE_CONFIDENCE_SCALE_M = 5;
+const PROJECTION_VIEW_ANGLE_CONFIDENCE_SCALE_RAD = Math.PI / 4;
 /** How long the status route waits on the bricks service for pgvector coverage. */
 const COVERAGE_TIMEOUT_MS = 2500;
 
@@ -1058,6 +1060,16 @@ export type ProposalNeighborProjection = {
   phi_center: number;
   angular_width: number;
   angular_height: number;
+  viewpoint_angle_deg: number;
+  apparent_area_ratio: number;
+  distance_score: number;
+  view_angle_score: number;
+  apparent_size_score: number;
+  geometric_confidence: number;
+  observed_depth_m: number | null;
+  occlusion_margin_m: number | null;
+  occlusion_confidence: number | null;
+  occlusion_status: "clear" | "occluded" | "depth_mismatch" | "unknown";
 };
 
 type ProposalProjectionGeometry = {
@@ -1143,6 +1155,37 @@ function projectProposalIntoKeyframe(
   );
   const angularWidth = 2 * Math.atan(geometry.physicalWidthM / (2 * distanceToProposal));
   const angularHeight = 2 * Math.atan(geometry.physicalHeightM / (2 * distanceToProposal));
+  const viewpointAngle = angleBetweenVectors(
+    [
+      geometry.sourceOriginWorldWds[0] - geometry.pointWorldWds[0],
+      geometry.sourceOriginWorldWds[1] - geometry.pointWorldWds[1],
+      geometry.sourceOriginWorldWds[2] - geometry.pointWorldWds[2],
+    ],
+    [
+      targetOrigin[0] - geometry.pointWorldWds[0],
+      targetOrigin[1] - geometry.pointWorldWds[1],
+      targetOrigin[2] - geometry.pointWorldWds[2],
+    ],
+  );
+  const apparentAreaRatio = Math.max(
+    0,
+    (angularWidth * angularHeight)
+      / (geometry.row.angularWidth * geometry.row.angularHeight),
+  );
+  const distanceScore = Math.exp(
+    -distanceFromSource / PROJECTION_DISTANCE_CONFIDENCE_SCALE_M,
+  );
+  const viewAngleScore = Math.exp(
+    -viewpointAngle / PROJECTION_VIEW_ANGLE_CONFIDENCE_SCALE_RAD,
+  );
+  const apparentSizeScore = Math.min(1, Math.sqrt(apparentAreaRatio));
+  // Weighted geometric mean: one weak dimension must lower the result without a
+  // single noisy input collapsing it. Distance and angle use 5 m / 45° e-folding
+  // scales; apparent size compares angular area with the source proposal.
+  const geometricConfidence =
+    distanceScore ** 0.35
+    * viewAngleScore ** 0.4
+    * apparentSizeScore ** 0.25;
   return {
     keyframe_id: String(target.keyframeId),
     distance_from_source_m: distanceFromSource,
@@ -1153,6 +1196,16 @@ function projectProposalIntoKeyframe(
     phi_center: (uv[1] - 0.5) * Math.PI,
     angular_width: angularWidth,
     angular_height: angularHeight,
+    viewpoint_angle_deg: viewpointAngle * 180 / Math.PI,
+    apparent_area_ratio: apparentAreaRatio,
+    distance_score: confidencePercent(distanceScore),
+    view_angle_score: confidencePercent(viewAngleScore),
+    apparent_size_score: confidencePercent(apparentSizeScore),
+    geometric_confidence: confidencePercent(geometricConfidence),
+    observed_depth_m: null,
+    occlusion_margin_m: null,
+    occlusion_confidence: null,
+    occlusion_status: "unknown",
   };
 }
 
@@ -1165,6 +1218,20 @@ function cameraBaselineM(
     left.originWorldWds[1] - right.originWorldWds[1],
     left.originWorldWds[2] - right.originWorldWds[2],
   );
+}
+
+function angleBetweenVectors(left: number[], right: number[]): number {
+  const denominator = Math.hypot(...left) * Math.hypot(...right);
+  if (denominator <= Number.EPSILON) {
+    return 0;
+  }
+  const cosine = left.reduce((sum, value, index) => sum + value * right[index], 0)
+    / denominator;
+  return Math.acos(Math.max(-1, Math.min(1, cosine)));
+}
+
+function confidencePercent(value: number): number {
+  return Math.round(Math.max(0, Math.min(1, value)) * 100);
 }
 
 /** Project one depth-backed proposal into nearby, spatially distinct camera poses. */
@@ -1241,7 +1308,10 @@ export async function proposalNeighborProjectionsPayload(
   requestedCount: number,
 ): Promise<Record<string, unknown>> {
   const { row, manifest } = await proposalProjectionSource(map, rowIndex);
-  const projections = projectProposalIntoNearestKeyframes(row, manifest, requestedCount);
+  const projections = await scoreProjectionOcclusion(
+    map,
+    projectProposalIntoNearestKeyframes(row, manifest, requestedCount),
+  );
   return {
     row_index: row.rowIndex,
     source_keyframe_id: String(row.videoKeyframeId),
@@ -1252,7 +1322,8 @@ export async function proposalNeighborProjectionsPayload(
     projections,
     note:
       "Nearby views are spaced by at least 0.5 m when possible. Geometric "
-      + "reprojection only; visibility and occlusion are not verified.",
+      + "confidence combines distance, viewpoint angle and apparent size. Visibility "
+      + "compares the projected distance with target depth when available.",
   };
 }
 
@@ -1563,6 +1634,11 @@ type DepthSample = {
   sample_count: number;
 };
 
+type DepthBatchSample = {
+  sample: DepthSample | null;
+  error: string | null;
+};
+
 const DEPTH_SAMPLE_SCRIPT = String.raw`
 import json
 import math
@@ -1641,6 +1717,21 @@ def sample_tiff(depth_path, u, v, radius):
 
 def main():
     req = json.loads(sys.stdin.read())
+    if "samples" in req:
+        results = []
+        for item in req["samples"]:
+            try:
+                result = sample_tiff(
+                    Path(item["depth_path"]),
+                    float(item["u"]),
+                    float(item["v"]),
+                    max(0, int(item.get("radius", 3))),
+                )
+                results.append({"sample": result, "error": None})
+            except Exception as exc:
+                results.append({"sample": None, "error": str(exc)})
+        print(json.dumps(results))
+        return
     depth_path = Path(req["depth_path"])
     u = float(req["u"])
     v = float(req["v"])
@@ -1765,6 +1856,28 @@ async function runDepthSamplePython(
   return JSON.parse(Buffer.concat(stdout).toString("utf8")) as DepthSample;
 }
 
+async function runDepthBatchSamplePython(
+  pythonBin: string,
+  requests: Record<string, unknown>[],
+): Promise<DepthBatchSample[]> {
+  const child = spawn(pythonBin, ["-c", DEPTH_SAMPLE_SCRIPT], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  child.stdin.end(JSON.stringify({ samples: requests }));
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+  if (code !== 0) {
+    throw new Error(Buffer.concat(stderr).toString("utf8").trim() || `python exited with ${code}`);
+  }
+  return JSON.parse(Buffer.concat(stdout).toString("utf8")) as DepthBatchSample[];
+}
+
 async function runDepthPreviewPython(
   pythonBin: string,
   request: Record<string, unknown>,
@@ -1816,6 +1929,95 @@ async function sampleDepthAtEquirectUv(
     500,
     `Could not sample depth map. Install tifffile, or set OBJECT_SEARCH_WORKBENCH_PYTHON. ${errors.join(" | ")}`,
   );
+}
+
+export function projectionOcclusionAssessment(
+  expectedDepthM: number,
+  observedDepthM: number,
+): Pick<
+  ProposalNeighborProjection,
+  "observed_depth_m" | "occlusion_margin_m" | "occlusion_confidence" | "occlusion_status"
+> {
+  // Depth is sqrt-quantised and a small proposal can straddle object/background
+  // pixels, so require a discrepancy greater than 35 cm or 8% before classifying it.
+  const toleranceM = Math.max(0.35, expectedDepthM * 0.08);
+  const marginM = observedDepthM - expectedDepthM;
+  const mismatchExcessM = Math.max(0, Math.abs(marginM) - toleranceM);
+  const confidence = Math.exp(-mismatchExcessM / Math.max(0.5, toleranceM));
+  return {
+    observed_depth_m: observedDepthM,
+    occlusion_margin_m: marginM,
+    occlusion_confidence: confidencePercent(confidence),
+    occlusion_status:
+      mismatchExcessM === 0
+        ? "clear"
+        : marginM < 0
+          ? "occluded"
+          : "depth_mismatch",
+  };
+}
+
+async function scoreProjectionOcclusion(
+  map: MapEntry,
+  projections: ProposalNeighborProjection[],
+): Promise<ProposalNeighborProjection[]> {
+  const depthPaths = await Promise.all(
+    projections.map((projection) => resolveDepthPath(map, projection.keyframe_id)),
+  );
+  const available = projections.flatMap((projection, index) => {
+    const depthPath = depthPaths[index];
+    return depthPath
+      ? [
+          {
+            index,
+            request: {
+              depth_path: depthPath,
+              u: projection.erp_u,
+              v: projection.erp_v,
+              radius: 3,
+            },
+          },
+        ]
+      : [];
+  });
+  if (!available.length) {
+    return projections;
+  }
+
+  let samples: DepthBatchSample[] | null = null;
+  for (const pythonBin of pythonBinaryCandidates()) {
+    try {
+      samples = await runDepthBatchSamplePython(
+        pythonBin,
+        available.map((item) => item.request),
+      );
+      break;
+    } catch {
+      // Occlusion is an optional confidence signal. A missing decoder must not hide
+      // otherwise valid geometric projections.
+    }
+  }
+  if (!samples) {
+    return projections;
+  }
+
+  const assessments = new Map<number, ReturnType<typeof projectionOcclusionAssessment>>();
+  available.forEach((item, sampleIndex) => {
+    const sample = samples?.[sampleIndex]?.sample;
+    if (sample) {
+      assessments.set(
+        item.index,
+        projectionOcclusionAssessment(
+          projections[item.index].distance_to_proposal_m,
+          sample.depth_m,
+        ),
+      );
+    }
+  });
+  return projections.map((projection, index) => ({
+    ...projection,
+    ...(assessments.get(index) ?? {}),
+  }));
 }
 
 export async function indexKeyframeDepthPreviewPng(

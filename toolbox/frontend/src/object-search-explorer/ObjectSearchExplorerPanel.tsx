@@ -2,6 +2,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type CSSProperties,
+  type ReactElement,
   lazy,
   Suspense,
   useCallback,
@@ -168,6 +169,74 @@ function keyframeIndexState(summary: KeyframeSummary | undefined): KeyframeIndex
     return "unknown";
   }
   return summary.ingested > 0 ? "indexed" : "pruned";
+}
+
+function confidenceBand(score: number): { label: string; tone: "high" | "medium" | "low" } {
+  if (score >= 75) {
+    return { label: "High", tone: "high" };
+  }
+  if (score >= 45) {
+    return { label: "Medium", tone: "medium" };
+  }
+  return { label: "Low", tone: "low" };
+}
+
+function ProjectionConfidence(props: {
+  projection: ProposalNeighborProjection;
+}): ReactElement {
+  const geometry = confidenceBand(props.projection.geometric_confidence);
+  const visibility = props.projection.occlusion_confidence === null
+    ? null
+    : confidenceBand(props.projection.occlusion_confidence);
+  const geometryTitle = [
+    `Source distance ${props.projection.distance_score}%`,
+    `view angle ${props.projection.view_angle_score}% (${props.projection.viewpoint_angle_deg.toFixed(1)}°)`,
+    `apparent size ${props.projection.apparent_size_score}%`,
+  ].join(" · ");
+  const visibilityTitle = props.projection.observed_depth_m === null
+    ? "No target depth sample is available."
+    : `Expected ${props.projection.distance_to_proposal_m.toFixed(2)} m · observed ${props.projection.observed_depth_m.toFixed(2)} m`;
+
+  return (
+    <span className="object-search-projection-confidence">
+      <span
+        className={`object-search-confidence-score is-${geometry.tone}`}
+        title={geometryTitle}
+      >
+        <span className="object-search-confidence-heading">
+          <span>Geometry</span>
+          <strong>{geometry.label} · {props.projection.geometric_confidence}%</strong>
+        </span>
+        <span className="object-search-confidence-meter" aria-hidden="true">
+          <span style={{ width: `${props.projection.geometric_confidence}%` }} />
+        </span>
+      </span>
+      <span
+        className={`object-search-confidence-score is-${visibility?.tone ?? "unknown"}`}
+        title={visibilityTitle}
+      >
+        <span className="object-search-confidence-heading">
+          <span>Visibility</span>
+          <strong>
+            {visibility
+              ? `${
+                  props.projection.occlusion_status === "occluded"
+                    ? "Blocked"
+                    : props.projection.occlusion_status === "depth_mismatch"
+                      ? "Mismatch"
+                      : visibility.label
+                } · ${props.projection.occlusion_confidence}%`
+              : "No depth"}
+          </strong>
+        </span>
+        <span className="object-search-confidence-meter" aria-hidden="true">
+          {props.projection.occlusion_confidence !== null ? (
+            <span style={{ width: `${props.projection.occlusion_confidence}%` }} />
+          ) : null}
+        </span>
+      </span>
+    </span>
+  );
 }
 
 
@@ -2567,6 +2636,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                                 source · {projection.distance_to_proposal_m.toFixed(1)} m
                                 to proposal
                               </span>
+                              <ProjectionConfidence projection={projection} />
                               <span className="object-search-neighbor-projection-action">
                                 Open in panorama →
                               </span>

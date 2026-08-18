@@ -190,6 +190,16 @@ export type ProposalNeighborProjection = {
   phi_center: number;
   angular_width: number;
   angular_height: number;
+  viewpoint_angle_deg: number;
+  apparent_area_ratio: number;
+  distance_score: number;
+  view_angle_score: number;
+  apparent_size_score: number;
+  geometric_confidence: number;
+  observed_depth_m: number | null;
+  occlusion_margin_m: number | null;
+  occlusion_confidence: number | null;
+  occlusion_status: "clear" | "occluded" | "depth_mismatch" | "unknown";
 };
 
 export type ProposalNeighborProjectionsResponse = {
