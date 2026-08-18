@@ -281,6 +281,27 @@ Hub labels are printed against their base rate, per the reading rule above.
 a pgvector candidate id, not a parquet `row_index`. `s0` says so rather than printing an
 empty table.
 
+## Checking the annotations before trusting a measurement
+
+`validate_annotations.py` judges the ground truth, not the pipeline. It reads the GeoJSON
+export and nothing else.
+
+```bash
+python -m toolbox.benchmark.validate_annotations --map-path /path/to/map
+```
+
+Three blocks, in the order they should be acted on: which contract fields are present
+(a field at 40 % is reported as **worse than absent** — a metric reading it would score a
+biased slice), what contradicts itself (one click recorded twice, one `object_id` under
+two classes or two extents, one class under two synonym sets, an extent that is a typo),
+and what the map has earned — whether the separability gate opens the classification
+columns, and whether the label-set metrics have anything to measure. Exit status is
+non-zero only for contradictions: an unannotated map is incomplete, not wrong.
+
+The annotator's side is
+[docs/plans/2026-08-18-cahier-des-charges-annotation.md](../../docs/plans/2026-08-18-cahier-des-charges-annotation.md);
+the contract itself is [ADR 0009](../../docs/adr/0009-ground-truth-annotation-contract.md).
+
 ## Typing the errors, and pricing each one
 
 `error_decomposition.py` types every returned cluster — *correct*, *duplicate*,
