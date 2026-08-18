@@ -1224,6 +1224,12 @@ body.explorer-equirect-dragging {
 }
 
 @media (max-width: 1080px) {
+  #explorer-spatial,
+  #explorer-proposals,
+  #explorer-annotation {
+    scroll-margin-top: 160px;
+  }
+
   .explorer-context-rail {
     align-items: stretch;
     flex-direction: column;
@@ -1264,6 +1270,12 @@ body.explorer-equirect-dragging {
 
   .explorer-context-rail {
     position: static;
+  }
+
+  #explorer-spatial,
+  #explorer-proposals,
+  #explorer-annotation {
+    scroll-margin-top: 12px;
   }
 
   .explorer-context-keyframe {

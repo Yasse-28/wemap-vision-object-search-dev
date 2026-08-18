@@ -207,6 +207,7 @@ function ObjectSearchExplorerPanel(props: Props) {
     promise: Promise<KeyframeMarker[]>;
   } | null>(null);
   const visualSplitRef = useRef<HTMLDivElement | null>(null);
+  const inspectorRef = useRef<HTMLElement | null>(null);
   const detectionRowRefs = useRef(new Map<number, HTMLTableRowElement>());
   const shouldFocusSelectedDetectionRef = useRef(false);
   const { params: bboxPostProcess, setParams: setBboxPostProcess, resetParams: resetBboxPostProcess } =
@@ -1343,6 +1344,17 @@ function ObjectSearchExplorerPanel(props: Props) {
     }
   };
 
+  const selectProposalAndRevealPreview = (rowIndex: number): void => {
+    setSelectedRowIndex(rowIndex);
+    const prefersReducedMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    inspectorRef.current?.scrollTo({
+      top: 0,
+      behavior: prefersReducedMotion ? "auto" : "smooth",
+    });
+  };
+
   const updateResolvedDepthPin = (
     requestId: string,
     payload: DepthPinResponse,
@@ -2177,7 +2189,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                     }`}
                     type="button"
                     key={row.row_index}
-                    onClick={() => setSelectedRowIndex(row.row_index)}
+                    onClick={() => selectProposalAndRevealPreview(row.row_index)}
                   >
                     <span className="object-search-cutout-image-wrap">
                       <img
@@ -2187,7 +2199,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                         loading="lazy"
                         onClick={(event) => {
                           event.stopPropagation();
-                          setSelectedRowIndex(row.row_index);
+                          selectProposalAndRevealPreview(row.row_index);
                           const { xRatio, yRatio } = readClickRatio(event);
                           placeDepthPin(
                             "cutout",
@@ -2228,7 +2240,7 @@ function ObjectSearchExplorerPanel(props: Props) {
           )}
         </div>
 
-        <aside className="object-search-explorer-inspector">
+        <aside ref={inspectorRef} className="object-search-explorer-inspector">
           <h3>Selected proposal</h3>
           {selectedDetection ? (
             <>
