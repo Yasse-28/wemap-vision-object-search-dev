@@ -10,13 +10,20 @@ import {
 } from "react";
 
 import type { DepthPinResponse } from "../index-explorer/types";
+import {
+  clearAnnotations as clearStoredAnnotations,
+  createAnnotation as createStoredAnnotation,
+  deleteAnnotation as deleteStoredAnnotation,
+  deleteClass as deleteStoredClass,
+  fetchWorkspaceAnnotations,
+  importAnnotations as importStoredAnnotations,
+  saveClass as saveStoredClass,
+} from "./api";
 import CollapsibleSection from "./CollapsibleSection";
 import { canonicalLevel, pointInPolygon } from "./geometry";
 import {
   newAnnotationId,
-  parseAnnotationGeoJSON,
   saveGeoJSONAs,
-  saveGeoJSONToMap,
 } from "./geojson";
 import visibleIcon from "../assets/visible.png";
 import type {
@@ -84,6 +91,31 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
     setRoiActive(false);
     setRoiPolygon(null);
     setCurrentLevel(null);
+
+    // Load whatever the map already holds. This is the change the SQLite store buys:
+    // the office used to open empty and needed its file dropped on it by hand.
+    let cancelled = false;
+    void (async () => {
+      try {
+        const stored = await fetchWorkspaceAnnotations(mapId);
+        if (cancelled) {
+          return;
+        }
+        setClasses(stored.classes);
+        setAnnotations(stored.annotations);
+      } catch (error) {
+        if (!cancelled) {
+          setErrorMessage(
+            `Could not load annotations: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [mapId]);
 
   const pointClasses = useMemo(
@@ -265,10 +297,24 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
         depthM: response.depth_m,
       },
     };
-    setAnnotations((current) => [...current, feature]);
-    setDraft(null);
-    setInfoMessage(`Added ${activeClass.name} annotation.`);
-    setErrorMessage(null);
+    // Written through immediately, then the row is shown with the id the store gave
+    // it. Optimistic insertion was rejected: a point that looks saved but is not is
+    // exactly the failure this migration exists to remove.
+    void (async () => {
+      try {
+        const id = await createStoredAnnotation(mapId, feature);
+        setAnnotations((current) => [...current, { ...feature, id }]);
+        setDraft(null);
+        setInfoMessage(`Added ${activeClass.name} annotation.`);
+        setErrorMessage(null);
+      } catch (error) {
+        setErrorMessage(
+          `Could not save the annotation: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    })();
   }
 
   function discardDraft() {
@@ -276,8 +322,20 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
   }
 
   function deleteAnnotation(id: string) {
-    setAnnotations((current) => current.filter((item) => item.id !== id));
-    setSelectedAnnotationId((current) => (current === id ? null : current));
+    void (async () => {
+      try {
+        await deleteStoredAnnotation(mapId, id);
+        setAnnotations((current) => current.filter((item) => item.id !== id));
+        setSelectedAnnotationId((current) => (current === id ? null : current));
+        setErrorMessage(null);
+      } catch (error) {
+        setErrorMessage(
+          `Could not delete the annotation: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    })();
   }
 
   function focusAnnotation(annotation: AnnotationFeature) {
@@ -424,10 +482,21 @@ export function ExplorerAnnotationControls(props: {
       prompt: null,
       annotationType: "point",
     };
-    workspace.setClasses((current) => [...current, next]);
-    workspace.setActiveClassKey(classKey(next));
-    workspace.setErrorMessage(null);
-    setNewClassName("");
+    void (async () => {
+      try {
+        await saveStoredClass(workspace.mapId, next, null);
+        workspace.setClasses((current) => [...current, next]);
+        workspace.setActiveClassKey(classKey(next));
+        workspace.setErrorMessage(null);
+        setNewClassName("");
+      } catch (error) {
+        workspace.setErrorMessage(
+          `Could not save the class: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    })();
   }
 
   function deleteClass(item: AnnotationClass) {
@@ -436,31 +505,49 @@ export function ExplorerAnnotationControls(props: {
         annotation.className === item.name &&
         annotation.annotationType === item.annotationType,
     );
+    // Point annotations are benchmark ground truth, so the confirmation says so
+    // rather than talking about "annotations": this deletes what the scores are
+    // measured against, and it is not recoverable from the UI.
     const message = matching.length
-      ? `Delete class "${item.name}" and its ${matching.length} annotations?`
+      ? `Delete class "${item.name}" and its ${matching.length} annotations?` +
+        (item.annotationType === "point"
+          ? " They are benchmark ground truth and will be removed from it."
+          : "")
       : `Delete class "${item.name}"?`;
     if (!window.confirm(message)) {
       return;
     }
-    workspace.setClasses((current) =>
-      current.filter((candidate) => classKey(candidate) !== classKey(item)),
-    );
-    workspace.setAnnotations((current) =>
-      current.filter(
-        (annotation) =>
-          !(
-            annotation.className === item.name &&
-            annotation.annotationType === item.annotationType
-          ),
-      ),
-    );
-    if (workspace.hiddenClassKeys.has(classKey(item))) {
-      workspace.toggleClassVisibility(item);
-    }
-    if (workspace.activeClassKey === classKey(item)) {
-      workspace.setActiveClassKey(null);
-      workspace.discardDraft();
-    }
+    void (async () => {
+      try {
+        await deleteStoredClass(workspace.mapId, item.name, item.annotationType);
+      } catch (error) {
+        workspace.setErrorMessage(
+          `Could not delete the class: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return;
+      }
+      workspace.setClasses((current) =>
+        current.filter((candidate) => classKey(candidate) !== classKey(item)),
+      );
+      workspace.setAnnotations((current) =>
+        current.filter(
+          (annotation) =>
+            !(
+              annotation.className === item.name &&
+              annotation.annotationType === item.annotationType
+            ),
+        ),
+      );
+      if (workspace.hiddenClassKeys.has(classKey(item))) {
+        workspace.toggleClassVisibility(item);
+      }
+      if (workspace.activeClassKey === classKey(item)) {
+        workspace.setActiveClassKey(null);
+        workspace.discardDraft();
+      }
+    })();
   }
 
   function openClassMenu(
@@ -517,6 +604,26 @@ export function ExplorerAnnotationControls(props: {
       workspace.setErrorMessage(`A ${original.annotationType} class named "${nextName}" already exists.`);
       return;
     }
+    void (async () => {
+      try {
+        // The rename cascades server-side: `class` is a name column, not a foreign
+        // key, because it is what `buildGroundTruth` emits.
+        await saveStoredClass(workspace.mapId, nextClass, {
+          name: original.name,
+          annotationType: original.annotationType,
+        });
+      } catch (error) {
+        workspace.setErrorMessage(
+          `Could not update the class: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return;
+      }
+      applyClassEdit();
+    })();
+
+    function applyClassEdit() {
     workspace.setClasses((current) =>
       current.map((item) => (classKey(item) === originalKey ? nextClass : item)),
     );
@@ -547,6 +654,7 @@ export function ExplorerAnnotationControls(props: {
     workspace.setInfoMessage(`Updated ${original.name} class.`);
     workspace.setErrorMessage(null);
     setEditingClass(null);
+    }
   }
 
   function promptForClass(item: AnnotationClass): string | null {
@@ -567,21 +675,27 @@ export function ExplorerAnnotationControls(props: {
     }
     const reader = new FileReader();
     reader.onload = () => {
-      try {
-        const result = parseAnnotationGeoJSON(
-          String(reader.result ?? ""),
-          workspace.classes,
-          workspace.annotations,
-        );
-        workspace.setClasses(result.classes);
-        workspace.setAnnotations(result.annotations);
-        workspace.setInfoMessage(
-          `Loaded ${result.importedAnnotations} annotations (${result.createdClasses} new classes).`,
-        );
-        workspace.setErrorMessage(null);
-      } catch (error) {
-        workspace.setErrorMessage(error instanceof Error ? error.message : String(error));
-      }
+      void (async () => {
+        try {
+          // Parsed client-side first so a malformed file is rejected before it
+          // reaches the store, then merged server-side and read back — the store is
+          // the source of truth, so the ids come from it, not from the file.
+          const parsed = JSON.parse(String(reader.result ?? "")) as unknown;
+          const result = await importStoredAnnotations(workspace.mapId, parsed);
+          const stored = await fetchWorkspaceAnnotations(workspace.mapId);
+          workspace.setClasses(stored.classes);
+          workspace.setAnnotations(stored.annotations);
+          workspace.setInfoMessage(
+            `Imported ${result.imported} annotations` +
+              (result.skipped ? ` (${result.skipped} skipped).` : "."),
+          );
+          workspace.setErrorMessage(null);
+        } catch (error) {
+          workspace.setErrorMessage(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      })();
     };
     reader.onerror = () => workspace.setErrorMessage("Failed to read file.");
     reader.readAsText(file);
@@ -606,24 +720,6 @@ export function ExplorerAnnotationControls(props: {
     importFile(files[0]);
   }
 
-  async function handleSaveToMap() {
-    try {
-      const result = await saveGeoJSONToMap(
-        workspace.mapId,
-        workspace.annotations,
-      );
-      workspace.setInfoMessage(
-        `Saved ${result.annotation_count} annotations to ${result.relative_path}.`,
-      );
-      workspace.setErrorMessage(null);
-    } catch (error) {
-      workspace.setErrorMessage(
-        `Could not save annotations: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-  }
 
   async function handleSaveAs() {
     try {
@@ -1009,14 +1105,6 @@ export function ExplorerAnnotationControls(props: {
                 className="secondary-button"
                 type="button"
                 disabled={!workspace.annotations.length}
-                onClick={() => void handleSaveToMap()}
-              >
-                Save
-              </button>
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={!workspace.annotations.length}
                 onClick={() => void handleSaveAs()}
               >
                 Save As…
@@ -1027,13 +1115,28 @@ export function ExplorerAnnotationControls(props: {
                 disabled={!workspace.annotations.length}
                 onClick={() => {
                   if (
-                    window.confirm(
-                      `Delete all ${workspace.annotations.length} annotations?`,
+                    !window.confirm(
+                      `Delete all ${workspace.annotations.length} annotations? ` +
+                        "The points are benchmark ground truth and will be removed " +
+                        "from it.",
                     )
                   ) {
-                    workspace.setAnnotations([]);
-                    workspace.discardDraft();
+                    return;
                   }
+                  void (async () => {
+                    try {
+                      await clearStoredAnnotations(workspace.mapId);
+                      workspace.setAnnotations([]);
+                      workspace.discardDraft();
+                      workspace.setErrorMessage(null);
+                    } catch (error) {
+                      workspace.setErrorMessage(
+                        `Could not clear annotations: ${
+                          error instanceof Error ? error.message : String(error)
+                        }`,
+                      );
+                    }
+                  })();
                 }}
               >
                 Clear all

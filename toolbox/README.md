@@ -47,14 +47,23 @@ Text search and localization both work against the live pgvector index. Offline
 localization is gone — it meant exact cosine over an index held in RAM, which pgvector
 HNSW replaced — so the mode toggle now offers Text search and Localize only.
 
-Annotations remain in memory until saved. **Save** writes to the configured
-map's `annotations/annotations.geojson`, creating the directory and overwriting
-the file when it already exists. **Save As...** opens the browser file dialog.
-Each saved point can include an optional search prompt in addition to its
-class. GeoJSON stores the prompt, resolved location, image-click provenance,
-normalized ERP coordinates, and depth. Legacy point and polygon GeoJSON can
-still be loaded; polygons are displayed and preserved but new polygons cannot
-be drawn.
+Annotations live in `{map}/object-search-annotations.db`, beside the reviews and the
+reference partition. They load when the map opens and every create, delete or class
+rename is written straight through — there is no Save button, and nothing is held in
+memory waiting to be lost.
+
+**Points are stored as `ground_truth_point`: they are the benchmark's ground truth.**
+The office is therefore its editor — it opens on the points the map already has, and
+deleting one there removes it from what the benchmark measures against. Polygons go
+to `annotation_polygon` and stay out of the ground truth, having no single position
+to score a localization against.
+
+Each point can carry an optional search prompt beside its class, and keeps its
+resolved location, image-click provenance, normalized ERP coordinates and depth.
+**Load GeoJSON** still imports a file — including the `annotations/annotations.geojson`
+this store replaced, which is also imported once automatically the first time the
+database is opened. **Save As...** still downloads a GeoJSON. Polygons are displayed
+and preserved but new polygons cannot be drawn.
 
 Keyframe images are resolved from `GeoRefKeyframe.image_filename` (or the
 legacy `filename` column) when available, with `{keyframe_id}.jpg` used only as
