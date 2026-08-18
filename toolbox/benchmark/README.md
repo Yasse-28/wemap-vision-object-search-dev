@@ -112,6 +112,29 @@ python -m toolbox.benchmark.association_sweep \
   --cache-dir .cache/assoc --grid grid.json --out-dir out/ --verify
 ```
 
+**HOTA is the row to read when a configuration changes the granularity.** Every row also
+carries `det_a`, `ass_a` and `hota`, the higher-order tracking accuracy transposed to
+this problem: `det_a` is `TP/(TP+FP+FN)` over detections against annotations, `ass_a` is
+the mean Jaccard overlap between the cluster a detection landed in and the set of
+detections belonging to its annotation, and `hota` is the geometric mean of the two,
+averaged over five localisation radii. Splitting an object and merging two cost `ass_a`
+symmetrically and leave `det_a` untouched, which is precisely what strict and grouped mAP
+cannot do — on vinci, three `clustering_eps_m` values give an identical `det_a` of 0.306
+while `ass_a` ranks them 0.492 / 0.474 / 0.313. Prefer it over `pair_f1`, which measures
+the same partition but weights objects by the square of their observation count.
+
+**Calibration, and what a shared threshold costs.** `ece`, `mce` and `overconfidence`
+compare each cluster's score against the rate at which clusters of that score are right,
+over quantile bins (fixed-width bins would put nearly every prediction in one).
+`threshold_spread_strict` is the p90−p10 of the thresholds each prompt would pick for
+itself — the dispersion a single fitted threshold has to paper over. Read the numbers
+against `accuracy_ceiling`: the match is one-to-one, so returning four clusters per
+object makes three of them wrong whatever the score says, and an error beyond that gap
+is granularity, which is `ass_a`'s business rather than calibration's. The reliability
+table (`reliability`, JSON only) is where the useful shape is — on vinci the score is
+monotone up to about 0.95 and then **inverts**, which is why 0.9 has to be re-fitted per
+map.
+
 Each grid entry is a `LocalizationParams` override plus a `label`; an unknown key is an
 error, not a silent no-op. Every row carries both ground-truth views (strict and
 grouped, each with its own fitted shared threshold and leave-one-prompt-out estimate)
@@ -188,6 +211,7 @@ PYTHONPATH=.:third_party/object_search python -m toolbox.benchmark.map_analysis 
 | `s3` | annotations against detections, **depth-free measurement first** |
 | `s4` | pairwise cues over three deliberately drawn populations, raw and conditional AUC, with the share of pairs each cue applies to |
 | `s5` | intra-view duplicates split by detector and settled by embedding, and the co-visible lower bound on the number of objects |
+| `s6` | hubness of the embedding space, with **no ground truth at all** — how unevenly the index shares out the role of nearest neighbour, and what a plain recentring would change |
 
 **Two readings this tool exists to protect.** A label or a cue is only informative
 above the **base rate** — on a densely annotated map half of all detections sit within
@@ -202,9 +226,57 @@ is a comparison of two angles in one frame. It owes nothing to the depth map —
 the 3D attachment, which shares the annotation's own construction
 (`ray(u, v) * depth_map(u, v)`) and therefore measures agreement, never accuracy.
 
+**Observability, in two halves.** `s3` reports what the capture *achieved* next to what
+it made *available*: parallax, occupied azimuth sectors out of twelve, the widest empty
+sector, and the share of observation pairs wide enough to triangulate on
+(`>= 5 deg`). A poor achieved figure on a rich available one is an algorithm problem; a
+poor available one is a capture problem no association will ever fix, and the line
+counting annotations seen under a degenerate baseline is that ceiling stated outright.
+Only *positional* coverage is measured — every keyframe is a panorama and already looks
+in every direction, so rotational coverage carries no information here.
+
+**Hubness (`s6`) is the one section that needs nothing but the parquet.** In a
+high-dimensional space the nearest-neighbour relation stops being symmetric: a few
+cutouts sit near the centre of mass and surface for prompts they have nothing to do
+with, while others are never anyone's neighbour and no threshold can reach them. The
+report prints the raw figures next to the same figures after subtracting the mean
+embedding, because that subtraction is a one-line change in the scoring path and the
+gap between the two columns is what it would buy. On vinci (20 000 rows, k=10) the
+skewness of the k-occurrence count falls 3.96 → 1.95 and the antihub share 8.4 % → 2.7 %.
+Hub labels are printed against their base rate, per the reading rule above.
+
 **Known limit.** `detection_review` verdicts cannot be joined here: their `target_id` is
 a pgvector candidate id, not a parquet `row_index`. `s0` says so rather than printing an
 empty table.
+
+## Depth quality where it places a detection
+
+`depth_boundary_quality.py` measures the depth maps **under the detector's boxes**,
+which is the only place a detection's position comes from. It needs no ground truth and
+no pose.
+
+```bash
+PYTHONPATH=.:third_party/object_search python -m toolbox.benchmark.depth_boundary_quality \
+  --map-path /path/to/map --sample 150 --workers 6
+```
+
+The standard monocular-depth figures (AbsRel, `delta1`) cannot answer this: they are
+dominated by large flat surfaces, which is exactly the part of the panorama no detection
+is placed from. Three quantities come out instead, per detection and pooled by range
+band — whether the sampled pixel is within two pixels of a depth discontinuity, whether
+it *is* a flying pixel (a value stranded between two surfaces, corresponding to empty
+space), and the p90/p10 depth ratio inside the box.
+
+Read every one of them against the `scene` block, which is the same rate over the whole
+map. On vinci (40 keyframes, 3 871 boxes): borders cover **1.0 %** of the map's pixels
+but **5.3 %** of sampled pixels sit on one — detections land on discontinuities five
+times more often than chance — rising to 16.6 % beyond 15 m. Flying pixels are rare
+everywhere (0.06 % of the map, 0.10 % at the sample), so they are *not* the mechanism
+here; the in-box depth ratio of 1.68 (2.45 beyond 15 m) is.
+
+The scene pass runs at full resolution in row bands on purpose: subsampling the map
+first would compare pixels several apart and report a larger, different quantity than
+the per-detection figures it is the baseline for.
 
 ## Putting a name back on a G-DINO box
 

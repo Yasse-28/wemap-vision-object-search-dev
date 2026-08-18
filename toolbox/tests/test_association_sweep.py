@@ -12,8 +12,11 @@ import pytest
 from toolbox.benchmark import association_sweep
 from toolbox.benchmark.association_sweep import (
     _params_from_grid_entry,
+    calibration_metrics,
     fetch_prompt_candidates,
     fragmentation_counts,
+    hota_at,
+    hota_metrics,
     nearest_annotation_labels,
     partition_metrics,
     shared_threshold_metrics,
@@ -471,3 +474,89 @@ def test_cluster_gate_aggregates_by_the_requested_rule() -> None:
             {1: 0.1, 2: 0.9},
         )
         assert gated["vlm_gate_score"] == pytest.approx(expected)
+
+
+def _hota_inputs(
+    clusters: list[int], annotation_of: list[int]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cluster labels, nearest annotation and a distance well inside every alpha."""
+    return (
+        np.asarray(clusters, dtype=np.int64),
+        np.asarray(annotation_of, dtype=np.int64),
+        np.full(len(clusters), 0.1),
+    )
+
+
+def test_association_accuracy_falls_the_same_way_for_splitting_and_merging() -> None:
+    # Four detections, two objects, two observations each. Splitting every object in
+    # two and merging both into one are opposite mistakes of the same size, and a
+    # metric that ranked one above the other would be ranking granularity.
+    perfect = hota_at(*_hota_inputs([0, 0, 1, 1], [0, 0, 1, 1]), 2, 1.0)
+    split = hota_at(*_hota_inputs([0, 1, 2, 3], [0, 0, 1, 1]), 2, 1.0)
+    merged = hota_at(*_hota_inputs([0, 0, 0, 0], [0, 0, 1, 1]), 2, 1.0)
+
+    assert perfect == (1.0, 1.0)
+    assert split[1] == pytest.approx(merged[1])
+    assert split[1] < perfect[1]
+
+
+def test_detection_accuracy_ignores_how_the_detections_were_grouped() -> None:
+    # The property `map_strict` lacks: retrieval is unchanged, so only the
+    # association half of the score may move.
+    whole = hota_at(*_hota_inputs([0, 0, 1, 1], [0, 0, 1, 1]), 2, 1.0)
+    shattered = hota_at(*_hota_inputs([0, 1, 2, 3], [0, 0, 1, 1]), 2, 1.0)
+
+    assert whole[0] == shattered[0]
+
+
+def test_an_annotation_no_detection_reached_costs_detection_accuracy() -> None:
+    reached, _ = hota_at(*_hota_inputs([0, 0], [0, 0]), 1, 1.0)
+    missed, _ = hota_at(*_hota_inputs([0, 0], [0, 0]), 3, 1.0)
+
+    assert reached == 1.0
+    assert missed == pytest.approx(0.5)
+
+
+def test_a_detection_beyond_every_alpha_is_a_false_positive_only() -> None:
+    clusters = np.asarray([0, 0, 0], dtype=np.int64)
+    nearest = np.asarray([0, 0, 0], dtype=np.int64)
+    distance = np.asarray([0.1, 0.1, 99.0])
+
+    det_a, ass_a = hota_at(clusters, nearest, distance, 1, 1.0)
+
+    # Two of three detections match, and the stray one contaminates their cluster.
+    assert det_a == pytest.approx(2.0 / 3.0)
+    assert ass_a == pytest.approx(2.0 / 3.0)
+
+
+def test_hota_averages_over_thresholds_and_rejects_misaligned_inputs() -> None:
+    clusters, nearest, distance = _hota_inputs([0, 0, 1, 1], [0, 0, 1, 1])
+
+    metrics = hota_metrics(clusters, nearest, distance, 2, alphas_m=(0.5, 1.0))
+
+    assert metrics.hota == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        hota_metrics(clusters, nearest[:2], distance, 2)
+
+
+def test_a_score_that_means_nothing_is_reported_as_overconfident() -> None:
+    annotations = {"a": [_annotation("a")]}
+    predictions = {
+        "a": [
+            _prediction("tp", 0.95, is_match=True),
+            _prediction("fp-1", 0.95, is_match=False),
+            _prediction("fp-2", 0.95, is_match=False),
+            _prediction("fp-3", 0.95, is_match=False),
+        ]
+    }
+
+    calibration = calibration_metrics(predictions, annotations, bin_count=2)
+
+    # One of four predictions can be right, and the score claims 0.95 for all of them.
+    assert calibration.accuracy == pytest.approx(0.25)
+    assert calibration.overconfidence == pytest.approx(0.70)
+    assert calibration.accuracy_ceiling == pytest.approx(0.25)
+
+
+def test_calibration_survives_a_configuration_that_returned_nothing() -> None:
+    assert calibration_metrics({}, {}).scored == 0

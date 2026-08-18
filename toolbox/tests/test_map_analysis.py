@@ -10,14 +10,17 @@ from toolbox.benchmark.map_analysis import (
     Detections,
     GroundTruth,
     _angular_delta,
+    _azimuth_coverage,
     _conditional_table,
     _horizontal_anisotropy,
     _mutual_information,
     _overlapping_pairs,
     _percentiles,
     _rank_auc,
+    _useful_parallax_share,
     _uv_to_theta_phi,
     attach_to_ground_truth,
+    hubness,
     seen_in_own_keyframe,
 )
 from toolbox.benchmark.map_layers import _colour
@@ -216,3 +219,67 @@ def test_height_is_ignored_because_the_baseline_that_matters_is_on_the_ground() 
     )
 
     assert _horizontal_anisotropy(line) < 1e-6
+
+
+def test_a_capture_that_circled_the_object_leaves_no_gap() -> None:
+    angles = np.linspace(0.0, 2 * math.pi, 24, endpoint=False)
+    ring = np.column_stack([np.cos(angles), np.zeros(24), np.sin(angles)])
+
+    occupied, gap = _azimuth_coverage(ring, np.zeros(3))
+
+    assert occupied == 1.0
+    assert gap < 20.0
+
+
+def test_a_capture_that_stayed_on_one_side_leaves_half_the_ring_empty() -> None:
+    angles = np.linspace(0.0, math.pi / 2.0, 12)
+    arc = np.column_stack([np.cos(angles), np.zeros(12), np.sin(angles)])
+
+    occupied, gap = _azimuth_coverage(arc, np.zeros(3))
+
+    assert occupied < 0.4
+    assert gap > 250.0
+
+
+def test_viewpoints_bunched_together_are_geometrically_redundant() -> None:
+    # Twenty viewpoints spread over 20 cm, ten metres from the object: the widest
+    # pair still sees it under about a degree, so none of them can triangulate.
+    origins = np.column_stack(
+        [np.linspace(0.0, 0.2, 20), np.zeros(20), np.full(20, -10.0)]
+    )
+
+    assert _useful_parallax_share(origins, np.zeros(3)) == 0.0
+
+
+def test_opposite_viewpoints_all_triangulate() -> None:
+    origins = np.array([[-5.0, 0.0, 0.0], [5.0, 0.0, 0.0], [0.0, 0.0, 5.0]])
+
+    assert _useful_parallax_share(origins, np.zeros(3)) == 1.0
+
+
+def test_a_uniform_space_has_no_hubs() -> None:
+    generator = np.random.default_rng(0)
+    vectors = generator.normal(size=(400, 32)).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+    result = hubness(vectors, k=5)
+
+    assert abs(result.skewness) < 1.0
+    assert result.hub_share == 0.0
+
+
+def test_a_cloud_with_a_centre_of_mass_grows_hubs_that_centring_removes() -> None:
+    # The mechanism the report claims: shift a high-dimensional cloud off the origin
+    # and the vectors nearest that shift become everyone's neighbour. Subtracting the
+    # mean is the whole fix, which is why the section prints both columns.
+    generator = np.random.default_rng(0)
+    offset = np.zeros(128)
+    offset[0] = 3.0
+    vectors = (generator.normal(size=(600, 128)) + offset).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+    raw = hubness(vectors, k=5)
+    centred = vectors - vectors.mean(axis=0, keepdims=True)
+    centred /= np.linalg.norm(centred, axis=1, keepdims=True)
+
+    assert raw.skewness > hubness(centred, k=5).skewness

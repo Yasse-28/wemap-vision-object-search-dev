@@ -373,6 +373,23 @@ Neither is free, so unlike mAP this has an **interior optimum**:
 | leader/canopy `eps` 2.0 *(today's default)* | 0.374 | 0.531 | 0.512 | 0.480 | 0.672 | 0.713 |
 | leader/canopy `eps` 1.25 | 0.231 | 0.629 | 0.484 | 0.512 | 0.712 | 0.692 |
 | incremental, sum δ 1.35 | 0.205 | 0.609 | 0.507 | 0.512 | 0.702 | 0.702 |
+
+**`hota` supersedes `pair_f1` for the same job** (added 2026-08-18). Pair counting
+weights an object by the square of its observation count, so one heavily-observed object
+can decide the ranking. HOTA averages the same partition agreement over *detections*
+instead: `ass_a` is the mean Jaccard overlap between a detection's cluster and its
+annotation's detection set, `det_a` is `TP/(TP+FP+FN)` counting detections against
+annotations, and `hota` is their geometric mean over five localisation radii. Splitting
+and merging cost `ass_a` symmetrically and leave `det_a` untouched — on vinci three
+`clustering_eps_m` values share `det_a` = 0.306 exactly while `ass_a` ranks them
+0.492 / 0.474 / 0.313. Every sweep row carries all three.
+
+Alongside them the sweep now reports **score calibration** — `ece`, `mce`,
+`overconfidence`, `accuracy_ceiling` and `threshold_spread_strict`. The last one is the
+p90−p10 of the per-prompt best thresholds, i.e. what a single shared threshold has to
+absorb. The reliability table in the JSON is the informative part: on vinci the score is
+monotone against correctness up to ~0.95 and **inverts** above it, which is why the
+acceptance threshold has never transferred between maps.
 | **multicut `geo_pivot` 1.5** | 0.270 | 0.596 | 0.533 | **0.523** | 0.702 | 0.710 |
 
 Three things follow.
@@ -960,10 +977,10 @@ we do not. The index restarts at zero in every manifest, so only the composite
 its own directory: the whole `metadata.parquet` re-placed in EUS, the manifest poses,
 the annotations, and `embeddings.npy` (a headerless raw float16 dump — `np.load`
 rejects it, which is why `ingest_cli` reads it with `fromfile`). No database, no ANN
-service, no candidate cache. Six sections (`s0` inventory and what is *missing*, `s1`
+service, no candidate cache. Seven sections (`s0` inventory and what is *missing*, `s1`
 per-detection distributions by detector, `s2` free labels and conditional PDFs, `s3`
-ground truth, `s4` pairwise cues, `s5` co-visible counting), a JSON payload, and
-GeoJSON layers for the livemap. Details and traps in
+ground truth **and observability**, `s4` pairwise cues, `s5` co-visible counting, `s6`
+embedding hubness), a JSON payload, and GeoJSON layers for the livemap. Details and traps in
 [`../toolbox/benchmark/README.md`](../toolbox/benchmark/README.md).
 
 Three facts it established that constrain any pipeline work (2026-08-18, both maps):
@@ -979,6 +996,23 @@ Three facts it established that constrain any pipeline work (2026-08-18, both ma
   where `chair` falls to x0.2). Detector score is close to flat against attachment;
 - **the embedding recognises the type, never the instance.** Of the ten nearest cutouts
   of a detection, 13-16 % sit on the same physical object (45-71 % on the same class).
+
+Three more the added measurements established (2026-08-18, vinci):
+
+- **the capture is not the limiting factor on vinci.** Every annotation has the full
+  twelve azimuth sectors available and 98 % of achieved observation pairs exceed 5° of
+  parallax, while achieved coverage sits at 0.67 — the geometry is there and the
+  association is not using it. `s3` reports the achieved/available pair for exactly this
+  reading, and counts annotations under a degenerate baseline as a capture ceiling;
+- **the embedding space is hubbed, and centring is most of the fix.** k-occurrence
+  skewness 3.96, antihubs 8.4 % — 8 % of cutouts are nobody's neighbour and no threshold
+  reaches them. Subtracting the mean embedding takes those to 1.95 and 2.7 %. Hubs are
+  *not* enriched in `gdino_venue` (65 % against a 76.9 % base rate), so this is a
+  geometry problem rather than a labelling one. See `s6`;
+- **detections are sampled on depth discontinuities five times more often than chance**
+  (5.3 % against 1.0 % of pixels; 16.6 % beyond 15 m), with a median in-box depth ratio
+  of 1.68. Flying pixels are rare (0.10 %) and are *not* the mechanism. See
+  `depth_boundary_quality.py`.
 
 ## Where images and depths come from
 
