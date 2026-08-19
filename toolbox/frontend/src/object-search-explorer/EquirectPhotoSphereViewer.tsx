@@ -55,6 +55,20 @@ export type HoveredDetection = {
   y: number;
 };
 
+/** A box in texture-ratio space the annotator can drag and resize, e.g. a reprojected suggestion. */
+export type EditableBox = {
+  u0: number;
+  v0: number;
+  u1: number;
+  v1: number;
+};
+
+type EditableBoxCorner = "nw" | "ne" | "se" | "sw";
+
+type BoxDragState =
+  | { mode: "corner"; corner: EditableBoxCorner; startBox: EditableBox }
+  | { mode: "move"; startBox: EditableBox; startRatio: { xRatio: number; yRatio: number } };
+
 type Props = {
   keyframeId: string;
   imageSrc: string;
@@ -67,6 +81,11 @@ type Props = {
   orientToken?: number;
   detections: MetadataRowRecord[];
   selectedRowIndex: number | null;
+  /** Rows that already carry a saved ground-truth annotation, styled apart from the rest. */
+  annotatedRowIndices?: ReadonlySet<number>;
+  /** A reprojected suggestion the annotator can drag and resize before saving it. */
+  editableBox?: EditableBox | null;
+  onEditableBoxChange?: (box: EditableBox) => void;
   depthPin: DepthPinMarker | null;
   polygonForDetection: (item: MetadataRowRecord) => Array<[number, number]>;
   onDepthPin: (xRatio: number, yRatio: number) => void;
@@ -100,6 +119,8 @@ type Runtime = {
   overlayGroup: THREE.Group;
   /** The rubber-band segment while a region is being traced, rebuilt on move. */
   liveDraftGroup: THREE.Group;
+  /** The reprojected suggestion box and its corner handles, rebuilt on every edit. */
+  editableBoxGroup: THREE.Group;
   /** One shared Vector2: `LineMaterial` reads it, so a resize is a single `set`. */
   resolution: THREE.Vector2;
   raycaster: THREE.Raycaster;
@@ -236,6 +257,61 @@ function disposeObject(object: THREE.Object3D): void {
   });
 }
 
+/** Orange: a suggestion awaiting the annotator's confirmation, not yet a record. */
+const EDITABLE_BOX_COLOR = 0xf97316;
+const EDITABLE_BOX_HANDLE_RADIUS = 8;
+const EDITABLE_BOX_CORNERS: readonly EditableBoxCorner[] = ["nw", "ne", "se", "sw"];
+
+/** Rebuilds the suggestion outline and its four drag handles from scratch. */
+function rebuildEditableBoxOverlay(runtime: Runtime, box: EditableBox | null): void {
+  const group = runtime.editableBoxGroup;
+  for (const child of group.children.slice()) {
+    group.remove(child);
+    disposeObject(child);
+  }
+  if (!box) {
+    return;
+  }
+  const corners: Array<[number, number]> = [
+    [box.u0, box.v0],
+    [box.u1, box.v0],
+    [box.u1, box.v1],
+    [box.u0, box.v1],
+  ];
+  const points: THREE.Vector3[] = [];
+  for (let index = 0; index < 4; index += 1) {
+    points.push(
+      ...interpolatedEdgePoints(corners[index], corners[(index + 1) % 4]).slice(
+        index === 0 ? 0 : 1,
+      ),
+    );
+  }
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const material = new THREE.LineBasicMaterial({
+    color: EDITABLE_BOX_COLOR,
+    depthTest: false,
+    transparent: true,
+    opacity: 1,
+  });
+  const line = new THREE.LineLoop(geometry, material);
+  line.userData.markerType = "editable-box";
+  line.renderOrder = 25;
+  group.add(line);
+
+  EDITABLE_BOX_CORNERS.forEach((corner, index) => {
+    const [u, v] = corners[index];
+    const handle = new THREE.Mesh(
+      new THREE.SphereGeometry(EDITABLE_BOX_HANDLE_RADIUS, 12, 10),
+      new THREE.MeshBasicMaterial({ color: EDITABLE_BOX_COLOR, depthTest: false }),
+    );
+    handle.position.copy(textureRatioToDirection(u, v, OVERLAY_RADIUS - 2));
+    handle.userData.markerType = "editable-box-handle";
+    handle.userData.corner = corner;
+    handle.renderOrder = 26;
+    group.add(handle);
+  });
+}
+
 export default function EquirectPhotoSphereViewer(props: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -255,6 +331,14 @@ export default function EquirectPhotoSphereViewer(props: Props) {
   /** The drawn box per row, so hovering restyles two lines instead of rebuilding. */
   const bboxLinesRef = useRef(new Map<number, THREE.LineLoop>());
   const selectedRowIndexRef = useRef(props.selectedRowIndex);
+  const annotatedRowIndicesRef = useRef(props.annotatedRowIndices);
+  /**
+   * The suggestion box's live value while it is being dragged. Only synced from
+   * `props.editableBox` in a dedicated effect (not on every render) so an unrelated
+   * re-render mid-drag cannot snap it back to the pre-drag prop.
+   */
+  const editableBoxRef = useRef<EditableBox | null>(props.editableBox ?? null);
+  const onEditableBoxChangeRef = useRef(props.onEditableBoxChange);
   const regionDrawActiveRef = useRef(props.regionDrawActive ?? false);
   const onRegionPointRef = useRef(props.onRegionPoint);
   const draftRegionRef = useRef<Array<[number, number]>>(props.draftRegion ?? []);
@@ -276,6 +360,8 @@ export default function EquirectPhotoSphereViewer(props: Props) {
   onNavigateRef.current = props.onNavigate;
   onHoverDetectionRef.current = props.onHoverDetection;
   selectedRowIndexRef.current = props.selectedRowIndex;
+  annotatedRowIndicesRef.current = props.annotatedRowIndices;
+  onEditableBoxChangeRef.current = props.onEditableBoxChange;
   regionDrawActiveRef.current = props.regionDrawActive ?? false;
   onRegionPointRef.current = props.onRegionPoint;
   draftRegionRef.current = props.draftRegion ?? [];
@@ -283,17 +369,25 @@ export default function EquirectPhotoSphereViewer(props: Props) {
   initialTextureYRatioRef.current = props.initialTextureYRatio;
 
   /**
-   * How a box reads: teal normally, red when it is the one being worked on, and blue
-   * — the annotation accent — while the cursor is over it. `linewidth` is ignored by
-   * most WebGL implementations, so the highlight has to be carried by colour and
-   * opacity rather than by a thicker stroke.
+   * How a box reads: teal normally, violet when a ground-truth annotation is already
+   * saved for it, red when it is the one being worked on, and blue — the annotation
+   * accent — while the cursor is over it. `linewidth` is ignored by most WebGL
+   * implementations, so the highlight has to be carried by colour and opacity rather
+   * than by a thicker stroke.
    */
-  const styleBboxLine = (line: THREE.LineLoop, selected: boolean, hovered: boolean) => {
+  const styleBboxLine = (
+    line: THREE.LineLoop,
+    selected: boolean,
+    hovered: boolean,
+    annotated: boolean,
+  ) => {
     const material = line.material as THREE.LineBasicMaterial;
-    material.color.setHex(hovered ? 0x2563eb : selected ? 0xff6b6b : 0x11b5ae);
-    material.opacity = hovered || selected ? 1 : 0.9;
+    material.color.setHex(
+      hovered ? 0x2563eb : selected ? 0xff6b6b : annotated ? 0x8b5cf6 : 0x11b5ae,
+    );
+    material.opacity = hovered || selected ? 1 : annotated ? 0.95 : 0.9;
     material.needsUpdate = true;
-    line.renderOrder = hovered ? 30 : selected ? 20 : 10;
+    line.renderOrder = hovered ? 30 : selected ? 20 : annotated ? 15 : 10;
   };
 
   const reportView = (runtime: Runtime, immediate = false) => {
@@ -353,6 +447,8 @@ export default function EquirectPhotoSphereViewer(props: Props) {
     scene.add(overlayGroup);
     const liveDraftGroup = new THREE.Group();
     scene.add(liveDraftGroup);
+    const editableBoxGroup = new THREE.Group();
+    scene.add(editableBoxGroup);
     const floorCursor = new THREE.Mesh(
       new THREE.CircleGeometry(FLOOR_CURSOR_RADIUS_M, 32),
       new THREE.MeshBasicMaterial({
@@ -401,6 +497,7 @@ export default function EquirectPhotoSphereViewer(props: Props) {
       geometry,
       overlayGroup,
       liveDraftGroup,
+      editableBoxGroup,
       resolution: new THREE.Vector2(1, 1),
       raycaster: new THREE.Raycaster(),
       pointer: new THREE.Vector2(),
@@ -423,6 +520,7 @@ export default function EquirectPhotoSphereViewer(props: Props) {
     };
     runtime.raycaster.params.Line = { threshold: 3 };
     runtimeRef.current = runtime;
+    rebuildEditableBoxOverlay(runtime, editableBoxRef.current);
 
     const resize = () => {
       const width = Math.max(1, container.clientWidth);
@@ -439,6 +537,8 @@ export default function EquirectPhotoSphereViewer(props: Props) {
 
     let isDragging = false;
     let isTouchActive = false;
+    /** Set while a suggestion box handle or body is being dragged; blocks look-around. */
+    let boxDrag: BoxDragState | null = null;
     let previousX = 0;
     let previousY = 0;
     let downX = 0;
@@ -569,6 +669,96 @@ export default function EquirectPhotoSphereViewer(props: Props) {
       return directionToTextureRatio(runtime.raycaster.ray.direction);
     };
 
+    /** Where the cursor points on the sphere, ignoring whatever marker sits under it. */
+    const rayTextureRatio = (
+      clientX: number,
+      clientY: number,
+    ): { xRatio: number; yRatio: number } | null => {
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) {
+        return null;
+      }
+      runtime.pointer.set(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      runtime.raycaster.setFromCamera(runtime.pointer, camera);
+      return directionToTextureRatio(runtime.raycaster.ray.direction);
+    };
+
+    const isInsideEditableBox = (xRatio: number, yRatio: number): boolean => {
+      const box = editableBoxRef.current;
+      if (!box) {
+        return false;
+      }
+      const v0 = Math.min(box.v0, box.v1);
+      const v1 = Math.max(box.v0, box.v1);
+      if (yRatio < v0 || yRatio > v1) {
+        return false;
+      }
+      const u0 = Math.min(box.u0, box.u1);
+      const u1 = Math.max(box.u0, box.u1);
+      return [xRatio - 1, xRatio, xRatio + 1].some((u) => u >= u0 && u <= u1);
+    };
+
+    const hitEditableBoxHandle = (
+      clientX: number,
+      clientY: number,
+    ): EditableBoxCorner | null => {
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height || !runtime.editableBoxGroup.children.length) {
+        return null;
+      }
+      runtime.pointer.set(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      runtime.raycaster.setFromCamera(runtime.pointer, camera);
+      const hits = runtime.raycaster.intersectObjects(runtime.editableBoxGroup.children, false);
+      const hit = hits.find((item) => item.object.userData.markerType === "editable-box-handle");
+      return (hit?.object.userData.corner as EditableBoxCorner | undefined) ?? null;
+    };
+
+    /** Applies the cursor's current ray to whatever the drag grabbed, and redraws. */
+    const updateBoxDrag = (clientX: number, clientY: number) => {
+      if (!boxDrag) {
+        return;
+      }
+      const ratio = rayTextureRatio(clientX, clientY);
+      if (!ratio) {
+        return;
+      }
+      let next: EditableBox;
+      if (boxDrag.mode === "corner") {
+        next = { ...boxDrag.startBox };
+        if (boxDrag.corner === "nw") {
+          next.u0 = ratio.xRatio;
+          next.v0 = ratio.yRatio;
+        } else if (boxDrag.corner === "ne") {
+          next.u1 = ratio.xRatio;
+          next.v0 = ratio.yRatio;
+        } else if (boxDrag.corner === "se") {
+          next.u1 = ratio.xRatio;
+          next.v1 = ratio.yRatio;
+        } else {
+          next.u0 = ratio.xRatio;
+          next.v1 = ratio.yRatio;
+        }
+      } else {
+        const du = ratio.xRatio - boxDrag.startRatio.xRatio;
+        const dv = ratio.yRatio - boxDrag.startRatio.yRatio;
+        next = {
+          u0: boxDrag.startBox.u0 + du,
+          u1: boxDrag.startBox.u1 + du,
+          v0: clamp(boxDrag.startBox.v0 + dv, 0, 1),
+          v1: clamp(boxDrag.startBox.v1 + dv, 0, 1),
+        };
+      }
+      editableBoxRef.current = next;
+      rebuildEditableBoxOverlay(runtime, next);
+      runtime.dirty = true;
+    };
+
     const reportHover = (hovered: HoveredDetection | null) => {
       const nextRowIndex = hovered?.rowIndex ?? null;
       if (nextRowIndex === null && hoveredRowIndexRef.current === null) {
@@ -584,7 +774,12 @@ export default function EquirectPhotoSphereViewer(props: Props) {
           }
           const line = bboxLinesRef.current.get(rowIndex);
           if (line) {
-            styleBboxLine(line, rowIndex === selectedRowIndex, rowIndex === nextRowIndex);
+            styleBboxLine(
+              line,
+              rowIndex === selectedRowIndex,
+              rowIndex === nextRowIndex,
+              annotatedRowIndicesRef.current?.has(rowIndex) ?? false,
+            );
           }
         }
         runtime.dirty = true;
@@ -635,6 +830,25 @@ export default function EquirectPhotoSphereViewer(props: Props) {
     const onMouseDown = (event: MouseEvent) => {
       if (isTouchActive) {
         return;
+      }
+      if (!regionDrawActiveRef.current && !event.ctrlKey && !event.metaKey) {
+        const handle = hitEditableBoxHandle(event.clientX, event.clientY);
+        const box = editableBoxRef.current;
+        if (handle && box) {
+          boxDrag = { mode: "corner", corner: handle, startBox: { ...box } };
+          downX = previousX = event.clientX;
+          downY = previousY = event.clientY;
+          return;
+        }
+        if (box) {
+          const ratio = rayTextureRatio(event.clientX, event.clientY);
+          if (ratio && isInsideEditableBox(ratio.xRatio, ratio.yRatio)) {
+            boxDrag = { mode: "move", startBox: { ...box }, startRatio: ratio };
+            downX = previousX = event.clientX;
+            downY = previousY = event.clientY;
+            return;
+          }
+        }
       }
       isDragging = true;
       downX = previousX = event.clientX;
@@ -687,6 +901,10 @@ export default function EquirectPhotoSphereViewer(props: Props) {
     const onMouseMove = (event: MouseEvent) => {
       updateDepthProjectionCursor(event);
       updateLiveDraft(event.clientX, event.clientY);
+      if (boxDrag) {
+        updateBoxDrag(event.clientX, event.clientY);
+        return;
+      }
       if (isDragging) {
         reportHover(null);
         updateView(event.clientX, event.clientY);
@@ -700,6 +918,14 @@ export default function EquirectPhotoSphereViewer(props: Props) {
       }
     };
     const onMouseUp = (event: MouseEvent) => {
+      if (boxDrag) {
+        boxDrag = null;
+        const box = editableBoxRef.current;
+        if (box) {
+          onEditableBoxChangeRef.current?.(box);
+        }
+        return;
+      }
       if (!isDragging) {
         return;
       }
@@ -937,6 +1163,18 @@ export default function EquirectPhotoSphereViewer(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.orientToken]);
 
+  // Only reacts to the prop identity changing — never to an unrelated re-render — so
+  // it cannot stomp on a box mid-drag, which updates the same ref imperatively.
+  useEffect(() => {
+    editableBoxRef.current = props.editableBox ?? null;
+    const runtime = runtimeRef.current;
+    if (!runtime) {
+      return;
+    }
+    rebuildEditableBoxOverlay(runtime, editableBoxRef.current);
+    runtime.dirty = true;
+  }, [props.editableBox]);
+
   useEffect(() => {
     const runtime = runtimeRef.current;
     if (!runtime) {
@@ -996,7 +1234,12 @@ export default function EquirectPhotoSphereViewer(props: Props) {
       const line = new THREE.LineLoop(geometry, material);
       line.userData.markerType = "bbox";
       // A rebuild must not drop the highlight the cursor is currently sitting on.
-      styleBboxLine(line, selected, item.row_index === hoveredRowIndexRef.current);
+      styleBboxLine(
+        line,
+        selected,
+        item.row_index === hoveredRowIndexRef.current,
+        annotatedRowIndicesRef.current?.has(item.row_index) ?? false,
+      );
       bboxLinesRef.current.set(item.row_index, line);
       runtime.overlayGroup.add(line);
     }
@@ -1083,6 +1326,7 @@ export default function EquirectPhotoSphereViewer(props: Props) {
     props.regionDrawActive,
     props.polygonForDetection,
     props.selectedRowIndex,
+    props.annotatedRowIndices,
   ]);
 
   /** One button press, as a ratio of the current field of view. */

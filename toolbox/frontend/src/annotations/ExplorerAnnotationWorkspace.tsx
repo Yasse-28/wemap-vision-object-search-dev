@@ -404,13 +404,8 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
     setDraft(null);
   }
 
-  function editAnnotation(annotation: AnnotationFeature) {
-    if (annotation.annotationType !== "point") {
-      return;
-    }
-    setDraft(null);
-    setEditingAnnotationId(annotation.id);
-    setSelectedAnnotationId(annotation.id);
+  /** The fields `editAnnotation` and `beginSuggestedDraft` both load into the form. */
+  function prefillFromAnnotation(annotation: AnnotationFeature) {
     setActiveClassKey(annotationClassKey(annotation));
     setPromptInput(annotation.prompt ?? "");
     setAltitudeInput(annotation.altitude === null ? "" : String(annotation.altitude));
@@ -430,6 +425,31 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
     );
     setClutterInput(annotation.groundTruth.labels.clutter.join(", "));
     setIsDepictionInput(annotation.groundTruth.isDepiction);
+  }
+
+  function editAnnotation(annotation: AnnotationFeature) {
+    if (annotation.annotationType !== "point") {
+      return;
+    }
+    setDraft(null);
+    setEditingAnnotationId(annotation.id);
+    setSelectedAnnotationId(annotation.id);
+    prefillFromAnnotation(annotation);
+    setErrorMessage(null);
+    setInfoMessage(null);
+  }
+
+  /**
+   * Loads another annotation's fields (same object, same class, same labels) without
+   * entering edit mode, so the point the caller resolves next is saved as a new
+   * record — the reprojection flow's "suggest this object here too".
+   */
+  function beginSuggestedDraft(annotation: AnnotationFeature) {
+    if (annotation.annotationType !== "point") {
+      return;
+    }
+    setEditingAnnotationId(null);
+    prefillFromAnnotation(annotation);
     setErrorMessage(null);
     setInfoMessage(null);
   }
@@ -584,6 +604,7 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
     selectedAnnotationId,
     editingAnnotation,
     editAnnotation,
+    beginSuggestedDraft,
     cancelAnnotationEdit,
     saveAnnotationEdit,
     markers,
@@ -1798,7 +1819,7 @@ function classKey(item: AnnotationClass): string {
   return `${item.name}::${item.annotationType}`;
 }
 
-function annotationClassKey(item: AnnotationFeature): string {
+export function annotationClassKey(item: AnnotationFeature): string {
   return `${item.className}::${item.annotationType}`;
 }
 

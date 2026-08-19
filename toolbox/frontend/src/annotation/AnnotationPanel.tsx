@@ -5,20 +5,30 @@ import DismissibleAlert from "../DismissibleAlert";
 import {
   ExplorerAnnotationControls,
   ExplorerAnnotationList,
+  annotationClassKey,
   canSaveAnnotation,
   useExplorerAnnotationWorkspace,
 } from "../annotations/ExplorerAnnotationWorkspace";
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
-import type { LivemapMarker, LivemapSegment } from "../annotations/types";
+import CollapsibleSection from "../annotations/CollapsibleSection";
+import type { AnnotationFeature, LivemapMarker, LivemapSegment } from "../annotations/types";
 import {
   fetchMetadataMarkers,
   fetchMetadataRows,
+  fetchProposalNeighborProjections,
   indexKeyframeEquirectPreviewUrl,
+  proposalNeighborProjectionRenderUrl,
   resolveDepthPin,
   rowThumbnailUrl,
 } from "../index-explorer/api";
-import type { KeyframeMarker, MetadataRowRecord } from "../index-explorer/types";
+import type {
+  KeyframeMarker,
+  MetadataRowRecord,
+  ProposalNeighborProjection,
+  ProposalNeighborProjectionsResponse,
+} from "../index-explorer/types";
 import { bboxPolygonRatios } from "../object-search-explorer/bboxPostProcess";
+import type { EditableBox } from "../object-search-explorer/EquirectPhotoSphereViewer";
 import { buildKeyframeTrack } from "../object-search-explorer/keyframeTrack";
 import {
   EQUIRECT_FRAME_MAX,
@@ -72,6 +82,40 @@ const CONE_FOV_DEG = 60;
 /** Rows per keyframe are in the tens; one request covers the turn. */
 const ROWS_PER_KEYFRAME = 500;
 const DEPTH_PIN_MIN_DEPTH_M = 0.35;
+/** How many nearby keyframes to offer once an object is annotated. */
+const NEIGHBOR_SUGGESTION_COUNT = 6;
+
+/** An object already described on one keyframe, offered on another via reprojection. */
+type SuggestionSource = { annotation: AnnotationFeature; rowIndex: number };
+
+/**
+ * A suggestion the annotator is positioning on `targetKeyframeId`. `box` is what the
+ * viewer renders and lets the annotator drag; `orientYawRad` only fires once, when
+ * the panorama first lands on that keyframe, so it does not fight a look-around.
+ */
+type ActiveSuggestion = {
+  source: SuggestionSource;
+  originKeyframeId: string;
+  targetKeyframeId: string;
+  orientYawRad: number;
+  box: EditableBox;
+};
+
+function boxCenterRatio(box: EditableBox): { xRatio: number; yRatio: number } {
+  return { xRatio: (box.u0 + box.u1) / 2, yRatio: (box.v0 + box.v1) / 2 };
+}
+
+/** A reprojected point + angular size, converted to the box the viewer overlays. */
+function editableBoxFromProjection(projection: ProposalNeighborProjection): EditableBox {
+  const halfWidthRatio = projection.angular_width / (2 * Math.PI) / 2;
+  const halfHeightRatio = projection.angular_height / Math.PI / 2;
+  return {
+    u0: projection.erp_u - halfWidthRatio,
+    u1: projection.erp_u + halfWidthRatio,
+    v0: projection.erp_v - halfHeightRatio,
+    v1: projection.erp_v + halfHeightRatio,
+  };
+}
 
 type Mode = "object" | "zones" | "review";
 
@@ -119,6 +163,18 @@ function AnnotationPanel(props: {
   /** The outline being traced over an object no detector proposed. */
   const [regionVertices, setRegionVertices] = useState<RegionVertex[]>([]);
   const [isDrawingRegion, setIsDrawingRegion] = useState(false);
+  // The object just annotated, and where reprojection says it should also appear.
+  const [suggestionSource, setSuggestionSource] = useState<SuggestionSource | null>(null);
+  const [neighborSuggestions, setNeighborSuggestions] =
+    useState<ProposalNeighborProjectionsResponse | null>(null);
+  const [neighborSuggestionsError, setNeighborSuggestionsError] = useState<string | null>(null);
+  const [neighborSuggestionsLoading, setNeighborSuggestionsLoading] = useState(false);
+  // The suggestion the annotator is currently positioning, if any.
+  const [activeSuggestion, setActiveSuggestion] = useState<ActiveSuggestion | null>(null);
+  // In suggestion review, the viewer fills the overlay instead of the resized
+  // frame height, so its pixel height is tracked separately from a live measurement.
+  const suggestionViewerRef = useRef<HTMLDivElement | null>(null);
+  const [suggestionViewerHeight, setSuggestionViewerHeight] = useState<number | null>(null);
   const {
     height: viewerHeight,
     isDragging: isResizingViewer,
@@ -136,10 +192,22 @@ function AnnotationPanel(props: {
   const startedForRowRef = useRef<number | null>(null);
   const advanceOnSaveRef = useRef(false);
   const savedCountRef = useRef(0);
+  const neighborSuggestionRequestRef = useRef(0);
+  // Which suggestion's geometry has already been resolved, so re-renders that leave
+  // it unchanged do not re-issue the depth-pin request.
+  const startedSuggestionRef = useRef<ActiveSuggestion | null>(null);
+  // Set right before a save, so the length-increase effect below can tell an actual
+  // save apart from the store's initial bulk load of existing annotations — only the
+  // former should offer reprojection.
+  const suggestAfterSaveRef = useRef(false);
 
   useEffect(() => {
     setHandoff(readHandoff(props.mapId));
     startedForRowRef.current = null;
+    setSuggestionSource(null);
+    setNeighborSuggestions(null);
+    setNeighborSuggestionsError(null);
+    setActiveSuggestion(null);
   }, [props.mapId]);
 
   const updateHandoff = useCallback(
@@ -211,6 +279,26 @@ function AnnotationPanel(props: {
   const selectedRow = useMemo(
     () => rows.find((row) => row.row_index === handoff.rowIndex) ?? null,
     [rows, handoff.rowIndex],
+  );
+
+  // Rows on this keyframe that already carry a saved ground-truth annotation, so a
+  // click on one re-opens what is already known instead of a blank draft.
+  const annotationByRowIndex = useMemo(() => {
+    const map = new Map<number, (typeof workspace.annotations)[number]>();
+    if (!keyframeId) {
+      return map;
+    }
+    for (const annotation of workspace.annotations) {
+      if (annotation.source?.keyframeId === keyframeId && annotation.source.rowIndex !== null) {
+        map.set(annotation.source.rowIndex, annotation);
+      }
+    }
+    return map;
+  }, [workspace.annotations, keyframeId]);
+
+  const annotatedRowIndices = useMemo(
+    () => new Set(annotationByRowIndex.keys()),
+    [annotationByRowIndex],
   );
 
   const keyframeMarker = useMemo(
@@ -312,8 +400,24 @@ function AnnotationPanel(props: {
       return;
     }
     startedForRowRef.current = handoff.rowIndex;
+    // Already annotated: reopen the saved record instead of starting a blank draft.
+    const existing =
+      handoff.rowIndex !== null ? annotationByRowIndex.get(handoff.rowIndex) : undefined;
+    if (existing) {
+      workspace.editAnnotation(existing);
+      return;
+    }
     startDraftForRow(selectedRow);
-  }, [keyframeId, isLoadingRows, handoff.rowIndex, handoff.pin, selectedRow, startDraftForRow]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    keyframeId,
+    isLoadingRows,
+    handoff.rowIndex,
+    handoff.pin,
+    selectedRow,
+    startDraftForRow,
+    annotationByRowIndex,
+  ]);
 
   // Point the panorama at whatever is being annotated. `theta_center` is the yaw the
   // viewer takes, which is how the Explorer opens a neighbour projection too.
@@ -333,16 +437,96 @@ function AnnotationPanel(props: {
     setErpPin(null);
   }, [keyframeId]);
 
+  // Once the panorama lands on the suggestion's keyframe, aim at it — but only the
+  // once: this must not fight a look-around the annotator starts afterwards.
+  useEffect(() => {
+    if (!activeSuggestion || activeSuggestion.targetKeyframeId !== keyframeId) {
+      return;
+    }
+    setOrient((previous) => ({
+      yawRad: activeSuggestion.orientYawRad,
+      token: (previous?.token ?? 0) + 1,
+    }));
+  }, [activeSuggestion, keyframeId]);
+
+  // A manual row pick abandons whatever suggestion was being positioned.
+  useEffect(() => {
+    if (handoff.rowIndex !== null) {
+      setActiveSuggestion(null);
+    }
+  }, [handoff.rowIndex]);
+
+  /** What reprojection says about where else `annotation`'s object should appear. */
+  const loadNeighborSuggestions = useCallback(
+    async (annotation: AnnotationFeature) => {
+      const rowIndex = annotation.source?.rowIndex;
+      if (rowIndex == null) {
+        return;
+      }
+      const requestId = neighborSuggestionRequestRef.current + 1;
+      neighborSuggestionRequestRef.current = requestId;
+      setSuggestionSource({ annotation, rowIndex });
+      setActiveSuggestion(null);
+      setNeighborSuggestions(null);
+      setNeighborSuggestionsLoading(true);
+      setNeighborSuggestionsError(null);
+      try {
+        const payload = await fetchProposalNeighborProjections(
+          props.mapId,
+          rowIndex,
+          NEIGHBOR_SUGGESTION_COUNT,
+        );
+        if (neighborSuggestionRequestRef.current === requestId) {
+          setNeighborSuggestions(payload);
+        }
+      } catch (error) {
+        if (neighborSuggestionRequestRef.current === requestId) {
+          setNeighborSuggestionsError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (neighborSuggestionRequestRef.current === requestId) {
+          setNeighborSuggestionsLoading(false);
+        }
+      }
+    },
+    [props.mapId],
+  );
+
+  // Resolves the suggestion box's centre into a depth-anchored point: once when it
+  // is opened, and again every time a drag commits a new position.
+  useEffect(() => {
+    if (!activeSuggestion || activeSuggestion.targetKeyframeId !== keyframeId) {
+      return;
+    }
+    if (startedSuggestionRef.current === activeSuggestion) {
+      return;
+    }
+    startedSuggestionRef.current = activeSuggestion;
+    const center = boxCenterRatio(activeSuggestion.box);
+    startDraft({ projection: "erp", xRatio: center.xRatio, yRatio: center.yRatio, rowIndex: null });
+  }, [activeSuggestion, keyframeId, startDraft]);
+
   // `saveDraft` reports success by clearing the draft and appending the stored row;
-  // that is the only signal the queue may advance on.
+  // that is the only signal the queue may advance on, and the only moment a fresh
+  // annotation exists to reproject suggestions from.
   useEffect(() => {
     const count = workspace.annotations.length;
-    if (advanceOnSaveRef.current && count > savedCountRef.current) {
-      advanceOnSaveRef.current = false;
-      updateHandoff(withValidated(handoff));
+    if (count > savedCountRef.current) {
+      const saved = workspace.annotations[count - 1];
+      if (advanceOnSaveRef.current) {
+        advanceOnSaveRef.current = false;
+        updateHandoff(withValidated(handoff));
+      }
+      if (suggestAfterSaveRef.current) {
+        suggestAfterSaveRef.current = false;
+        setActiveSuggestion(null);
+        if (saved) {
+          void loadNeighborSuggestions(saved);
+        }
+      }
     }
     savedCountRef.current = count;
-  }, [workspace.annotations.length, handoff, updateHandoff]);
+  }, [workspace.annotations.length, handoff, updateHandoff, loadNeighborSuggestions]);
 
   const cone = useMemo<LivemapCone | null>(() => {
     if (!keyframeMarker || keyframeMarker.heading_deg == null) {
@@ -411,6 +595,65 @@ function AnnotationPanel(props: {
     },
     [markers, props.mapId, updateHandoff],
   );
+
+  const openNeighborSuggestion = useCallback(
+    (projection: ProposalNeighborProjection) => {
+      if (!suggestionSource || !keyframeId) {
+        return;
+      }
+      // The class does not change with the keyframe, so the labels-refill effect
+      // below must see it as unchanged too, or it would overwrite the prefilled
+      // synonyms with that class's generic defaults.
+      lastClassKeyRef.current = annotationClassKey(suggestionSource.annotation);
+      workspace.beginSuggestedDraft(suggestionSource.annotation);
+      setActiveSuggestion({
+        source: suggestionSource,
+        originKeyframeId: keyframeId,
+        targetKeyframeId: projection.keyframe_id,
+        orientYawRad: projection.theta_center,
+        box: editableBoxFromProjection(projection),
+      });
+      selectKeyframe(projection.keyframe_id);
+    },
+    [suggestionSource, keyframeId, selectKeyframe, workspace],
+  );
+
+  const closeSuggestionReview = useCallback(() => {
+    if (!activeSuggestion) {
+      return;
+    }
+    if (workspace.editingAnnotation) {
+      workspace.cancelAnnotationEdit();
+    } else {
+      workspace.discardDraft();
+    }
+    const { originKeyframeId } = activeSuggestion;
+    setActiveSuggestion(null);
+    selectKeyframe(originKeyframeId);
+  }, [activeSuggestion, workspace, selectKeyframe]);
+
+  const isReviewingSuggestion = Boolean(
+    activeSuggestion && activeSuggestion.targetKeyframeId === keyframeId,
+  );
+
+  useEffect(() => {
+    if (!isReviewingSuggestion) {
+      setSuggestionViewerHeight(null);
+      return;
+    }
+    const node = suggestionViewerRef.current;
+    if (!node) {
+      return;
+    }
+    const observer = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height;
+      if (height) {
+        setSuggestionViewerHeight(height);
+      }
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [isReviewingSuggestion]);
 
   const cancelRegion = useCallback(() => {
     setIsDrawingRegion(false);
@@ -552,6 +795,80 @@ function AnnotationPanel(props: {
   const remaining = handoff.queue.filter((row) => !handoff.done.includes(row)).length;
   const canSave = canSaveAnnotation(workspace);
 
+  // Rendered either inline below the viewer, or — while reviewing a suggestion —
+  // inside the large-view overlay, so the annotator can still edit and save
+  // without the overlay hiding them.
+  const objectControlsNode =
+    mode === "object" ? (
+      <ExplorerAnnotationControls
+        workspace={workspace}
+        sections={["mode", "classes", "object", "metadata"]}
+        bare
+        hideSaveActions
+        extentSuggestion={extentSuggestion}
+      />
+    ) : null;
+
+  const actionBarNode =
+    mode === "object" && keyframeId ? (
+      <div className="annotation-action-bar">
+        <button
+          type="button"
+          className="primary-button is-annotation"
+          disabled={!canSave}
+          onClick={() => {
+            advanceOnSaveRef.current = handoff.queue.length > 1;
+            suggestAfterSaveRef.current = true;
+            if (workspace.editingAnnotation) {
+              workspace.saveAnnotationEdit();
+            } else {
+              workspace.saveDraft();
+            }
+          }}
+        >
+          {workspace.editingAnnotation
+            ? "Update annotation"
+            : handoff.queue.length > 1
+              ? "Save and next"
+              : "Save annotation"}
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={handoff.queue.length < 2}
+          title="Move to the next proposal in the queue without saving this one"
+          onClick={() => updateHandoff(withSkipped(handoff))}
+        >
+          Skip
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={!workspace.draft && !workspace.editingAnnotation}
+          title="Drop the resolved point and start this proposal again"
+          onClick={() => {
+            if (activeSuggestion && activeSuggestion.targetKeyframeId === keyframeId) {
+              closeSuggestionReview();
+              return;
+            }
+            setActiveSuggestion(null);
+            if (workspace.editingAnnotation) {
+              workspace.cancelAnnotationEdit();
+            } else {
+              workspace.discardDraft();
+            }
+          }}
+        >
+          Discard
+        </button>
+        <span className="annotation-action-hint">
+          {activeSuggestion && activeSuggestion.targetKeyframeId === keyframeId
+            ? "Positioning a suggested copy of this object — drag the corners, then save."
+            : `${remaining} left in this queue · the point is re-resolved on the newest manifest`}
+        </span>
+      </div>
+    ) : null;
+
   if (!props.isMapKnown) {
     return (
       <section className="annotation-panel-tab page-section">
@@ -605,7 +922,22 @@ function AnnotationPanel(props: {
       {rowsError ? <p className="error-box">{rowsError}</p> : null}
 
       <div className={`annotation-capsule${isMapOpen ? "" : " is-map-collapsed"}`}>
-        <div className="annotation-capsule-main">
+        <div
+          className={`annotation-capsule-main${
+            isReviewingSuggestion ? " is-suggestion-review" : ""
+          }`}
+        >
+          {isReviewingSuggestion ? (
+            <button
+              type="button"
+              className="annotation-suggestion-close"
+              aria-label="Close suggestion review"
+              title="Close this suggestion (discards the positioned copy)"
+              onClick={closeSuggestionReview}
+            >
+              ×
+            </button>
+          ) : null}
           <div className="annotation-capsule-bar">
             <span className="explorer-context-label">Keyframe</span>
             <strong className="annotation-capsule-id">{keyframeId ?? "none"}</strong>
@@ -736,10 +1068,13 @@ function AnnotationPanel(props: {
           {keyframeId ? (
             <>
               <div
+                ref={suggestionViewerRef}
                 className={`annotation-capsule-viewer${
                   hoveredRowIndex !== null ? " is-over-detection" : ""
-                }${isDrawingRegion ? " is-drawing-region" : ""}`}
-                style={{ height: viewerHeight }}
+                }${isDrawingRegion ? " is-drawing-region" : ""}${
+                  isReviewingSuggestion ? " is-suggestion-review-viewer" : ""
+                }`}
+                style={isReviewingSuggestion ? undefined : { height: viewerHeight }}
                 onPointerDown={(event) => {
                   pointerDownRef.current = { x: event.clientX, y: event.clientY };
                 }}
@@ -767,13 +1102,26 @@ function AnnotationPanel(props: {
                     imageSrc={indexKeyframeEquirectPreviewUrl(props.mapId, keyframeId, null, undefined, {
                       drawBoxes: false,
                     })}
-                    height={viewerHeight}
+                    height={
+                      isReviewingSuggestion && suggestionViewerHeight
+                        ? suggestionViewerHeight
+                        : viewerHeight
+                    }
                     initialYawRad={selectedRow?.theta_center ?? 0}
                     initialTextureYRatio={0.5}
                     orientYawRad={orient?.yawRad}
                     orientToken={orient?.token}
                     detections={rows}
                     selectedRowIndex={handoff.rowIndex}
+                    annotatedRowIndices={annotatedRowIndices}
+                    editableBox={
+                      activeSuggestion && activeSuggestion.targetKeyframeId === keyframeId
+                        ? activeSuggestion.box
+                        : null
+                    }
+                    onEditableBoxChange={(box) =>
+                      setActiveSuggestion((current) => (current ? { ...current, box } : current))
+                    }
                     depthPin={erpPin}
                     polygonForDetection={bboxPolygonRatios}
                     onDepthPin={(xRatio, yRatio) =>
@@ -790,19 +1138,21 @@ function AnnotationPanel(props: {
                   />
                 </Suspense>
               </div>
-              <div
-                className={`object-search-explorer-equirect-resizer${
-                  isResizingViewer ? " is-dragging" : ""
-                }`}
-                role="separator"
-                aria-orientation="horizontal"
-                aria-label="Resize the panorama"
-                aria-valuenow={viewerHeight}
-                aria-valuemin={EQUIRECT_FRAME_MIN}
-                aria-valuemax={EQUIRECT_FRAME_MAX}
-                title="Drag to resize the panorama"
-                onPointerDown={startViewerResize}
-              />
+              {isReviewingSuggestion ? null : (
+                <div
+                  className={`object-search-explorer-equirect-resizer${
+                    isResizingViewer ? " is-dragging" : ""
+                  }`}
+                  role="separator"
+                  aria-orientation="horizontal"
+                  aria-label="Resize the panorama"
+                  aria-valuenow={viewerHeight}
+                  aria-valuemin={EQUIRECT_FRAME_MIN}
+                  aria-valuemax={EQUIRECT_FRAME_MAX}
+                  title="Drag to resize the panorama"
+                  onPointerDown={startViewerResize}
+                />
+              )}
               <AngularRibbon
                 rows={rows}
                 selectedRowIndex={handoff.rowIndex}
@@ -810,6 +1160,12 @@ function AnnotationPanel(props: {
                 queuedRowIndices={handoff.queue}
                 onSelect={(rowIndex) => updateHandoff(withSelection(handoff, rowIndex))}
               />
+              {isReviewingSuggestion ? (
+                <div className="annotation-suggestion-review-controls">
+                  {objectControlsNode}
+                  {actionBarNode}
+                </div>
+              ) : null}
             </>
           ) : (
             <p className="annotation-capsule-empty">
@@ -882,69 +1238,79 @@ function AnnotationPanel(props: {
       </div>
 
       <div className="annotation-mode-body">
-        {mode === "object" ? (
-          <ExplorerAnnotationControls
-            workspace={workspace}
-            sections={["mode", "classes", "object", "metadata"]}
-            bare
-            hideSaveActions
-            extentSuggestion={extentSuggestion}
-          />
+        {mode === "object" && suggestionSource ? (
+          <CollapsibleSection
+            title="Suggested on nearby keyframes"
+            summary={
+              neighborSuggestionsLoading
+                ? "Projecting..."
+                : neighborSuggestions
+                  ? `${neighborSuggestions.projections.length} views`
+                  : "—"
+            }
+            defaultOpen
+          >
+            <p className="map-caption">
+              Same object ({suggestionSource.annotation.groundTruth.objectId ?? "unnamed"}),
+              reprojected from keyframe {suggestionSource.annotation.source?.keyframeId}. The
+              box lands close but rarely exact — drag its corners to fit before saving.
+            </p>
+            {neighborSuggestionsError ? (
+              <p className="warning-box" role="alert">
+                {neighborSuggestionsError}
+              </p>
+            ) : null}
+            {neighborSuggestions ? (
+              neighborSuggestions.projections.length ? (
+                <div className="annotation-suggestion-strip">
+                  {neighborSuggestions.projections.map((projection) => (
+                    <button
+                      key={projection.keyframe_id}
+                      type="button"
+                      className={`annotation-suggestion-thumb${
+                        activeSuggestion?.targetKeyframeId === projection.keyframe_id
+                          ? " is-active"
+                          : ""
+                      }`}
+                      aria-label={`Suggest this object on keyframe ${projection.keyframe_id}`}
+                      title={`Keyframe ${projection.keyframe_id} · ${projection.distance_from_source_m.toFixed(
+                        1,
+                      )} m from source · ${(projection.geometric_confidence * 100).toFixed(0)}% confidence`}
+                      onClick={() => openNeighborSuggestion(projection)}
+                    >
+                      <span className="annotation-suggestion-thumb-stage">
+                        <img
+                          src={proposalNeighborProjectionRenderUrl(
+                            props.mapId,
+                            suggestionSource.rowIndex,
+                            projection.keyframe_id,
+                            { size: 160, fovScale: 2 },
+                          )}
+                          alt={`Object projected into keyframe ${projection.keyframe_id}`}
+                          loading="lazy"
+                        />
+                        <span className="object-search-neighbor-projection-box" aria-hidden="true" />
+                      </span>
+                      <span className="annotation-suggestion-thumb-caption">
+                        Keyframe {projection.keyframe_id}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">{neighborSuggestions.note}</p>
+              )
+            ) : null}
+          </CollapsibleSection>
         ) : null}
+        {isReviewingSuggestion ? null : objectControlsNode}
         {mode === "zones" ? (
           <ExplorerAnnotationControls workspace={workspace} sections={["roi"]} bare />
         ) : null}
         {mode === "review" ? <ExplorerAnnotationList workspace={workspace} defaultOpen /> : null}
       </div>
 
-      {mode === "object" && keyframeId ? (
-        <div className="annotation-action-bar">
-          <button
-            type="button"
-            className="primary-button is-annotation"
-            disabled={!canSave}
-            onClick={() => {
-              advanceOnSaveRef.current = handoff.queue.length > 1;
-              if (workspace.editingAnnotation) {
-                workspace.saveAnnotationEdit();
-              } else {
-                workspace.saveDraft();
-              }
-            }}
-          >
-            {workspace.editingAnnotation
-              ? "Update annotation"
-              : handoff.queue.length > 1
-                ? "Save and next"
-                : "Save annotation"}
-          </button>
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={handoff.queue.length < 2}
-            title="Move to the next proposal in the queue without saving this one"
-            onClick={() => updateHandoff(withSkipped(handoff))}
-          >
-            Skip
-          </button>
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={!workspace.draft && !workspace.editingAnnotation}
-            title="Drop the resolved point and start this proposal again"
-            onClick={
-              workspace.editingAnnotation
-                ? workspace.cancelAnnotationEdit
-                : workspace.discardDraft
-            }
-          >
-            Discard
-          </button>
-          <span className="annotation-action-hint">
-            {remaining} left in this queue · the point is re-resolved on the newest manifest
-          </span>
-        </div>
-      ) : null}
+      {isReviewingSuggestion ? null : actionBarNode}
     </section>
   );
 }
