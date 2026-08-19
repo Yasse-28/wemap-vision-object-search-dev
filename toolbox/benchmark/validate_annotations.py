@@ -114,12 +114,12 @@ def check_missing(annotations: Sequence[Annotation], findings: Findings) -> None
 
 
 def duplicate_clicks(annotations: Sequence[Annotation]) -> list[list[Annotation]]:
-    """Groups of annotations that are one click recorded more than once.
+    """Groups of same-class annotations sharing one position to the centimetre.
 
-    Same class and the same position to the centimetre. Two real objects of one class
-    are never that close, so this is the insertion defect rather than a dense scene, and
-    `object_id` is what settles it: distinct ids on one position is a contradiction the
-    annotator has to resolve, not something this tool may assume either way.
+    Co-location alone is not a defect. Under ADR 0009 one object clicked from several
+    panoramas is *meant* to produce one annotation per panorama, and when the
+    triangulation agrees they land on the same point — that agreement is a good sign,
+    not a double insertion. `check_duplicates` is what decides, using `object_id`.
     """
     buckets: dict[tuple[str, int, int], list[Annotation]] = defaultdict(list)
     for annotation in annotations:
@@ -132,18 +132,32 @@ def duplicate_clicks(annotations: Sequence[Annotation]) -> list[list[Annotation]
     return [group for group in buckets.values() if len(group) > 1]
 
 
+def explained_by_object_id(group: Sequence[Annotation]) -> bool:
+    """Does one `object_id` account for every annotation in this co-located group?
+
+    One id over all of them says the annotator already declared these to be one object
+    seen more than once, which is the contract working. Reporting it as a duplicated
+    click is what made vinci-st-domingue-zone-1 exit non-zero on correct annotation.
+    """
+    ids = {item.object_id for item in group}
+    return len(ids) == 1 and None not in ids
+
+
 def check_duplicates(annotations: Sequence[Annotation], findings: Findings) -> None:
-    """Report co-located same-class annotations and whether ids explain them."""
-    groups = duplicate_clicks(annotations)
+    """Report co-located same-class annotations that `object_id` does not explain."""
+    groups = [
+        group for group in duplicate_clicks(annotations)
+        if not explained_by_object_id(group)
+    ]
     if not groups:
         return
     affected = sum(len(group) for group in groups)
-    unexplained = [
+    contradictory = [
         group for group in groups if len({item.object_id for item in group}) > 1
     ]
     findings.inconsistent.append(
         f"  {affected} annotations dans {len(groups)} groupes co-localisés au"
-        " centimètre et de même classe — un clic enregistré plusieurs fois"
+        " centimètre et de même classe, qu'aucun object_id n'explique"
     )
     for group in groups[:5]:
         ids = ", ".join(item.id for item in group)
@@ -152,11 +166,16 @@ def check_duplicates(annotations: Sequence[Annotation], findings: Findings) -> N
         )
     if len(groups) > 5:
         findings.inconsistent.append(f"    ... et {len(groups) - 5} autres groupes")
-    if unexplained:
+    if contradictory:
         findings.inconsistent.append(
-            f"  dont {len(unexplained)} portent des object_id différents au même"
+            f"  dont {len(contradictory)} portent des object_id différents au même"
             " endroit — contradiction à trancher, ni le code ni ce script ne peuvent"
             " deviner s'il y a un ou deux objets"
+        )
+    else:
+        findings.inconsistent.append(
+            "  aucun ne porte d'object_id : soit un clic enregistré deux fois, soit un"
+            " objet vu de plusieurs panoramas — leur donner un object_id le tranche"
         )
 
 

@@ -144,6 +144,25 @@ class GroundTruth:
     def __len__(self) -> int:
         return int(self.class_name.size)
 
+    @property
+    def object_key(self) -> np.ndarray:
+        """One key per annotation naming the object it belongs to.
+
+        `object_id` when the annotation declares one, otherwise the annotation's own id:
+        two clicks are one object only where the annotator said so. Counting rows
+        instead reads 14 clicks on one camera as 14 cameras, which is what made s5's
+        co-visible bound look like a 14x undercount when it was exact.
+        """
+        return np.array(
+            [item.object_id or f"#{item.id}" for item in self.annotations],
+            dtype=object,
+        )
+
+    def object_count(self, mask: np.ndarray | None = None) -> int:
+        """Distinct objects among the selected annotations."""
+        keys = self.object_key
+        return int(np.unique(keys if mask is None else keys[mask]).size)
+
 
 @dataclass
 class MapData:
@@ -457,7 +476,8 @@ def section_inventory(data: MapData, report: Report) -> None:
             missing.append(f"{source} n'a pas de score de détection")
     ground_truth = data.ground_truth
     report.say(
-        f"  vérités terrain            {len(ground_truth)} sur "
+        f"  vérités terrain            {ground_truth.object_count()} objets "
+        f"({len(ground_truth)} clics) sur "
         f"{len(set(ground_truth.class_name.tolist()))} classes ; "
         f"{int((ground_truth.source_keyframe_id != '').sum())} avec keyframe source, "
         f"{int(np.isfinite(ground_truth.erp_uv).all(axis=1).sum())} avec pixel source"
@@ -1184,7 +1204,8 @@ def section_ground_truth(
         if not rows.any():
             continue
         report.say(
-            f"    {name[:26]:26s} mesurables {int(rows.sum()):4d}  "
+            f"    {name[:26]:26s} mesurables {int(rows.sum()):4d} clics"
+            f" sur {ground_truth.object_count(rows):3d} objets  "
             f"couvertes {covered[rows].mean():6.1%}"
         )
 
@@ -1194,10 +1215,15 @@ def section_ground_truth(
     for radius in radii:
         attached = detections.placed & attachment.attached(radius)
         reached = np.unique(attachment.nearest[attached])
+        hit = np.zeros(len(ground_truth), dtype=bool)
+        hit[reached] = True
+        objects_reached = ground_truth.object_count(hit)
+        objects_total = ground_truth.object_count()
         report.say(
             f"    {radius:4.1f} m : {int(attached.sum()):7d} détections rattachées, "
-            f"{reached.size:4d}/{len(ground_truth)} annotations atteintes "
-            f"({reached.size / len(ground_truth):.1%})"
+            f"{objects_reached:3d}/{objects_total} objets atteints "
+            f"({objects_reached / objects_total:.1%}) — "
+            f"{reached.size}/{len(ground_truth)} clics"
         )
 
     radius = 2.0
@@ -1420,11 +1446,13 @@ def section_counting(
         report.say()
         report.say("  --- borne inférieure contre le nombre réel d'objets")
         report.say(
-            "    par classe : max sur les vues du nombre de boîtes disjointes,"
-            " contre le nombre d'annotations de la classe"
+            "    par classe : max sur les vues du nombre de boîtes disjointes, contre"
+            " le nombre d'OBJETS de la classe (object_id distincts, pas de clics)"
         )
         for name in sorted(set(data.ground_truth.class_name.tolist())):
-            truth = int((data.ground_truth.class_name == name).sum())
+            in_class = data.ground_truth.class_name == name
+            objects = data.ground_truth.object_count(in_class)
+            clicks = int(in_class.sum())
             near = detections.placed & attachment.attached(2.0)
             rows = near & (attachment.nearest_class == name)
             if not rows.any():
@@ -1434,7 +1462,10 @@ def section_counting(
                 view = np.flatnonzero(rows & (detections.keyframe_id == keyframe))
                 left, _ = _overlapping_pairs(detections, view)
                 best = max(best, view.size - left.size)
-            report.say(f"    {name[:26]:26s} borne {best:4d}   annotations {truth:4d}")
+            report.say(
+                f"    {name[:26]:26s} borne {best:4d}   objets {objects:4d}"
+                f"   ({clicks} clics)"
+            )
     report.data["s5"] = {
         "sampled_keyframes": int(chosen.size),
         "overlapping_pairs": overlapping,

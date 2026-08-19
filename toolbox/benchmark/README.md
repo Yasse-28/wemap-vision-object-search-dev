@@ -320,6 +320,10 @@ python -m toolbox.benchmark.validate_annotations --map-path /path/to/map
 Pass `--geojson <path>` to read an export instead — the one case that wants it is asking
 what a past benchmark actually scored, rather than what is annotated now.
 
+Co-located same-class annotations are reported only when no single `object_id` covers
+them: one object clicked from several panoramas is what the contract asks for, and the
+clicks agreeing to the centimetre is the triangulation working, not a double insertion.
+
 Three blocks, in the order they should be acted on: which contract fields are present
 (a field at 40 % is reported as **worse than absent** — a metric reading it would score a
 biased slice), what contradicts itself (one click recorded twice, one `object_id` under

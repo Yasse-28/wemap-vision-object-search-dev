@@ -26,6 +26,7 @@ from toolbox.benchmark.map_analysis import (
     seen_in_own_keyframe,
 )
 from toolbox.benchmark.map_layers import _colour
+from toolbox.benchmark.object_search_http_benchmark import Annotation
 
 
 def _detections(
@@ -357,3 +358,62 @@ def test_a_threshold_no_annotation_reaches_reports_nothing_measurable() -> None:
 
     assert curve[1]["retained"] == 0.0
     assert math.isnan(curve[1]["covered_share"])
+
+
+def _annotation(identifier: str, object_id: str | None) -> Annotation:
+    """Only the fields `GroundTruth.object_key` reads."""
+    return Annotation(
+        id=identifier,
+        class_name="cctv",
+        lat=18.4320456,
+        lng=-69.6765662,
+        accuracy_m=5.0,
+        object_id=object_id,
+    )
+
+
+def test_clicks_sharing_an_object_id_count_as_one_object() -> None:
+    """14 clicks on one camera are one camera — s5's bound is compared against this."""
+    truth = _ground_truth(
+        [(0.0, 0.0, 0.0)] * 3, ["cctv"] * 3, ["kf-1", "kf-2", "kf-3"]
+    )
+    truth.annotations = tuple(
+        _annotation(str(index), "cctv-001") for index in range(3)
+    )
+
+    assert len(truth) == 3
+    assert truth.object_count() == 1
+
+
+def test_an_annotation_with_no_object_id_is_its_own_object() -> None:
+    """A pre-ADR map must not collapse into one object per class."""
+    truth = _ground_truth([(0.0, 0.0, 0.0)] * 3, ["cctv"] * 3, ["a", "b", "c"])
+    truth.annotations = tuple(_annotation(str(index), None) for index in range(3))
+
+    assert truth.object_count() == 3
+
+
+def test_distinct_ids_stay_distinct_objects() -> None:
+    truth = _ground_truth([(0.0, 0.0, 0.0)] * 3, ["cctv"] * 3, ["a", "b", "c"])
+    truth.annotations = (
+        _annotation("1", "cctv-001"),
+        _annotation("2", "cctv-001"),
+        _annotation("3", "cctv-002"),
+    )
+
+    assert truth.object_count() == 2
+
+
+def test_a_mask_counts_only_the_objects_it_selects() -> None:
+    truth = _ground_truth([(0.0, 0.0, 0.0)] * 4, ["cctv"] * 4, ["a", "b", "c", "d"])
+    truth.annotations = (
+        _annotation("1", "cctv-001"),
+        _annotation("2", "cctv-001"),
+        _annotation("3", "cctv-002"),
+        _annotation("4", "cctv-003"),
+    )
+
+    mask = np.array([True, True, True, False])
+
+    assert truth.object_count(mask) == 2
+    assert truth.object_count() == 3

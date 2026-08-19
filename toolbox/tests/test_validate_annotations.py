@@ -169,3 +169,40 @@ def test_an_empty_file_is_reported_as_contradictory() -> None:
     findings = validate([])
 
     assert findings.blocking
+
+
+def test_one_object_clicked_from_several_panoramas_is_not_a_duplicate() -> None:
+    """The false positive that made vinci exit non-zero on correct annotation.
+
+    Two clicks landing on the same point from different keyframes is the triangulation
+    agreeing, which the contract asks for.
+    """
+    findings = validate(
+        [
+            _annotation("gt-14", object_id="cctv-001", extent_m=0.1),
+            _annotation("gt-24", object_id="cctv-001", extent_m=0.1),
+        ]
+    )
+
+    assert not findings.blocking
+    assert findings.inconsistent == []
+
+
+def test_the_same_spot_under_two_object_ids_is_still_a_contradiction() -> None:
+    findings = validate(
+        [
+            _annotation("gt-1", object_id="cctv-001", extent_m=0.1),
+            _annotation("gt-2", object_id="cctv-002", extent_m=0.1),
+        ]
+    )
+
+    assert findings.blocking
+    assert any("object_id différents" in line for line in findings.inconsistent)
+
+
+def test_co_located_clicks_with_no_object_id_are_still_reported() -> None:
+    """What the check was built for: a map annotated before ADR 0009."""
+    findings = validate([_annotation("a1"), _annotation("a2")])
+
+    assert findings.blocking
+    assert any("aucun ne porte d'object_id" in line for line in findings.inconsistent)

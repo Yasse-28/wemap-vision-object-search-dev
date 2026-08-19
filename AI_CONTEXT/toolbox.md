@@ -376,6 +376,15 @@ created **once per `emmid`** in a detached `<div>` and cached:
   both — reading only the flat spelling gives NaN pixels for every annotation the tab
   wrote, which breaks s3 silently instead of loudly. `keyframeId` is an **int** and
   keyframe 0 exists, so test it against `None`, never for falsiness.
+- **Count objects, not clicks.** ADR 0009 asks for one annotation *per panorama* an
+  object was clicked in, tied together by `object_id` — so 61 annotations on vinci
+  zone 1 are 6 objects (cctv ×14 clicks, maglock ×12, …). `GroundTruth.object_key` /
+  `object_count(mask)` are what s0/s3/s5 report; counting rows read s5's co-visible
+  bound as a 14x undercount when it was exact, and hid that the bound in fact
+  *over*counts (4 disjoint boxes for 1 smoke detector). Co-located same-class clicks
+  are likewise **not** duplicates when one `object_id` covers them — see
+  `validate_annotations.explained_by_object_id`; treating them as such made the
+  contract check exit non-zero on correct annotation.
 - **Pair an annotation with its own feature, never by index.** `parse_annotations` drops
   features with no class or no usable geometry, so zipping its result against
   `features` misaligns past the first skip. `parse_annotated_features` returns
