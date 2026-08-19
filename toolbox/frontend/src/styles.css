@@ -870,8 +870,7 @@ tr:last-child td {
 }
 
 #explorer-spatial,
-#explorer-proposals,
-#explorer-annotation {
+#explorer-proposals {
   scroll-margin-top: 72px;
 }
 
@@ -1348,8 +1347,7 @@ body.explorer-equirect-dragging {
 
 @media (max-width: 1080px) {
   #explorer-spatial,
-  #explorer-proposals,
-  #explorer-annotation {
+  #explorer-proposals {
     scroll-margin-top: 160px;
   }
 
@@ -1400,8 +1398,7 @@ body.explorer-equirect-dragging {
   }
 
   #explorer-spatial,
-  #explorer-proposals,
-  #explorer-annotation {
+  #explorer-proposals {
     scroll-margin-top: 12px;
   }
 
@@ -1929,7 +1926,6 @@ body.explorer-equirect-dragging {
   padding: 12px;
 }
 
-.explorer-annotation-anchor,
 .explorer-proposals-anchor {
   min-width: 0;
 }
@@ -3401,4 +3397,727 @@ body.explorer-equirect-dragging {
 
 .benchmark-table tr.is-error td {
   color: var(--c-danger-strong);
+}
+
+/* ---------------- annotation tab ---------------- */
+
+/*
+  The Annotation tab is "describe and validate", the Explorer stays "find and
+  verify". Blue is not a new colour: `.secondary-button.is-active` already reserves
+  it for annotation tools, so promoting it to the tab is a continuation, not an
+  invention.
+*/
+:root {
+  --c-annotation: #2563eb;
+  --c-annotation-strong: #1d4ed8;
+  --c-annotation-soft: #eef3ff;
+}
+
+.annotation-panel-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-width: 0;
+  padding: 18px 20px;
+  overflow-y: auto;
+}
+
+.eyebrow.is-annotation {
+  color: var(--c-annotation-strong);
+}
+
+.feature-button.is-annotation.is-active {
+  border-color: var(--c-annotation);
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+}
+
+.primary-button.is-annotation {
+  border-color: var(--c-annotation-strong);
+  background: var(--c-annotation);
+}
+
+.object-search-annotate-action {
+  justify-self: stretch;
+  width: 100%;
+  text-align: center;
+}
+
+.explorer-workflow-link-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
+}
+
+.explorer-workflow-link-button:hover {
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+}
+
+.annotation-tab-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.annotation-tab-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.annotation-mode-switch {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.annotation-mode-tab {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.annotation-mode-tab.is-active {
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+  font-weight: var(--fw-bold);
+}
+
+.annotation-io-menu {
+  position: relative;
+}
+
+.annotation-io-menu summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--c-control-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.annotation-io-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.annotation-io-menu-body {
+  position: absolute;
+  right: 0;
+  z-index: 30;
+  width: min(420px, 80vw);
+  margin-top: var(--s-1);
+  padding: var(--s-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-2);
+}
+
+/*
+  The capsule is what makes the split bearable: the proposal, the whole 360° turn it
+  sits on and the livemap, in one fixed band, so nothing sends you back to Explorer
+  just to check you are on the right object.
+*/
+.annotation-capsule {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--c-border-strong);
+  border-left: 4px solid var(--c-annotation);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.annotation-capsule-main {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  min-width: 0;
+}
+
+.annotation-capsule-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--c-border-subtle);
+}
+
+.annotation-capsule-id {
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-capsule-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--c-border-subtle);
+}
+
+.annotation-capsule-angles {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--c-surface-muted);
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-capsule-queue {
+  margin-left: auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-return-button {
+  flex-shrink: 0;
+}
+
+/*
+  The map is open by default and big enough to navigate: picking the next keyframe is
+  a normal move here, not a reason to go back to the Explorer.
+*/
+.annotation-capsule-side {
+  display: flex;
+  flex-direction: column;
+  width: 380px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--c-border-subtle);
+}
+
+.annotation-capsule.is-map-collapsed .annotation-capsule-side {
+  width: auto;
+}
+
+.annotation-capsule-side-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--c-border-subtle);
+  font-size: var(--fs-xs);
+}
+
+.annotation-capsule-side-header .annotation-map-toggle {
+  margin-left: auto;
+}
+
+.annotation-capsule-livemap {
+  flex-grow: 1;
+  min-height: 300px;
+}
+
+.annotation-map-toggle {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  line-height: 1;
+}
+
+.annotation-map-toggle:hover {
+  border-color: var(--c-annotation);
+  color: var(--c-annotation-strong);
+}
+
+.annotation-capsule-map-hint {
+  margin: 0;
+  padding: 5px var(--s-3);
+  border-top: 1px solid var(--c-border-faint);
+  color: var(--c-text-muted);
+  font-size: 10px;
+}
+
+.annotation-capsule-empty {
+  margin: 0;
+  padding: var(--s-4) var(--s-3);
+  color: var(--c-text-muted);
+  line-height: 1.5;
+}
+
+.annotation-capsule-cutout {
+  width: 100%;
+  height: 74px;
+  border-top: 1px solid var(--c-border-subtle);
+  object-fit: cover;
+}
+
+/* The keyframe's whole turn as an axis, under the viewer. */
+.annotation-ribbon {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/*
+  The panorama is a viewer, not a flattened band: an equirectangular image squashed
+  into a strip this short is unreadable, which is exactly how the first version of
+  this capsule failed. The ruler below keeps the whole turn visible instead.
+*/
+.annotation-capsule-viewer {
+  position: relative;
+  background: var(--c-surface-muted);
+}
+
+/* The shared handle sits on the seam between the panorama and the ruler here, so
+   its Explorer margins are cancelled rather than pushing the ruler down. */
+.annotation-capsule-main > .object-search-explorer-equirect-resizer {
+  margin: -7px 0;
+}
+
+/* Clicking a box selects it; a look-around must not, so the cursor only changes
+   while a box is actually under the pointer. */
+.annotation-capsule-viewer.is-over-detection {
+  cursor: pointer;
+}
+
+.annotation-ribbon-ruler {
+  position: relative;
+  height: 46px;
+  border-top: 1px solid var(--c-border-subtle);
+  background: var(--c-surface-raised);
+}
+
+.annotation-ribbon-tick {
+  position: absolute;
+  top: 22px;
+  transform: translateX(-50%);
+  color: var(--c-text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-ribbon-notch {
+  position: absolute;
+  top: 0;
+  width: 3px;
+  height: 15px;
+  margin-left: -1.5px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 0 2px 2px;
+  background: var(--c-disabled);
+  cursor: pointer;
+}
+
+.annotation-ribbon-notch.is-done {
+  background: var(--c-ok);
+}
+
+.annotation-ribbon-notch.is-queued {
+  background: var(--c-warn);
+}
+
+.annotation-ribbon-notch.is-current {
+  width: 4px;
+  height: 22px;
+  background: var(--c-annotation);
+}
+
+.annotation-ribbon-legend {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: 5px var(--s-3);
+  border-top: 1px solid var(--c-border-faint);
+  color: var(--c-text-muted);
+  font-size: 10px;
+}
+
+.annotation-ribbon-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.annotation-ribbon-key::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--c-disabled);
+}
+
+.annotation-ribbon-key.is-done::before {
+  background: var(--c-ok);
+}
+
+.annotation-ribbon-key.is-current::before {
+  background: var(--c-annotation);
+}
+
+.annotation-ribbon-coverage {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-mode-body {
+  min-width: 0;
+}
+
+.explorer-annotation-toolbar.is-bare {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.annotation-action-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-surface) 96%, transparent);
+  box-shadow: 0 -4px 14px rgba(36, 38, 41, 0.08);
+  backdrop-filter: blur(8px);
+}
+
+.annotation-action-hint {
+  margin-left: auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+@media (max-width: 1100px) {
+  .annotation-capsule {
+    flex-direction: column;
+  }
+
+  .annotation-capsule-side {
+    width: auto;
+    border-left: 0;
+    border-top: 1px solid var(--c-border-subtle);
+  }
+}
+
+/*
+  The Annotation tab's form is dense on purpose: the panorama and the map are what
+  the annotator reads, the form is what they fill. Scoped to `.is-bare`, which only
+  the tab renders, so the shared components keep their normal scale everywhere else.
+*/
+.explorer-annotation-toolbar.is-bare {
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  font-size: 0.78rem;
+}
+
+.explorer-annotation-toolbar.is-bare h3,
+.explorer-annotation-toolbar.is-bare h4 {
+  font-size: 0.72rem;
+}
+
+.explorer-annotation-toolbar.is-bare label,
+.explorer-annotation-toolbar.is-bare .collapsible-section > summary {
+  font-size: 0.72rem;
+}
+
+.explorer-annotation-toolbar.is-bare small,
+.explorer-annotation-toolbar.is-bare .muted {
+  font-size: 0.66rem;
+  line-height: 1.3;
+}
+
+.explorer-annotation-toolbar.is-bare input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+.explorer-annotation-toolbar.is-bare select {
+  min-height: 32px;
+  padding: 5px 8px;
+  font-size: 0.78rem;
+}
+
+.explorer-annotation-toolbar.is-bare input[type="color"] {
+  min-height: 32px;
+}
+
+.explorer-annotation-toolbar.is-bare .primary-button,
+.explorer-annotation-toolbar.is-bare .secondary-button,
+.explorer-annotation-toolbar.is-bare .danger-button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.78rem;
+}
+
+.explorer-annotation-toolbar.is-bare .explorer-annotation-mode-row,
+.explorer-annotation-toolbar.is-bare .explorer-annotation-primary-grid,
+.explorer-annotation-toolbar.is-bare .explorer-annotation-secondary-grid {
+  gap: var(--s-2);
+}
+
+.explorer-annotation-toolbar.is-bare .annotation-contract-panel {
+  padding: var(--s-2);
+}
+
+.explorer-annotation-toolbar.is-bare .annotation-contract-core,
+.explorer-annotation-toolbar.is-bare .annotation-contract-label-grid {
+  gap: var(--s-2);
+}
+
+.explorer-annotation-toolbar.is-bare .annotation-contract-status {
+  padding: 2px 7px;
+  font-size: 0.66rem;
+}
+
+.explorer-annotation-toolbar.is-bare .class-select {
+  padding: 5px 8px;
+}
+
+.explorer-annotation-toolbar.is-bare .class-type {
+  font-size: 0.6rem;
+}
+
+/* The action bar goes with it: it is a footer, not a headline. */
+.annotation-action-bar {
+  padding: 6px var(--s-3);
+}
+
+.annotation-action-bar .primary-button {
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: 0.82rem;
+}
+
+.annotation-action-bar .secondary-button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.78rem;
+}
+
+.annotation-action-hint {
+  font-size: 0.66rem;
+}
+
+.annotation-region-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.annotation-region-hint {
+  color: var(--c-annotation-strong);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-region-controls .primary-button,
+.annotation-region-controls .secondary-button {
+  min-height: 30px;
+  padding: 0 11px;
+  font-size: 0.78rem;
+}
+
+/* While an outline is being traced the panorama is a drawing surface, so the
+   box-hover cursor must not claim it. */
+.annotation-capsule-viewer.is-drawing-region,
+.annotation-capsule-viewer.is-drawing-region.is-over-detection {
+  cursor: crosshair;
+}
+
+/*
+  An offered extent, not a filled-in one. It reads as a suggestion because it is one:
+  the width is the detector's box and the depth is a single sample, so a value that
+  looked measured would be the worst of both.
+*/
+.annotation-extent-suggestion {
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  padding: 5px 8px;
+  border: 1px dashed color-mix(in srgb, var(--c-annotation) 45%, var(--c-border));
+  border-radius: var(--r-sm);
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+  font-size: 0.72rem;
+  font-weight: var(--fw-bold);
+  text-align: left;
+}
+
+.annotation-extent-suggestion:hover {
+  border-style: solid;
+}
+
+.annotation-extent-suggestion span {
+  color: var(--c-text-muted);
+  font-size: 0.66rem;
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+/*
+  Reusing an object id is what makes two points one physical object, so the ids in use
+  are one click away rather than behind a `<datalist>` that only shows what already
+  matches what is typed.
+*/
+.object-id-combobox {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.object-id-combobox input {
+  padding-right: 30px;
+}
+
+.object-id-combobox-toggle {
+  position: absolute;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-muted);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.object-id-combobox-toggle:hover:not(:disabled) {
+  background: var(--c-surface-muted);
+  color: var(--c-text);
+}
+
+.object-id-combobox-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.object-id-combobox-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  max-height: 240px;
+  margin: 0;
+  padding: 3px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-2);
+}
+
+.object-id-combobox-option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text);
+  text-align: left;
+  font-weight: 400;
+}
+
+.object-id-combobox-option:hover,
+.object-id-combobox-option.is-active {
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+}
+
+.object-id-combobox-id {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--fw-medium);
+}
+
+.object-id-combobox-class {
+  flex-shrink: 0;
+  color: var(--c-text-muted);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.object-id-combobox-count {
+  flex-shrink: 0;
+  color: var(--c-text-muted);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.object-id-combobox-empty {
+  padding: 7px 8px;
+  color: var(--c-text-muted);
+  font-size: 0.7rem;
+}
+
+/* The detector's guess, marked as a guess. */
+.annotation-predicted-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px dashed var(--c-border-strong);
+  border-radius: 999px;
+  background: var(--c-surface-raised);
+  color: var(--c-text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.annotation-predicted-label:hover {
+  border-color: var(--c-annotation);
+  color: var(--c-annotation-strong);
+}
+
+.annotation-predicted-label-kicker {
+  color: var(--c-text-muted);
+  font-size: 0.6rem;
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.annotation-predicted-label-score {
+  color: var(--c-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The stepper sits in the capsule bar, so it matches the buttons beside it rather
+   than the Explorer's 44px controls. */
+.annotation-capsule-bar .keyframe-stepper button {
+  width: 30px;
+  height: 30px;
+  font-size: var(--fs-sm);
 }

@@ -14,11 +14,13 @@ import {
 
 import type { MapSummary } from "../api";
 import CollapsibleSection from "../annotations/CollapsibleSection";
+import { useExplorerAnnotationWorkspace } from "../annotations/ExplorerAnnotationWorkspace";
 import {
-  ExplorerAnnotationControls,
-  ExplorerAnnotationList,
-  useExplorerAnnotationWorkspace,
-} from "../annotations/ExplorerAnnotationWorkspace";
+  readHandoff,
+  withPanoramaPoint,
+  withProposal,
+  writeHandoff,
+} from "../annotation/handoff";
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
 import type { LivemapMarker, LivemapPolygon, LivemapSegment } from "../annotations/types";
 import DismissibleAlert from "../DismissibleAlert";
@@ -86,6 +88,8 @@ type Props = {
   map: MapSummary | null;
   mapId: string;
   isMapKnown: boolean;
+  /** Hands the current proposal to the Annotation tab and switches to it. */
+  onOpenAnnotation?: () => void;
 };
 
 /** How a keyframe stands with respect to the live pgvector index. */
@@ -356,7 +360,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     x: number;
     y: number;
   } | null>(null);
-  const [photosphereClassMenuOpen, setPhotosphereClassMenuOpen] = useState(false);
   const [keyframeLink, setKeyframeLink] = useState<{
     annotationId: string;
     keyframeId: string;
@@ -444,7 +447,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     setPhotosphereYawRad(null);
     setPhotosphereViewKeyframeId(null);
     setAnnotationMenu(null);
-    setPhotosphereClassMenuOpen(false);
     setKeyframeLink(null);
     setPhotosphereOrient(null);
     preservedCompassBearingDegRef.current = null;
@@ -493,26 +495,6 @@ function ObjectSearchExplorerPanel(props: Props) {
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [annotationMenu]);
-
-  useEffect(() => {
-    if (!photosphereClassMenuOpen) {
-      return;
-    }
-    const close = () => setPhotosphereClassMenuOpen(false);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setPhotosphereClassMenuOpen(false);
-      }
-    };
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("resize", close);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", close);
-    };
-  }, [photosphereClassMenuOpen]);
 
   useEffect(() => {
     try {
@@ -1621,15 +1603,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     rowIndex: number | null = null,
   ) => {
     const requestId = `${Date.now()}-${Math.random()}`;
-    if (annotation.enabled) {
-      annotation.beginDraft(requestId, {
-        keyframeId,
-        projection: source,
-        rowIndex,
-        xRatio,
-        yRatio,
-      });
-    }
     setDepthPin({
       requestId,
       source,
@@ -1656,18 +1629,45 @@ function ObjectSearchExplorerPanel(props: Props) {
       sample_radius: 3,
       min_depth_m: DEPTH_PIN_MIN_DEPTH_M,
     })
-      .then((payload) => {
-        updateResolvedDepthPin(requestId, payload);
-        if (annotation.enabled) {
-          annotation.resolveDraft(requestId, payload);
-        }
-      })
-      .catch((err: Error) => {
-        updateRejectedDepthPin(requestId, err.message);
-        if (annotation.enabled) {
-          annotation.rejectDraft(requestId, err.message);
-        }
-      });
+      .then((payload) => updateResolvedDepthPin(requestId, payload))
+      .catch((err: Error) => updateRejectedDepthPin(requestId, err.message));
+  };
+
+  /**
+   * Hand the current selection to the Annotation tab.
+   *
+   * Only the click and the ids travel: the tab re-resolves the depth point against
+   * the newest manifest rather than trusting a copy that a re-ingest could have made
+   * wrong. `App.tsx` mounts one panel at a time, so this goes through `localStorage`
+   * (see `annotation/handoff.ts`).
+   */
+  const annotateProposal = (row: { keyframe_id: string; row_index: number }) => {
+    const pin =
+      depthPin?.status === "resolved" &&
+      depthPin.source === "cutout" &&
+      depthPin.rowIndex === row.row_index
+        ? { projection: "cutout" as const, xRatio: depthPin.xRatio, yRatio: depthPin.yRatio }
+        : null;
+    writeHandoff(
+      props.mapId,
+      withProposal(readHandoff(props.mapId), {
+        keyframeId: row.keyframe_id,
+        rowIndex: row.row_index,
+        pin,
+      }),
+    );
+    props.onOpenAnnotation?.();
+  };
+
+  const annotatePanoramaPoint = (keyframeId: string, xRatio: number, yRatio: number) => {
+    writeHandoff(
+      props.mapId,
+      withPanoramaPoint(readHandoff(props.mapId), {
+        keyframeId,
+        pin: { projection: "erp", xRatio, yRatio },
+      }),
+    );
+    props.onOpenAnnotation?.();
   };
 
   const placePhotosphereDepthPin = (xRatio: number, yRatio: number) => {
@@ -1845,7 +1845,19 @@ function ObjectSearchExplorerPanel(props: Props) {
         >
           <a href="#explorer-spatial">1 · Locate</a>
           <a href="#explorer-proposals">2 · Inspect</a>
-          <a href="#explorer-annotation">3 · Annotate</a>
+          <button
+            type="button"
+            className="explorer-workflow-link-button"
+            onClick={() => {
+              if (selectedDetection) {
+                annotateProposal(selectedDetection);
+              } else {
+                props.onOpenAnnotation?.();
+              }
+            }}
+          >
+            3 · Annotate
+          </button>
         </nav>
       </div>
 
@@ -2044,7 +2056,6 @@ function ObjectSearchExplorerPanel(props: Props) {
                                   onClick={() => {
                                     setDepthPin(null);
                                     setDepthPinPopoverOpen(false);
-                                    annotation.discardDraft();
                                   }}
                                 >
                                   Remove
@@ -2181,7 +2192,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                       }
                       polygonForDetection={polygonForPhotosphereDetection}
                       onDepthPin={placePhotosphereDepthPin}
-                      allowDepthPinOnMarker={annotation.enabled}
+                      allowDepthPinOnMarker
                       navigationCandidates={photosphereNavigationCandidates}
                       onNavigate={selectKeyframe}
                       onViewChange={handlePhotosphereViewChange}
@@ -2206,72 +2217,22 @@ function ObjectSearchExplorerPanel(props: Props) {
                     : ""}
                 </p>
               ) : null}
-              {annotation.enabled ? (
+              {depthPin?.status === "resolved" &&
+              depthPin.source === "erp" &&
+              depthPin.keyframeId === activeKeyframeId ? (
                 <div className="object-search-photosphere-annotation-actions">
-                  <div
-                    className="object-search-photosphere-class-picker"
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    <button
-                      type="button"
-                      className="object-search-photosphere-annotation-class"
-                      aria-haspopup="listbox"
-                      aria-expanded={photosphereClassMenuOpen}
-                      onClick={() => setPhotosphereClassMenuOpen((open) => !open)}
-                    >
-                      {annotation.activeClass?.name ?? "No class selected"}
-                    </button>
-                    {photosphereClassMenuOpen ? (
-                      <ul
-                        className="object-search-photosphere-class-menu"
-                        role="listbox"
-                        aria-label="Annotation classes"
-                      >
-                        {annotation.pointClasses.length ? (
-                          annotation.pointClasses.map((item) => (
-                            <li key={`${item.name}::${item.annotationType}`}>
-                              <button
-                                type="button"
-                                className={`object-search-photosphere-class-option${
-                                  annotation.activeClassKey === `${item.name}::${item.annotationType}`
-                                    ? " is-active"
-                                    : ""
-                                }`}
-                                role="option"
-                                aria-selected={
-                                  annotation.activeClassKey === `${item.name}::${item.annotationType}`
-                                }
-                                onClick={() => {
-                                  annotation.setActiveClassKey(`${item.name}::${item.annotationType}`);
-                                  setPhotosphereClassMenuOpen(false);
-                                }}
-                              >
-                                <span
-                                  className="color-swatch"
-                                  style={{ background: item.color }}
-                                />
-                                <span>{item.name}</span>
-                              </button>
-                            </li>
-                          ))
-                        ) : (
-                          <li className="object-search-photosphere-class-empty">
-                            No point classes
-                          </li>
-                        )}
-                      </ul>
-                    ) : null}
-                  </div>
                   <button
-                    className="primary-button"
+                    className="primary-button is-annotation"
                     type="button"
-                    disabled={
-                      annotation.draft?.status !== "resolved" ||
-                      !annotation.activeClass
+                    onClick={() =>
+                      annotatePanoramaPoint(
+                        depthPin.keyframeId,
+                        depthPin.xRatio,
+                        depthPin.yRatio,
+                      )
                     }
-                    onClick={annotation.saveDraft}
                   >
-                    Save annotation
+                    Annotate this point
                   </button>
                 </div>
               ) : null}
@@ -2532,6 +2493,14 @@ function ObjectSearchExplorerPanel(props: Props) {
                 <strong>{selectedDetection.label || "Unlabelled proposal"}</strong>
                 <span>Row {selectedDetection.row_index}</span>
               </div>
+              <button
+                type="button"
+                className="primary-button is-annotation object-search-annotate-action"
+                title="Open the Annotation tab on this proposal, keeping the keyframe, the depth point and the spatial context"
+                onClick={() => annotateProposal(selectedDetection)}
+              >
+                Annotate this proposal
+              </button>
               <div className="object-search-selected-facts">
                 <span>Keyframe {selectedDetection.keyframe_id}</span>
                 <span>{selectedDetection.detector_source || "Unknown source"}</span>
@@ -2767,10 +2736,6 @@ function ObjectSearchExplorerPanel(props: Props) {
         </div>
         </CollapsibleSection>
       </div>
-      <div id="explorer-annotation" className="explorer-annotation-anchor">
-        <ExplorerAnnotationControls workspace={annotation} />
-      </div>
-      <ExplorerAnnotationList workspace={annotation} />
       {annotationMenu
         ? (() => {
             const menuAnnotation = annotation.annotations.find(

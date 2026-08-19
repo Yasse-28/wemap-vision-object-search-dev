@@ -78,7 +78,10 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   needs the two angles `toolbox/bricks/localize.py` adds to each observation, so it
   stays empty against a remote production endpoint.
 - `object-search-explorer/` — proposals, keyframes, previews; livemap + photosphere
-  side-by-side; bbox post-process controls; depth-based annotation. **"Show track"**
+  side-by-side; bbox post-process controls. **The annotation tools no longer live
+  here**: the panel keeps "Annotate this proposal" (inspector) and "Annotate this
+  point" (a resolved ERP depth pin), which write `annotation/handoff.ts` and switch
+  tabs. **"Show track"**
   (`keyframeTrack.ts`) joins consecutive keyframes in manifest order — the route the
   capture walked — for the maps with no `360-viewer/graph.geojson`, which is most of
   them. It is drawn as lines only: the keyframe under the cursor is revealed by the
@@ -155,9 +158,88 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   its own and python's, which resolves the floor from the manifest's altitude bands
   rather than from the Wemap SDK. A gap between them is displayed, not hidden — it
   would mean the two floor definitions disagree.
+- `annotation/` — the **Annotation tab** (`AnnotationPanel.tsx`, route
+  `/ui/maps/:mapId/annotation`): describe and validate, as against the Explorer's
+  find and verify. It owns no store and no form of its own — it mounts
+  `ExplorerAnnotationControls` / `ExplorerAnnotationList` from `annotations/` under
+  three modes (Object = mode row + classes + ground-truth object + metadata, Zones =
+  ROI count, Review = history; import/export sits in the header overflow). What is
+  new is the **capsule**: the Explorer's `EquirectPhotoSphereViewer` on the keyframe,
+  faced at the proposal's `theta_center` through `orientYawRad`/`orientToken`, with
+  `AngularRibbon.tsx` under it — a θ ruler carrying one notch per proposal and the
+  turn coverage. A flattened ERP band was tried in that slot first and was unreadable
+  at this height; the viewer navigates the image, the ruler shows the whole turn at
+  once. In the viewer: Ctrl+click resolves an ERP point into the draft, a plain click
+  on a box selects that proposal (a pointer-down/up within 4 px — the viewer exposes
+  hover, not click, and a drag is a look-around; `EquirectPhotoSphereViewer` paints
+  the hovered box in the annotation blue by restyling that one line's material, never
+  by rebuilding the overlay on mousemove), and the pane's height is dragged
+  through the Explorer's `useEquirectFrameHeight`, which now takes its own storage
+  key so the two panes resize independently. Beside them sits a livemap carrying the
+  view cone — so the annotator can confirm
+  the object without going back, and "Back to the proposal" is one click. **The
+  livemap is open by default and is a navigation surface, not a thumbnail**: it draws
+  the capture path with `buildKeyframeTrack` and reveals the keyframe under the
+  cursor (`segmentHoverMarkers` / `onSegmentMarkerClick`, the Explorer's mechanism —
+  nothing renders thousands of markers), so picking the next keyframe is a move made
+  here. It shows no indexed/pruned colouring, deliberately: this panel loads no
+  keyframe summaries and must not imply a state it did not read. Selecting a keyframe
+  clears the queue, which belonged to the old turn.
+  **Missed detections** are drawn here: "Missed detection" puts the viewer in region
+  mode (`regionDrawActive` / `onRegionPoint` / `draftRegion`), a plain click adds a
+  vertex in ERP ratios, and clicking the first vertex again closes the outline. The
+  drawing mirrors the `livemap-tools` `object-search-annotate` annotator: `Line2` /
+  `LineMaterial` edges of a real screen-space width (`LineBasicMaterial.linewidth` is
+  ignored by most WebGL implementations, so a plain line is one pixel wide over a
+  photograph), a rubber-band edge from the last vertex to the cursor rebuilt on move
+  in `runtime.liveDraftGroup`, and the same 0.0025-ratio closing distance — measured
+  the short way round the seam here. Vertices show as haloed dots from the first
+  click, the first one darker because it is the one that closes. Closing the outline
+  saves an ordinary `ground_truth_point`
+  at its centroid with `source.erpRegion` + `source.missedDetection` — `saveDraft`
+  spreads the draft source, and the backend keeps `source` as opaque JSON in
+  `extra_properties`, so neither write path needed changing. `regionGeometry.ts` holds
+  that maths (circular mean for the centroid, turn-minus-largest-gap for the width);
+  every function there is about the seam, where a plain average puts the point on the
+  far side of the room. It also holds `extentFromAngularWidth`, which backs the
+  **suggested `extent_m`** the tab offers through `ExplorerAnnotationControls`'
+  `extentSuggestion` prop — `2·d·tan(Δθ·cos φ / 2)` from the proposal's
+  `angular_width` (or the drawn outline's) at the resolved depth. The `cos φ` is not
+  optional: `angular_width` is a **yaw** span, and meridians converge, so a sign near
+  the ceiling would otherwise be reported far wider than it is. It is offered on a
+  button and never written on its own — the width is the detector's box and the depth
+  is one centre sample that may belong to the wall behind.
+  `ribbonGeometry.ts` holds the ruler maths (`u = (θ + π) / 2π`, seam wrapping);
+  `handoff.ts` is the `localStorage` selection + queue, per map, because `App.tsx`
+  mounts one panel at a time — the same reason `matching/basket.ts` exists. Only ids
+  and the click travel: the depth pin is **re-resolved here** against the newest
+  manifest rather than carried across, and the queue advances only when
+  `saveDraft` actually appends a stored row.
 - `annotations/` — point/polygon annotations, **in `object-search-annotations.db`**
   (`api.ts`, `ExplorerAnnotationWorkspace.tsx`, `LivemapAnnotation.tsx`,
-  `livemapHost.ts`; `geojson.ts` is now only the "Save As…" download). They used to
+  `livemapHost.ts`; `geojson.ts` is now only the "Save As…" download). The hook and
+  the two components are **mounted by the Annotation tab**, not by the Explorer;
+  Three things are filled in for the annotator, each with a different rule.
+  `classLabels.ts` carries **synonyms and visually-similar terms across points of the
+  same class** — they describe the class, not the point, and are read back from the
+  points already saved under it (most frequent set, ties to the most recent, so a
+  correction spreads but one stray point cannot rewrite the class); forced on a class
+  change, refilled once a save has cleared the fields, never over something being
+  typed. The **suggested extent** is offered on a button, never written. The
+  **predicted label** of the selected proposal is shown in the capsule with its
+  detector score and applies to the *prompt* on click — never to the synonyms, which
+  belong to the class, and never silently: it is the guess being checked.
+  `annotations/ObjectIdCombobox.tsx` replaced the object-id `<datalist>` so the ids in
+  use open in full with their class and view count; reusing one is what makes two
+  points the same physical object. It filters on what has been **typed since opening**,
+  not on the field's value: the field arrives pre-filled with the next free id
+  (`maglock-002`), which matches nothing, so filtering on it hid every saved object
+  behind a message claiming there were none.
+  `ExplorerAnnotationControls` takes `sections`, `bare` and `hideSaveActions` so that
+  tab can render subsets of it and own the Save/Discard buttons in its sticky action
+  bar; omitting all three still gives the original whole panel. Both Save buttons ask
+  `canSaveAnnotation(workspace)` — a second copy of that condition is how a button
+  ends up enabled over a save that then refuses. They used to
   go to `annotations/annotations.geojson`, a file **nothing ever read back**: the
   office opened empty every time, its work had to be re-imported by hand, and it
   never reached the benchmark. Points are now stored as `ground_truth_point` — they
@@ -190,9 +272,10 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
 - `object-search-review/` — detection-review API client, review controls, and
   per-query TP/FP state with undo/redo whose history survives a re-search. Its
   per-query annotation list is independent of displayed results, and counters
-  cover the whole query. Mounted through `ObjectSearchPanel` in the dedicated
-  `/ui/maps/:mapId/annotation` tab; `annotation-store.ts` in the backend owns the
-  compatible per-map SQLite file directly.
+  cover the whole query. Mounted through `ObjectSearchPanel` — the **Object Search**
+  tab; `/ui/maps/:mapId/annotation` is the ground-truth Annotation tab and has
+  nothing to do with it. `annotation-store.ts` in the backend owns the compatible
+  per-map SQLite file directly.
 - The object-search panel's "Online overrides" are exactly the fields
   `LocalizeParams` reads; `min_keyframes_per_cluster` defaults to **2** there, in the
   Benchmark tab and in the service, so the three paths build the same clusters. The
@@ -203,7 +286,7 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   exposes the review-feedback gains and `feedback_normalization`, and every stored
   run shows its own parameters through `config-summary.ts` — without that, a boosted
   run and a baseline are indistinguishable in the run list.
-- The Annotation tab's review toolbar explicitly scores its current prompt through
+- The Object Search tab's review toolbar explicitly scores its current prompt through
   `benchmark/score-prompt` and compares it with the same prompt in the newest full
   run. That comparison is *not* guaranteed to be a baseline: it is simply the newest
   run, so both sides are labelled with their parameters. The score sends the panel's

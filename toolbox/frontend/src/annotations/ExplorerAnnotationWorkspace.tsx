@@ -21,6 +21,7 @@ import {
   updateAnnotation as updateStoredAnnotation,
 } from "./api";
 import CollapsibleSection from "./CollapsibleSection";
+import ObjectIdCombobox, { type ObjectIdOption } from "./ObjectIdCombobox";
 import { canonicalLevel, pointInPolygon } from "./geometry";
 import {
   newAnnotationId,
@@ -603,10 +604,62 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
   };
 }
 
+/**
+ * The blocks the tool is made of. The Annotation tab renders subsets of them under
+ * its own modes; anything that still wants the whole panel omits `sections` and
+ * gets what it always got.
+ */
+export type AnnotationControlsSection =
+  | "mode"
+  | "classes"
+  | "object"
+  | "metadata"
+  | "roi"
+  | "io";
+
+/**
+ * Whether the annotation on screen can be written. The Annotation tab renders its own
+ * Save button, and a second copy of this condition is exactly how a button ends up
+ * enabled over a save that then refuses.
+ */
+export function canSaveAnnotation(workspace: ExplorerAnnotationWorkspace): boolean {
+  return Boolean(
+    (workspace.draft?.status === "resolved" || workspace.editingAnnotation) &&
+      workspace.activeClass &&
+      workspace.objectIdInput.trim() &&
+      (parseOptionalNumber(workspace.extentInput) ?? 0) > 0 &&
+      parseLabelList(workspace.synonymsInput).length,
+  );
+}
+
+const ALL_CONTROLS_SECTIONS: AnnotationControlsSection[] = [
+  "mode",
+  "classes",
+  "object",
+  "metadata",
+  "roi",
+  "io",
+];
+
 export function ExplorerAnnotationControls(props: {
   workspace: ExplorerAnnotationWorkspace;
+  /** Defaults to every section, which is the original panel. */
+  sections?: AnnotationControlsSection[];
+  /** Render without the "Annotation tools" collapsible around it. */
+  bare?: boolean;
+  /** The caller renders Save/Discard itself (the Annotation tab's action bar). */
+  hideSaveActions?: boolean;
+  /**
+   * An offered horizontal extent, from the proposal's angular width at the resolved
+   * depth. Shown beside the field and applied only on request: it assumes the object
+   * faces the camera and that the depth sample is the object's, so it is a starting
+   * point, not a measurement.
+   */
+  extentSuggestion?: { valueM: number; explanation: string; onApply: () => void } | null;
 }) {
   const { workspace } = props;
+  const sections = props.sections ?? ALL_CONTROLS_SECTIONS;
+  const showSection = (name: AnnotationControlsSection) => sections.includes(name);
   const [newClassName, setNewClassName] = useState("");
   const [newClassColor, setNewClassColor] = useState(DEFAULT_NEW_CLASS_COLOR);
   const [isImportDragOver, setIsImportDragOver] = useState(false);
@@ -624,12 +677,25 @@ export function ExplorerAnnotationControls(props: {
   const [editClassColor, setEditClassColor] = useState(DEFAULT_NEW_CLASS_COLOR);
   const [editClassPrompt, setEditClassPrompt] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const knownObjectIds = useMemo(
-    () => [...new Set(workspace.annotations.flatMap((item) =>
-      item.groundTruth.objectId ? [item.groundTruth.objectId] : [],
-    ))].sort(),
-    [workspace.annotations],
-  );
+  // Every id already in use, with the class it belongs to and how many views it has:
+  // reusing an id is what makes two points the same physical object, so the list has
+  // to carry enough to tell `chair-017` from `door-017` at a glance.
+  const knownObjectIds = useMemo<ObjectIdOption[]>(() => {
+    const byId = new Map<string, ObjectIdOption>();
+    for (const item of workspace.annotations) {
+      const objectId = item.groundTruth.objectId;
+      if (!objectId) {
+        continue;
+      }
+      const entry = byId.get(objectId);
+      if (entry) {
+        entry.count += 1;
+      } else {
+        byId.set(objectId, { objectId, className: item.className, count: 1 });
+      }
+    }
+    return [...byId.values()].sort((a, b) => a.objectId.localeCompare(b.objectId));
+  }, [workspace.annotations]);
   const knownZones = useMemo(
     () => [...new Set(workspace.annotations.flatMap((item) =>
       item.groundTruth.exhaustiveZone ? [item.groundTruth.exhaustiveZone] : [],
@@ -646,7 +712,10 @@ export function ExplorerAnnotationControls(props: {
       return;
     }
     workspace.setObjectIdInput(
-      nextObjectId(workspace.activeClass.name, knownObjectIds),
+      nextObjectId(
+        workspace.activeClass.name,
+        knownObjectIds.map((option) => option.objectId),
+      ),
     );
   }, [
     knownObjectIds,
@@ -967,16 +1036,9 @@ export function ExplorerAnnotationControls(props: {
     ? workspace.classes.find((item) => classKey(item) === classMenu.classKey) ?? null
     : null;
 
-  return (
-    <CollapsibleSection
-      title="Annotation tools"
-      summary={`${workspace.enabled ? "Active · " : ""}${
-        workspace.annotations.length
-      } saved`}
-      sectionClassName="explorer-annotation-toolbar"
-      defaultOpen={false}
-      forceOpen={Boolean(workspace.draft || workspace.editingAnnotation)}
-    >
+  const body = (
+    <>
+      {showSection("mode") ? (
       <div className="explorer-annotation-mode-row">
         <label className="inline-check">
           <input
@@ -1016,8 +1078,11 @@ export function ExplorerAnnotationControls(props: {
           />
         </label>
       </div>
+      ) : null}
 
+      {showSection("classes") || showSection("object") ? (
       <div className="explorer-annotation-primary-grid">
+        {showSection("classes") ? (
         <section>
           <div className="explorer-class-heading">
             <h4>Classes</h4>
@@ -1181,7 +1246,9 @@ export function ExplorerAnnotationControls(props: {
             </form>
           ) : null}
         </section>
+        ) : null}
 
+        {showSection("object") ? (
         <section className="annotation-contract-panel">
           <div className="annotation-contract-heading">
             <div>
@@ -1220,12 +1287,12 @@ export function ExplorerAnnotationControls(props: {
               <div className="annotation-contract-core">
                 <label>
                   Object ID
-                  <input
-                    list="annotation-object-ids"
+                  <ObjectIdCombobox
                     value={workspace.objectIdInput}
-                    onChange={(event) => workspace.setObjectIdInput(event.target.value)}
+                    options={knownObjectIds}
                     placeholder="chair-017"
-                    aria-describedby="annotation-object-id-help"
+                    describedBy="annotation-object-id-help"
+                    onChange={workspace.setObjectIdInput}
                   />
                   <small id="annotation-object-id-help">
                     Reuse an existing ID when this is another view of the same object.
@@ -1242,15 +1309,20 @@ export function ExplorerAnnotationControls(props: {
                     onChange={(event) => workspace.setExtentInput(event.target.value)}
                     placeholder="0.5"
                   />
+                  {props.extentSuggestion ? (
+                    <button
+                      type="button"
+                      className="annotation-extent-suggestion"
+                      title={props.extentSuggestion.explanation}
+                      onClick={props.extentSuggestion.onApply}
+                    >
+                      Use {props.extentSuggestion.valueM.toFixed(2)} m
+                      <span>{props.extentSuggestion.explanation}</span>
+                    </button>
+                  ) : null}
                   <small>Estimate the largest horizontal dimension, not a match radius.</small>
                 </label>
               </div>
-              <datalist id="annotation-object-ids">
-                {knownObjectIds.map((objectId) => (
-                  <option key={objectId} value={objectId} />
-                ))}
-              </datalist>
-
               <label className="annotation-contract-field">
                 Exact synonyms
                 <input
@@ -1322,18 +1394,12 @@ export function ExplorerAnnotationControls(props: {
                   This annotation is a printed or displayed image of its class
                 </label>
               </CollapsibleSection>
+              {props.hideSaveActions ? null : (
               <div className="button-row">
                 <button
                   className="primary-button"
                   type="button"
-                  disabled={
-                    (workspace.draft?.status !== "resolved" &&
-                      !workspace.editingAnnotation) ||
-                    !workspace.activeClass ||
-                    !workspace.objectIdInput.trim() ||
-                    (parseOptionalNumber(workspace.extentInput) ?? 0) <= 0 ||
-                    !parseLabelList(workspace.synonymsInput).length
-                  }
+                  disabled={!canSaveAnnotation(workspace)}
                   onClick={
                     workspace.editingAnnotation
                       ? workspace.saveAnnotationEdit
@@ -1354,6 +1420,7 @@ export function ExplorerAnnotationControls(props: {
                   Discard
                 </button>
               </div>
+              )}
             </>
           ) : (
             <p className="muted">
@@ -1361,9 +1428,13 @@ export function ExplorerAnnotationControls(props: {
             </p>
           )}
         </section>
+        ) : null}
       </div>
+      ) : null}
 
+      {showSection("metadata") || showSection("roi") || showSection("io") ? (
       <div className="explorer-annotation-secondary-grid">
+        {showSection("metadata") ? (
         <CollapsibleSection
           title="Metadata"
           sectionClassName="collapsible-subsection annotation-compact-panel"
@@ -1401,7 +1472,9 @@ export function ExplorerAnnotationControls(props: {
             />
           </label>
         </CollapsibleSection>
+        ) : null}
 
+        {showSection("roi") ? (
         <CollapsibleSection
           title="ROI count"
           sectionClassName="collapsible-subsection annotation-compact-panel"
@@ -1441,7 +1514,9 @@ export function ExplorerAnnotationControls(props: {
             )}
           </div>
         </CollapsibleSection>
+        ) : null}
 
+        {showSection("io") ? (
         <CollapsibleSection
           title="Load / Save"
           sectionClassName="collapsible-subsection annotation-compact-panel"
@@ -1517,13 +1592,35 @@ export function ExplorerAnnotationControls(props: {
             />
           </div>
         </CollapsibleSection>
+        ) : null}
       </div>
+      ) : null}
+    </>
+  );
+
+  if (props.bare) {
+    return <div className="explorer-annotation-toolbar is-bare">{body}</div>;
+  }
+
+  return (
+    <CollapsibleSection
+      title="Annotation tools"
+      summary={`${workspace.enabled ? "Active · " : ""}${
+        workspace.annotations.length
+      } saved`}
+      sectionClassName="explorer-annotation-toolbar"
+      defaultOpen={false}
+      forceOpen={Boolean(workspace.draft || workspace.editingAnnotation)}
+    >
+      {body}
     </CollapsibleSection>
   );
 }
 
 export function ExplorerAnnotationList(props: {
   workspace: ExplorerAnnotationWorkspace;
+  /** The Annotation tab's review mode shows the history open; elsewhere it folds. */
+  defaultOpen?: boolean;
 }) {
   const { workspace } = props;
   const selectedRowRef = useRef<HTMLLIElement | null>(null);
@@ -1586,7 +1683,7 @@ export function ExplorerAnnotationList(props: {
           ? String(workspace.annotations.length)
           : undefined
       }
-      defaultOpen={workspace.annotations.length <= 10}
+      defaultOpen={props.defaultOpen ?? workspace.annotations.length <= 10}
       forceOpen={Boolean(workspace.selectedAnnotationId)}
     >
       <CollapsibleSection
