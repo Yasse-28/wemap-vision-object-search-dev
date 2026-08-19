@@ -23,7 +23,7 @@ The annotation ownership boundary is recorded in
 | `annotation-store.ts` | Integrated per-map SQLite annotation CRUD, legacy migration, one-shot benchmark GeoJSON import, ground-truth assembly, and the reference detection partition | `annotationDatabasePath`, `listAnnotations`, `upsertDetectionReview`, `deleteDetectionReview`, `buildGroundTruth`, `listDetectionGroups`, `upsertDetectionGroupLabel`, `deleteDetectionGroupLabel` |
 | `object-search-metadata.ts` | **Reads `{map}/object-search/metadata.parquet` natively** (`hyparquet`, pure JS) into typed numeric columns and dictionary-coded strings; rows are materialised only on demand. Replaces the retired `object-search.db` reader: no cutout→objects hierarchy, one row *is* one proposal and one detection. Caches two maps by mtime and **drops the entry when the read fails**. | `resolveMetadataPath`, `loadMetadata`, `requireMetadata`, `rowsForKeyframe`, `rowSlice`, `rowByIndex`, `MetadataRow`, `LoadedMetadata`, `MetadataError` |
 | `erp-geometry.ts` | The only place the four stored angle columns become something drawable. Replaces the cubemap algebra. | `erpBboxRatios`, `erpRectsWrapped`, `cutoutRatioToErpUv`, `assertEquirect2to1`, `gnomonicFfmpegFilter`, `paddingMask`, `isRenderableGnomonic`, `angularAreaDeg2` |
-| `workbench-index.ts` | Manifest-backed routes (keyframe markers, depth pin, view cone, world-point projection, ERP + depth previews, `previewFromPathPng`) **plus** the parquet-backed row routes. The manifest half needs no metadata and must never be gated on it. | `objectSearchMetadataStatusPayload`, `metadataRowsPayload`, `metadataRowPayload`, `metadataRowRenderPng`, `indexKeyframeEquirectPreviewPng`, `indexDepthPinPayload`, `indexViewConePayload`, `indexProjectWorldPointPayload`, `keyframeMetadataPayload`, `previewFromPathPng`, `rowFilterParamsFromQuery`, `keyframeHeadingDegreesFromPose`; shells to a Python interp for uint16-TIFF depth decode (`OBJECT_SEARCH_WORKBENCH_PYTHON`) and to `ffmpeg`/`convert` for renders |
+| `workbench-index.ts` | Manifest-backed routes (keyframe markers, depth pin, view cone, world-point and proposal-neighbour projection, ERP + depth previews, `previewFromPathPng`) **plus** the parquet-backed row routes. The manifest half needs no metadata and must never be gated on it. | `objectSearchMetadataStatusPayload`, `metadataRowsPayload`, `metadataRowPayload`, `metadataRowRenderPng`, `proposalNeighborProjectionsPayload`, `proposalNeighborProjectionRenderPng`, `projectProposalIntoNearestKeyframes`, `featureMatchAssessment`, `edgeNccAssessment`, `indexKeyframeEquirectPreviewPng`, `indexDepthPinPayload`, `indexViewConePayload`, `indexProjectWorldPointPayload`, `keyframeMetadataPayload`, `previewFromPathPng`, `rowFilterParamsFromQuery`, `keyframeHeadingDegreesFromPose`; shells to a Python interp for uint16-TIFF depth decode and optional OpenCV SIFT/Edge-NCC scoring (`OBJECT_SEARCH_WORKBENCH_PYTHON`), and to `ffmpeg`/`convert` for renders |
 | `workbench-api.ts` | `/ui/api/...` route handling | `isWorkbenchUiMapRoute` (its trailing segment is optional, so `DELETE /ui/api/maps/{id}` reaches the same dispatcher), `handleWorkbenchUiMapRoute` |
 | `python-process.ts` | One place for the interpreter search order and PYTHONPATH, which `benchmark-runner.ts` and `workbench-index.ts` each held a copy of | `pythonBinaryCandidates`, `pythonEnv`, `runPython`, `lastJsonLine` |
 | `export-roi.ts` | ROI export + map deletion routes. Thin: the work is `toolbox/bricks/export_roi.py` and `delete_map.py` — the geometry lives beside the manifest reader, and this backend has no Postgres client. Job shape copied from `benchmark-runner.ts` (202 + poll), one export at a time so two runs cannot allocate the same `geo_ref_id`. The directory browser is **confined** to the source map's parent and the config directory. | `listDirectoriesPayload`, `createDirectoryPayload`, `exportPreviewPayload`, `startExportRun`, `exportStatusPayload`, `deletionPreviewPayload`, `deleteMapPayload` |
@@ -43,6 +43,8 @@ The annotation ownership boundary is recorded in
 | `GET /object-search-metadata/rows` | Flat row table: `keyframe_ids`, `offset`, `limit`, `detector_source`, `label`, `with_depth`. One request per explorer page. |
 | `GET /object-search-metadata/rows/{row_index}` | One row + `preview_path` (its `thumbnail_key`) + `preview_debug`. |
 | `GET /object-search-metadata/rows/{row_index}/render.png` | Re-render from the ERP (`size`, `fov_scale`). **Not** the default preview — 422 for a proposal spanning ≥180°. |
+| `GET /object-search-metadata/rows/{row_index}/neighbor-projections?count=N&diverse=true` | Lift the proposal centre through its stored depth and select N nearby manifest poses (1–12). `diverse=true` (default) applies the 0.5 m source/inter-result baseline when possible; `diverse=false` returns the strictly nearest poses without that baseline. Returns the applied `minimum_baseline_m`, projected centre/extent, explainable geometric confidence (source distance, viewpoint angle, apparent size), target-depth visibility confidence, COLMAP-style feature score, and Edge NCC appearance score. Features run SIFT on the centred proposal region, apply L2 2-NN ratio matching, verify a homography with RANSAC, and combine inlier ratio with verified support. Edge NCC correlates Sobel-gradient magnitude at Gaussian σ 0.8/2/4 with weights 0.2/0.3/0.5 over the exact proposal region, uses a SIFT homography only with at least six verified inliers, otherwise searches bounded translations with a displacement penalty, and returns `uninformative` when either region has too little edge structure. It remains conservative under viewpoint changes. Missing OpenCV reports visual scores `unavailable` without failing the projection. Target depth near the expected range is `clear`; nearer depth is `occluded`; farther depth is `depth_mismatch`; missing/undecodable depth stays `unknown` without failing the geometric result. |
+| `GET /object-search-metadata/rows/{row_index}/neighbor-projections/{target_keyframe_id}.png` | Rectilinear context render (`size`, `fov_scale`) centred on one of those projected target views. |
 | `GET /object-search-metadata/keyframes/{id}/equirect-preview.png` | Bare ERP (`draw_boxes=false`, JPEG) or with reconstructed boxes (PNG). |
 | `GET /object-search-metadata/keyframes/{id}/depth-preview.png`, `POST …/depth-pin`, `…/view-cone`, `…/project-world-point` | Manifest-only, except `depth-pin` with `projection: "cutout"`, which needs `row_index`. |
 | `GET /object-search-metadata/keyframe-graph` | From `360-viewer/graph.geojson`. |
@@ -85,8 +87,24 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   corridor). It relies on `/object-search-metadata/markers` staying in manifest
   order — sorted by id as a string, `"10"` precedes `"2"` and the track is noise. Reads the parquet
   rows through `/object-search-metadata/*`. Pagination is **keyframe-major** (one ERP
-  and its proposals), and the panel renders as soon as the map is known — the
-  metadata warning is scoped to the row table, not the panel
+  and its proposals); its compact proposal grid can independently show the rows kept
+  or discarded by the current bbox post-processing controls. Detector visibility
+  (G-DINO / YOLO-W) sits beside those filters and remains active when geometric bbox
+  post-processing is disabled; each detector's share of all raw proposals across the
+  map appears below the proposal total in the top health strip. Cutout depth pins are placed only from the selected
+  proposal's context preview with Ctrl+click; while Ctrl is held, the same red depth
+  cursor as the panorama follows the pointer. Proposal cards only change selection.
+  The selected-proposal inspector can project a depth-bearing proposal into 1–12
+  nearest camera poses, preferring a 0.5 m baseline between views when the capture
+  permits it: it lifts the source centre to 3D, transfers the proposal's approximate
+  physical extent, and renders centred target cutouts. Clicking a target opens that
+  keyframe in the panorama and faces the projected centre. Each card keeps two scores
+  separate: geometry combines source distance, viewpoint angle and apparent size;
+  visibility compares the projected distance with the target depth sample and names
+  foreground occlusion separately from a farther depth mismatch. Hovering a score
+  exposes its inputs; absent target depth is reported as such, never treated as zero.
+  The panel renders as soon as the map is known — the
+  metadata warning is scoped to the proposal grid, not the panel
   (`ObjectSearchExplorerPanel.tsx`, `EquirectPhotoSphereViewer.tsx`, `bboxPostProcess.ts`).
 - `index-explorer/` — `api.ts` + `types.ts` only, shared by both panels. The
   directory name is a leftover of `IndexExplorerPanel.tsx`/`LatentScatter.tsx`, which

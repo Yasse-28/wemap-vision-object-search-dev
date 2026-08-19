@@ -751,10 +751,13 @@ export function ExplorerAnnotationControls(props: {
 
   return (
     <CollapsibleSection
-      title="Annotation office"
-      summary={`${workspace.annotations.length} saved`}
+      title="Annotation tools"
+      summary={`${workspace.enabled ? "Active · " : ""}${
+        workspace.annotations.length
+      } saved`}
       sectionClassName="explorer-annotation-toolbar"
-      defaultOpen
+      defaultOpen={false}
+      forceOpen={Boolean(workspace.draft)}
     >
       <div className="explorer-annotation-mode-row">
         <label className="inline-check">

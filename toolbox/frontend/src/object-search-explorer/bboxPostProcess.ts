@@ -143,8 +143,10 @@ function detectionScore(item: MetadataRowRecord): number {
   return item.detection_score ?? bboxArea(item);
 }
 
-function detectionSourceFamily(item: MetadataRowRecord): "yolo" | "gdino" | "other" {
-  const source = item.detector_source.toLowerCase();
+export function detectorSourceFamily(
+  detectorSource: string,
+): "yolo" | "gdino" | "other" {
+  const source = detectorSource.toLowerCase();
   if (source.includes("yolo")) {
     return "yolo";
   }
@@ -158,13 +160,8 @@ export function postProcessDetections(
   detections: MetadataRowRecord[],
   params: BboxPostProcessParams,
 ): MetadataRowRecord[] {
-  if (!params.enabled) {
-    return detections;
-  }
-  const maxLimit = params.maxBboxArea <= 0 ? Number.POSITIVE_INFINITY : params.maxBboxArea;
-  const minLimit = Math.max(0, params.minBboxArea);
   const filteredBySourceAndArea = detections.filter((item) => {
-    const family = detectionSourceFamily(item);
+    const family = detectorSourceFamily(item.detector_source);
     if (family === "yolo" && !params.showYolo) {
       return false;
     }
@@ -174,10 +171,16 @@ export function postProcessDetections(
     if (family === "other" && (!params.showYolo || !params.showGdino)) {
       return false;
     }
+    if (!params.enabled) {
+      return true;
+    }
+    const maxLimit =
+      params.maxBboxArea <= 0 ? Number.POSITIVE_INFINITY : params.maxBboxArea;
+    const minLimit = Math.max(0, params.minBboxArea);
     const area = bboxArea(item);
     return area >= minLimit && area <= maxLimit;
   });
-  if (params.nmsIou >= 1 || filteredBySourceAndArea.length <= 1) {
+  if (!params.enabled || params.nmsIou >= 1 || filteredBySourceAndArea.length <= 1) {
     return filteredBySourceAndArea;
   }
   const ordered = [...filteredBySourceAndArea].sort((a, b) => detectionScore(b) - detectionScore(a));
@@ -202,8 +205,8 @@ export function bboxPostProcessQueryParams(
     query.set("nms_iou", "1");
     query.set("min_bbox_area", "0");
     query.set("max_bbox_area", "0");
-    query.set("show_yolo", "true");
-    query.set("show_gdino", "true");
+    query.set("show_yolo", params.showYolo ? "true" : "false");
+    query.set("show_gdino", params.showGdino ? "true" : "false");
     return query;
   }
   query.set("nms_iou", String(params.nmsIou));

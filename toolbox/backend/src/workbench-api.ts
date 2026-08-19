@@ -57,6 +57,8 @@ import {
   objectSearchMetadataMarkersPayload,
   objectSearchMetadataStatusPayload,
   previewFromPathPng,
+  proposalNeighborProjectionRenderPng,
+  proposalNeighborProjectionsPayload,
   rowFilterParamsFromQuery,
   WorkbenchRouteError,
 } from "./workbench-index.js";
@@ -411,6 +413,40 @@ export async function handleWorkbenchUiMapRoute(
     }
     if (method === "GET" && suffix === "/object-search-metadata/keyframe-graph") {
       sendJson(response, 200, await keyframeGraphPayload(map));
+      return true;
+    }
+    if (
+      method === "GET"
+      && /^\/object-search-metadata\/rows\/\d+\/neighbor-projections$/.test(suffix)
+    ) {
+      sendJson(
+        response,
+        200,
+        await proposalNeighborProjectionsPayload(
+          map,
+          Number(suffix.split("/")[3]),
+          queryNumber(url, "count", 5),
+          url.searchParams.get("diverse") !== "false",
+        ),
+      );
+      return true;
+    }
+    if (
+      method === "GET"
+      && /^\/object-search-metadata\/rows\/\d+\/neighbor-projections\/\d+\.png$/.test(suffix)
+    ) {
+      sendPng(
+        response,
+        await proposalNeighborProjectionRenderPng(
+          map,
+          Number(suffix.split("/")[3]),
+          suffix.split("/")[5].replace(/\.png$/, ""),
+          {
+            size: queryNumber(url, "size", 384),
+            fovScale: queryNumber(url, "fov_scale", 2),
+          },
+        ),
+      );
       return true;
     }
     if (method === "GET" && /^\/object-search-metadata\/rows\/\d+$/.test(suffix)) {

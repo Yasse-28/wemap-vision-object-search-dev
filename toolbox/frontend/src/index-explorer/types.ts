@@ -180,6 +180,44 @@ export type ProjectWorldPointResponse = {
   point_world_wds: [number, number, number];
 };
 
+export type ProposalNeighborProjection = {
+  keyframe_id: string;
+  distance_from_source_m: number;
+  distance_to_proposal_m: number;
+  erp_u: number;
+  erp_v: number;
+  theta_center: number;
+  phi_center: number;
+  angular_width: number;
+  angular_height: number;
+  viewpoint_angle_deg: number;
+  apparent_area_ratio: number;
+  distance_score: number;
+  view_angle_score: number;
+  apparent_size_score: number;
+  geometric_confidence: number;
+  observed_depth_m: number | null;
+  occlusion_margin_m: number | null;
+  occlusion_confidence: number | null;
+  occlusion_status: "clear" | "occluded" | "depth_mismatch" | "unknown";
+  feature_match_score: number | null;
+  feature_matches: number;
+  feature_inliers: number;
+  feature_inlier_ratio: number | null;
+  feature_match_status: "matched" | "weak" | "no_features" | "unavailable";
+  edge_ncc_score: number | null;
+  edge_ncc_status: "matched" | "weak" | "uninformative" | "unavailable";
+};
+
+export type ProposalNeighborProjectionsResponse = {
+  row_index: number;
+  source_keyframe_id: string;
+  requested_count: number;
+  minimum_baseline_m: number;
+  projections: ProposalNeighborProjection[];
+  note: string;
+};
+
 export type ViewConeResponse = {
   available: boolean;
   keyframe_id: string;
