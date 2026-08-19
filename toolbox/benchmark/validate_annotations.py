@@ -26,6 +26,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from toolbox.benchmark.annotation_store import (
+    ANNOTATION_DB_FILENAME,
+    annotation_database_path,
+    load_store_annotations,
+)
 from toolbox.benchmark.error_decomposition import SEPARABILITY_LIMIT, separability
 from toolbox.benchmark.label_set_metrics import LABEL_CATEGORIES, has_label_sets
 from toolbox.benchmark.object_search_http_benchmark import (
@@ -34,7 +39,9 @@ from toolbox.benchmark.object_search_http_benchmark import (
     match_radius_m,
 )
 
-#: Where the toolbox exports the annotation store for the benchmark to read.
+#: Where the toolbox exports the annotation store for the benchmark to read. Only
+#: rewritten when a benchmark run starts, so it is not what this command reads by
+#: default — see `toolbox.benchmark.annotation_store`.
 DEFAULT_GEOJSON = Path("benchmark") / "annotations.geojson"
 #: Accuracy given to a feature carrying none. It only affects annotations with no
 #: `extent_m`, which is exactly the case the report is already complaining about.
@@ -305,6 +312,34 @@ def report_lines(annotations: Sequence[Annotation], findings: Findings) -> list[
     return lines
 
 
+def read_annotations(
+    map_path: Path, geojson: Path | None, default_accuracy_m: float
+) -> tuple[Path, list[Annotation]]:
+    """The annotations to validate, and the path they came from.
+
+    The store wins over the export unless a file is named explicitly: the report tells
+    the annotator what to fix next, and an export written by the last benchmark run
+    describes a map that may already have been fixed.
+    """
+    if geojson is not None:
+        if not geojson.is_file():
+            raise SystemExit(f"{geojson}: fichier introuvable.")
+        return geojson, load_annotations(geojson, default_accuracy_m)
+
+    db_path = annotation_database_path(map_path)
+    if db_path.is_file():
+        return db_path, load_store_annotations(db_path, default_accuracy_m)
+
+    export = map_path / DEFAULT_GEOJSON
+    if export.is_file():
+        return export, load_annotations(export, default_accuracy_m)
+    raise SystemExit(
+        f"{map_path}: aucune annotation — ni {ANNOTATION_DB_FILENAME} ni"
+        f" {DEFAULT_GEOJSON}. Ouvrir l'onglet Annotation du toolbox une fois pour"
+        " créer le magasin."
+    )
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     """Parse the validation command line."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -313,7 +348,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--geojson",
         type=Path,
         default=None,
-        help=f"Annotations to read. Defaults to <map>/{DEFAULT_GEOJSON}.",
+        help=(
+            "Read this exported GeoJSON instead of the map's annotation store. The"
+            f" store ({ANNOTATION_DB_FILENAME}) is the default because"
+            f" {DEFAULT_GEOJSON} is only rewritten when a benchmark run starts, and"
+            " so lags behind what has just been annotated."
+        ),
     )
     parser.add_argument("--default-accuracy", type=float, default=DEFAULT_ACCURACY_M)
     return parser.parse_args(argv)
@@ -323,14 +363,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Validate one map's annotations; non-zero when something is contradictory."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
     map_path = args.map_path.expanduser().resolve()
-    path = args.geojson or map_path / DEFAULT_GEOJSON
-    if not path.is_file():
-        raise SystemExit(
-            f"{path}: aucun export d'annotations — ouvrir l'onglet Annotation du"
-            " toolbox une fois, ou lancer un benchmark, pour l'écrire."
-        )
-    annotations = load_annotations(path, args.default_accuracy)
+    source, annotations = read_annotations(
+        map_path, args.geojson, args.default_accuracy
+    )
     findings = validate(annotations)
+    print(f"source : {source}")
     print("\n".join(report_lines(annotations, findings)))
     return 1 if findings.blocking else 0
 

@@ -356,6 +356,17 @@ created **once per `emmid`** in a detached `<div>` and cached:
 
 - Backend is plain `node:http` (no framework); routes are matched manually in
   `workbench-api.ts` / `main.ts`.
+- **`benchmark/annotations.geojson` is a benchmark artefact, not the ground truth.**
+  `regenerateGroundTruth` (`benchmark-runner.ts`) rewrites it only when a run starts,
+  so between runs it describes the map as the last run saw it. The store —
+  `{map}/object-search-annotations.db` — is the truth. Anything reporting on *current*
+  annotations must read the store: `toolbox/benchmark/annotation_store.py`
+  (`build_ground_truth`, `load_store_annotations`) mirrors `buildGroundTruth` for that,
+  and feeds `parse_annotations` so both readers parse the ADR 0009 fields identically.
+  `validate_annotations` uses it; the benchmark and the sweeps still read the export.
+  Skipping this cost a day of confusion on vinci-st-domingue-zone-1: the export showed
+  9 annotations of 6 classes with no contract fields where the store held 12 complete
+  ones.
 - **A map's `geo_ref_id` comes from its manifest, and it partitions a shared table.**
   Deleting a map means `DELETE ... WHERE geo_ref_id = %s` on rows every map lives in,
   so both the export (allocate a free id) and the deletion (refuse a shared one) are

@@ -209,9 +209,25 @@ def _polygon_centroid(coordinates: Any) -> tuple[float, float] | None:
 def load_annotations(path: Path, default_accuracy_m: float) -> list[Annotation]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
+    try:
+        return parse_annotations(data, default_accuracy_m)
+    except ValueError as error:
+        raise ValueError(f"{path}: {error}") from error
+
+
+def parse_annotations(
+    data: Mapping[str, Any], default_accuracy_m: float
+) -> list[Annotation]:
+    """Read annotations from an already-parsed GeoJSON FeatureCollection.
+
+    Split out of `load_annotations` so a caller holding a collection built in memory —
+    `toolbox.benchmark.annotation_store` reading the SQLite store — goes through the
+    same field parsing as a caller reading the exported file. Two readers of the ADR
+    0009 contract would drift.
+    """
     features = data.get("features")
     if data.get("type") != "FeatureCollection" or not isinstance(features, list):
-        raise ValueError(f"{path} must be a GeoJSON FeatureCollection")
+        raise ValueError("must be a GeoJSON FeatureCollection")
 
     annotations: list[Annotation] = []
     for idx, feature in enumerate(features):

@@ -304,12 +304,20 @@ empty table.
 
 ## Checking the annotations before trusting a measurement
 
-`validate_annotations.py` judges the ground truth, not the pipeline. It reads the GeoJSON
-export and nothing else.
+`validate_annotations.py` judges the ground truth, not the pipeline. It reads the map's
+`object-search-annotations.db` **directly**, not `benchmark/annotations.geojson`: that
+export is only rewritten when a benchmark run starts, so it describes the map as the last
+run saw it. On vinci-st-domingue-zone-1 it sat a day behind — 9 annotations of 6 classes
+where the store held 12, every ADR 0009 field reported absent because the export predated
+them, and a separability alarm about clicks that had already been replaced. The command
+prints the path it read on the first line.
 
 ```bash
 python -m toolbox.benchmark.validate_annotations --map-path /path/to/map
 ```
+
+Pass `--geojson <path>` to read an export instead — the one case that wants it is asking
+what a past benchmark actually scored, rather than what is annotated now.
 
 Three blocks, in the order they should be acted on: which contract fields are present
 (a field at 40 % is reported as **worse than absent** — a metric reading it would score a
