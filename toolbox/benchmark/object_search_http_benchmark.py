@@ -1089,6 +1089,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             args.feedback_alpha != 0.0 or args.feedback_beta != 0.0
         ):
             payload["feedback_normalization"] = args.feedback_normalization
+        if args.inverted_softmax_beta is not None:
+            payload["inverted_softmax_beta"] = args.inverted_softmax_beta
         if args.min_keyframes_per_cluster is not None:
             payload["min_keyframes_per_cluster"] = args.min_keyframes_per_cluster
         if args.max_observations_per_cluster is not None:
@@ -1561,6 +1563,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "retrieved candidates before the gains apply. 'none' is the raw term; "
             "'center' subtracts the median, 'standardize' also divides by a robust "
             "sigma. Ignored when both gains are zero."
+        ),
+    )
+    parser.add_argument(
+        "--inverted-softmax-beta",
+        type=float,
+        default=None,
+        help=(
+            "Rescore the retrieved set with inverted softmax at this inverse "
+            "temperature (20 is the QB-Norm value). Off by default. Requires "
+            "`python -m toolbox.benchmark.build_is_denominators <map>` first, and "
+            "cannot be combined with the review-feedback gains."
         ),
     )
     parser.add_argument("--min-keyframes-per-cluster", type=int, default=None)

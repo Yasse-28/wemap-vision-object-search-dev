@@ -36,6 +36,10 @@ class LocalizationParams:
     candidate_count: int = 1000
     num_results: int = 100
     min_similarity: float = 0.2
+    # Inverse temperature for the dev-only inverted-softmax rescoring of the retrieved
+    # set (`toolbox.bricks.inverted_softmax`). None = off = production behaviour; this
+    # field is carried here only so both request branches reach it.
+    inverted_softmax_beta: float | None = None
     max_observations_per_cluster: int = 10
     clustering_eps_m: float = 2.0
     min_keyframes_per_cluster: int = 2
@@ -134,6 +138,17 @@ class LocalizationParams:
             or self.rescorer is not None
             or self.vlm_gate == "detection"
         )
+
+    @property
+    def boosted_ranking(self) -> bool:
+        """Is any experiment writing `similarity_boosted` for ranking to read?
+
+        `_ranking_similarities` reads the boosted column only when this is true, so a
+        value written upstream cannot leak into the default path. Inverted softmax is
+        listed here because it writes the same column as the feedback gains — and it
+        is why the two are refused together at the request boundary.
+        """
+        return self.feedback_enabled or self.inverted_softmax_beta is not None
 
 
 @dataclass(frozen=True)
@@ -1401,6 +1416,7 @@ def rank_localization_clusters(
     *,
     cluster_best_sim: dict[int, float],
     min_similarity: float,
+    gate_sim: dict[int, float] | None = None,
 ) -> list[ClusterRanking]:
     """``match_score = best_sim / best_sim_of_the_query`` — one term, one meaning.
 
@@ -1428,11 +1444,18 @@ def rank_localization_clusters(
 
     **This is a deliberate divergence from `wemap-vision-backend`**, not a port
     artefact — see AI_CONTEXT/bricks.md. Production still ships the weighted mixture.
+
+    `gate_sim` separates the two roles `cluster_best_sim` used to play alone: the
+    `min_similarity` floor is checked against it while the score keeps coming from
+    `cluster_best_sim`. Identical behaviour when it is None, which is every caller that
+    does not boost. It exists because a boosted score is not on the cosine scale the
+    floor was chosen for.
     """
+    gate = cluster_best_sim if gate_sim is None else gate_sim
     eligible = {
         int(cluster_id): float(sim)
         for cluster_id, sim in cluster_best_sim.items()
-        if float(sim) >= float(min_similarity)
+        if float(gate.get(int(cluster_id), sim)) >= float(min_similarity)
     }
     ratios = _similarity_ratio_scores(eligible)
 
@@ -1453,13 +1476,17 @@ def _ranking_similarities(
 ) -> np.ndarray:
     """The similarity used to *score* clusters — boosted only when asked.
 
-    Disablement is structural at two levels, deliberately. With both gains at
-    zero this returns the raw array and `similarity_boosted` is never read, so a
-    bad value written upstream cannot leak into the default path; and even with
-    gains set, a candidate loaded without feedback falls back to its raw
+    Disablement is structural at two levels, deliberately. With no boosting experiment
+    enabled this returns the raw array and `similarity_boosted` is never read, so a
+    bad value written upstream cannot leak into the default path; and even when one is
+    enabled, a candidate that carries no boosted value falls back to its raw
     similarity through `effective_similarity`.
+
+    Note the scale: inverted softmax returns `beta * sim - log_denominator`, which is
+    negative. That is fine for *ranking* a cluster, which is all this feeds — the raw
+    column still drives `min_similarity`, the centroid weights and the level seed.
     """
-    if not params.feedback_enabled:
+    if not params.boosted_ranking:
         return np.array([c.similarity for c in selected], dtype=np.float64)
     return np.array([c.effective_similarity for c in selected], dtype=np.float64)
 
@@ -1696,6 +1723,7 @@ def localize_from_enriched_candidates(
     )
 
     cluster_best_sim: dict[int, float] = {}
+    cluster_best_raw_sim: dict[int, float] = {}
     cluster_keyframes: dict[int, set[str]] = {}
     cluster_observations: dict[int, list[tuple[int, float]]] = {}
 
@@ -1708,6 +1736,13 @@ def localize_from_enriched_candidates(
         ranking_sim = float(ranking_similarities[local_idx])
         if cid not in cluster_best_sim or ranking_sim > cluster_best_sim[cid]:
             cluster_best_sim[cid] = ranking_sim
+        # The raw cosine is kept separately because `min_similarity` is a floor *on a
+        # cosine*. Applying it to a boosted score compares a threshold to a quantity
+        # that is not a similarity: inverted softmax returns ~0.07, so a 0.15 floor
+        # discarded every cluster of every prompt and the run reported zero.
+        raw_sim = float(similarities[local_idx])
+        if cid not in cluster_best_raw_sim or raw_sim > cluster_best_raw_sim[cid]:
+            cluster_best_raw_sim[cid] = raw_sim
         cluster_keyframes.setdefault(cid, set()).add(str(candidate.video_keyframe_id))
         # Observations are ordered and truncated on the RAW similarity: this
         # selects *which* observations a cluster shows, and the plan routes every
@@ -1725,6 +1760,15 @@ def localize_from_enriched_candidates(
             max_spread_m=params.max_cluster_spread_m,
         ),
         min_similarity=params.min_similarity,
+        # Only inverted softmax needs the raw column for the floor. A feedback penalty
+        # *is* on the cosine scale and is meant to be able to push a cluster under the
+        # floor — `test_a_hard_penalty_can_drop_a_cluster_below_min_similarity` pins
+        # that, and it caught this being applied to both.
+        gate_sim=(
+            cluster_best_raw_sim
+            if params.inverted_softmax_beta is not None
+            else None
+        ),
     )
     ranked = ranked[: params.num_results]
 

@@ -407,6 +407,49 @@ literature reports. `panoptic_quality` and its two factors are also on every row
 out whole"), the rest duplicates `hota`. Dropped detections are excluded from the
 panoptic false positives — otherwise filtering an outlier scores worse than keeping it.
 
+### Inverted softmax: helps bbhotel, not vinci
+
+`--inverted-softmax-beta 20` on the benchmark rescores the *retrieved* set with
+QB-Norm's normalisation: `exp(beta * sim(q,d) - log sum_b exp(beta * sim(b,d)))`. The
+log-sum term depends on the candidate and a fixed probe bank, never on the query, so it
+is one precomputed scalar per candidate id — **no mirror change and no re-ingest**,
+which is what makes it cheap where centring was not. Build it first:
+
+```bash
+python -m toolbox.benchmark.build_is_denominators <map_path>   # writes benchmark/is-denominators.npz
+```
+
+The bank is the Vinci asset classes plus the map's own annotated classes, four phrasings
+each: hubness is a property of the gallery *relative to a query distribution*, so a
+generic vocabulary characterises the wrong hubs.
+
+| | mAP | mean best F1 | P | R | F1 |
+|---|---|---|---|---|---|
+| bbhotel baseline | 0.782 | 0.811 | 0.734 | 0.711 | 0.722 |
+| bbhotel + IS | **0.817** | **0.841** | 0.897 | 0.055 | 0.103 |
+| vinci baseline | 0.196 | 0.334 | 0.340 | 0.205 | 0.256 |
+| vinci + IS | 0.186 | 0.312 | 0.333 | 0.016 | 0.030 |
+
+**Read the threshold-free pair, not P/R/F1.** `match_score` is `best_sim / best_of_query`,
+so rescoring changes the ratio distribution and the fixed acceptance threshold admits
+almost nothing — precision rises and recall collapses without either being evidence.
+On the comparable columns: bbhotel gains (+0.035 mAP, +0.030 best F1), vinci loses
+slightly (-0.010, -0.022). The retrieval-level R@1 gain measured beforehand (0.135 ->
+0.293 on bbhotel, 0.049 -> 0.086 on vinci) therefore **survives association only on
+bbhotel**; on vinci the tail loss cancels it.
+
+Two things the wiring had to get right, both of which produced a zero-everywhere run
+first:
+
+- **Scale.** The logit `beta*sim - log_denom` is negative, and `match_score`'s ratio
+  turns a negative best into a constant 1.0. The normalised `exp(...)` form ranks
+  identically and stays in (0, 1].
+- **The floor.** `min_similarity` is a floor *on a cosine*. Applied to a ~0.07 inverted
+  softmax value it discarded every cluster. `rank_localization_clusters` now takes
+  `gate_sim` so the floor reads the raw column while the score reads the boosted one —
+  passed **only** for inverted softmax, because a feedback penalty is on the cosine
+  scale and is meant to be able to drop a cluster under the floor.
+
 ### Centring the embeddings: measured, and it does not work
 
 `ingest_cli --center-embeddings` subtracts the index's own centroid from every stored
