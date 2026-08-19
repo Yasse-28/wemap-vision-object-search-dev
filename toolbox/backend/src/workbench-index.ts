@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -51,6 +52,7 @@ const PROJECTION_DISTANCE_CONFIDENCE_SCALE_M = 5;
 const PROJECTION_VIEW_ANGLE_CONFIDENCE_SCALE_RAD = Math.PI / 4;
 /** How long the status route waits on the bricks service for pgvector coverage. */
 const COVERAGE_TIMEOUT_MS = 2500;
+const sourceImageSha256Cache = new Map<string, Promise<string | null>>();
 
 export class WorkbenchRouteError extends Error {
   constructor(
@@ -624,6 +626,204 @@ async function lookupKeyframeDepthFilename(
   } catch {
     return null;
   }
+}
+
+function uuidFromAssetFilename(filename: string): string | null {
+  const stem = path.parse(filename).name;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(stem)
+    ? stem
+    : null;
+}
+
+async function fileSha256(filename: string | null): Promise<string | null> {
+  if (!filename) {
+    return null;
+  }
+  const cached = sourceImageSha256Cache.get(filename);
+  if (cached) {
+    return cached;
+  }
+  const promise = readFile(filename)
+    .then((data) => createHash("sha256").update(data).digest("hex"))
+    .catch(() => null);
+  sourceImageSha256Cache.set(filename, promise);
+  if (sourceImageSha256Cache.size > 256) {
+    sourceImageSha256Cache.delete(sourceImageSha256Cache.keys().next().value as string);
+  }
+  return promise;
+}
+
+async function keyframeSourceIdentity(
+  map: MapEntry,
+  keyframeId: string,
+): Promise<Record<string, unknown>> {
+  const manifest = await loadMapManifest(map.path);
+  const keyframe = manifest.keyframeById.get(Number(keyframeId));
+  if (!keyframe) {
+    return { source_schema_version: 1, legacy_keyframe_id: keyframeId };
+  }
+  const imagePath = await resolveSourceImagePath(map, keyframeId);
+  return {
+    source_schema_version: 1,
+    map_uuid: manifest.mapUuid || null,
+    geo_ref_id: manifest.geoRefId,
+    geo_ref_version: manifest.mapVersion,
+    geo_keyframe_id: keyframe.geoKeyframeId ?? null,
+    legacy_keyframe_id: keyframeId,
+    video_keyframe_id: keyframe.videoKeyframeId ?? null,
+    video_keyframe_uuid:
+      keyframe.videoKeyframeUuid ?? uuidFromAssetFilename(keyframe.imageFilename),
+    video_capture_id: keyframe.videoCaptureId ?? null,
+    video_capture_uuid: keyframe.videoCaptureUuid ?? null,
+    video_capture_index: keyframe.videoCaptureIndex ?? null,
+    frame_number: keyframe.frameNumber ?? null,
+    frame_time_s: keyframe.frameTimeS ?? null,
+    image_filename: keyframe.imageFilename,
+    image_storage_key: manifest.mapUuid
+      ? `${manifest.mapUuid}/images/${keyframe.imageFilename}`
+      : null,
+    image_sha256: await fileSha256(imagePath),
+    depth_filename: keyframe.depthFilename || null,
+    depth_storage_key:
+      manifest.mapUuid && keyframe.depthFilename
+        ? `${manifest.mapUuid}/depths/${keyframe.depthFilename}`
+        : null,
+  };
+}
+
+type ReprojectableAnnotation = {
+  coordinates: number[] | number[][];
+  altitude: number | null;
+  level: string | null;
+  source: Record<string, unknown> | null;
+};
+
+function sourceNumber(source: Record<string, unknown>, ...keys: string[]): number | null {
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== null && value !== undefined && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return null;
+}
+
+function sourceString(source: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+/** Re-anchor image observations to the newest manifest without losing old coordinates. */
+export async function reprojectAnnotationSources<T extends ReprojectableAnnotation>(
+  map: MapEntry,
+  annotations: T[],
+): Promise<T[]> {
+  let manifest: MapManifest;
+  try {
+    manifest = await loadMapManifest(map.path);
+  } catch {
+    return annotations;
+  }
+  const byUuid = new Map(
+    manifest.keyframes.flatMap((keyframe) => {
+      const uuid =
+        keyframe.videoKeyframeUuid ?? uuidFromAssetFilename(keyframe.imageFilename);
+      return uuid ? [[uuid, keyframe] as const] : [];
+    }),
+  );
+
+  return Promise.all(annotations.map(async (annotation) => {
+    if (!annotation.source || !Array.isArray(annotation.coordinates)) {
+      return annotation;
+    }
+    const uuid = sourceString(
+      annotation.source,
+      "videoKeyframeUuid",
+      "video_keyframe_uuid",
+    );
+    const imageFilename = sourceString(
+      annotation.source,
+      "imageFilename",
+      "image_filename",
+    );
+    const legacyId = sourceString(annotation.source, "keyframeId", "legacy_keyframe_id");
+    // Never fall back from a stable identity that no longer resolves: doing so
+    // could silently attach the observation to an unrelated array index after a
+    // GeoRef rebuild. Historical index-only observations remain visible but are
+    // deliberately not reprojected until they can be reconciled explicitly.
+    const keyframe = uuid
+      ? byUuid.get(uuid)
+      : imageFilename
+        ? manifest.keyframes.find((item) => item.imageFilename === imageFilename)
+        : undefined;
+    if (!uuid && !imageFilename && legacyId) {
+      return {
+        ...annotation,
+        source: {
+          ...annotation.source,
+          resolutionStatus: "legacy-unverified",
+        },
+      };
+    }
+    if (!keyframe) {
+      return {
+        ...annotation,
+        source: { ...annotation.source, resolutionStatus: "orphaned" },
+      };
+    }
+    const erpU = sourceNumber(annotation.source, "erpU", "erp_u");
+    const erpV = sourceNumber(annotation.source, "erpV", "erp_v");
+    const depthM = sourceNumber(annotation.source, "depthM", "depth_m");
+    const identity = await keyframeSourceIdentity(map, String(keyframe.keyframeId));
+    const nextSource = {
+      ...annotation.source,
+      keyframeId: String(keyframe.keyframeId),
+      sourceSchemaVersion: identity.source_schema_version,
+      mapUuid: identity.map_uuid,
+      geoRefId: identity.geo_ref_id,
+      geoRefVersion: identity.geo_ref_version,
+      geoKeyframeId: identity.geo_keyframe_id,
+      videoKeyframeId: identity.video_keyframe_id,
+      videoKeyframeUuid: identity.video_keyframe_uuid,
+      videoCaptureId: identity.video_capture_id,
+      videoCaptureUuid: identity.video_capture_uuid,
+      videoCaptureIndex: identity.video_capture_index,
+      frameNumber: identity.frame_number,
+      frameTimeS: identity.frame_time_s,
+      imageFilename: identity.image_filename,
+      imageStorageKey: identity.image_storage_key,
+      imageSha256: annotation.source.imageSha256 ?? identity.image_sha256,
+      depthFilename: identity.depth_filename,
+      depthStorageKey: identity.depth_storage_key,
+      resolutionStatus: "resolved",
+    };
+    if (erpU === null || erpV === null || depthM === null || depthM <= 0) {
+      return { ...annotation, source: nextSource };
+    }
+    const ray = equirectUvToRay(erpU, erpV);
+    const pointKeyframe: [number, number, number] = [
+      ray[0] * depthM,
+      ray[1] * depthM,
+      ray[2] * depthM,
+    ];
+    const pointWorldWds = transformPoint4(
+      invertRigid4(manifestKeyframeToWorldToCameraWds(keyframe)),
+      pointKeyframe,
+    );
+    const geo = localWorldPointToGeo(geoRefContextFromManifest(manifest), pointWorldWds);
+    return {
+      ...annotation,
+      coordinates: [geo.longitude, geo.latitude],
+      altitude: geo.altitude,
+      level: geo.level,
+      source: nextSource,
+    };
+  }));
 }
 
 async function lookupKeyframeHeadings(
@@ -2612,6 +2812,7 @@ export async function indexDepthPinPayload(
     point_local: pointLocalEnu,
     point_world: [geo.latitude, geo.longitude, geo.altitude],
     point_world_wds: pointWorldWds,
+    source_identity: await keyframeSourceIdentity(map, keyframeId),
     latitude: geo.latitude,
     longitude: geo.longitude,
     altitude: geo.altitude,

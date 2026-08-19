@@ -25,6 +25,14 @@ export type ManifestKeyframe = {
   keyframeId: number;
   imageFilename: string;
   depthFilename: string;
+  geoKeyframeId?: number | null;
+  videoKeyframeId?: number | null;
+  videoKeyframeUuid?: string | null;
+  videoCaptureId?: number | null;
+  videoCaptureUuid?: string | null;
+  videoCaptureIndex?: number | null;
+  frameNumber?: number | null;
+  frameTimeS?: number | null;
   /** EUS metres: +X East, +Y Up, +Z South. */
   positionEus: [number, number, number];
   /** `[w, x, y, z]`, CameraFrame(OpenGL) → LocalFrame(EUS). */
@@ -96,6 +104,18 @@ function asBound(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function optionalFiniteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function optionalNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 export function parseManifest(manifestPath: string, text: string): MapManifest {
   const data = JSON.parse(text) as Record<string, unknown>;
   const label = path.basename(manifestPath);
@@ -151,6 +171,14 @@ export function parseManifest(manifestPath: string, text: string): MapManifest {
       keyframeId: index,
       imageFilename,
       depthFilename: assetBasename(keyframe.depth_url),
+      geoKeyframeId: optionalFiniteNumber(keyframe.geo_keyframe_id ?? keyframe.id),
+      videoKeyframeId: optionalFiniteNumber(keyframe.video_keyframe_id),
+      videoKeyframeUuid: optionalNonEmptyString(keyframe.video_keyframe_uuid),
+      videoCaptureId: optionalFiniteNumber(keyframe.video_capture_id),
+      videoCaptureUuid: optionalNonEmptyString(keyframe.video_capture_uuid),
+      videoCaptureIndex: optionalFiniteNumber(keyframe.video_capture_index),
+      frameNumber: optionalFiniteNumber(keyframe.frame_number),
+      frameTimeS: optionalFiniteNumber(keyframe.frame_time_s ?? keyframe.frame_time),
       positionEus: [
         asFiniteNumber(keyframe.x, `${label}: geo_keyframes[${index}].x`),
         asFiniteNumber(keyframe.y, `${label}: geo_keyframes[${index}].y`),

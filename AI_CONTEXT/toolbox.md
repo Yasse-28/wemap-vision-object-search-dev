@@ -46,7 +46,8 @@ The annotation ownership boundary is recorded in
 | `GET /object-search-metadata/rows/{row_index}/neighbor-projections?count=N&diverse=true` | Lift the proposal centre through its stored depth and select N nearby manifest poses (1–12). `diverse=true` (default) applies the 0.5 m source/inter-result baseline when possible; `diverse=false` returns the strictly nearest poses without that baseline. Returns the applied `minimum_baseline_m`, projected centre/extent, explainable geometric confidence (source distance, viewpoint angle, apparent size), target-depth visibility confidence, COLMAP-style feature score, and Edge NCC appearance score. Features run SIFT on the centred proposal region, apply L2 2-NN ratio matching, verify a homography with RANSAC, and combine inlier ratio with verified support. Edge NCC correlates Sobel-gradient magnitude at Gaussian σ 0.8/2/4 with weights 0.2/0.3/0.5 over the exact proposal region, uses a SIFT homography only with at least six verified inliers, otherwise searches bounded translations with a displacement penalty, and returns `uninformative` when either region has too little edge structure. It remains conservative under viewpoint changes. Missing OpenCV reports visual scores `unavailable` without failing the projection. Target depth near the expected range is `clear`; nearer depth is `occluded`; farther depth is `depth_mismatch`; missing/undecodable depth stays `unknown` without failing the geometric result. |
 | `GET /object-search-metadata/rows/{row_index}/neighbor-projections/{target_keyframe_id}.png` | Rectilinear context render (`size`, `fov_scale`) centred on one of those projected target views. |
 | `GET /object-search-metadata/keyframes/{id}/equirect-preview.png` | Bare ERP (`draw_boxes=false`, JPEG) or with reconstructed boxes (PNG). |
-| `GET /object-search-metadata/keyframes/{id}/depth-preview.png`, `POST …/depth-pin`, `…/view-cone`, `…/project-world-point` | Manifest-only, except `depth-pin` with `projection: "cutout"`, which needs `row_index`. |
+| `GET /object-search-metadata/keyframes/{id}/depth-preview.png`, `POST …/depth-pin`, `…/view-cone`, `…/project-world-point` | Manifest-only, except `depth-pin` with `projection: "cutout"`, which needs `row_index`. A depth pin also returns `source_identity`: stable image UUID/filename/hash, asset keys, map/georef provenance and optional production capture/frame ids. |
+| `GET /annotations`, `POST\|PUT\|DELETE /annotations/annotation` | Ground-truth editor. Loading resolves image-backed points against the newest manifest and returns the ERP ray + depth reprojected through its current pose without mutating the stored observation. Missing stable sources are marked `orphaned`; legacy index-only sources are `legacy-unverified`. `PUT` edits the semantic contract without changing the row id. |
 | `GET /object-search-metadata/keyframe-graph` | From `360-viewer/graph.geojson`. |
 | `GET /preview.png?preview_path=` | Serves a file from the map directory. **The default preview** for a proposal (`thumbnail_key`) and for a search result. `object-search/rows/{row_index}.png` is a **virtual** key with no file behind it: a v1-converted index has no crops, so the route re-renders that row from the ERP instead (`VIRTUAL_ROW_PREVIEW`). |
 | `GET /review-annotations`, `POST\|DELETE /review-annotations/detection-review` | Integrated review annotations in `{map}/object-search-annotations.db`; no external service. |
@@ -172,7 +173,20 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   old file. `canonicalLevel` and `pointInPolygon` moved out to
   `annotations/geometry.ts` when the export needed the same floor rule and the
   same ray cast; two copies that must agree with the backend's is exactly the
-  drift this file exists to prevent.
+  drift this file exists to prevent. New point annotations require `object_id`,
+  `extent_m` and at least one `labels.synonyms`; zone, depiction, visually-similar
+  and clutter sets are edited progressively and all live in
+  `ground_truth_point.extra_properties`. Image-backed sources use
+  `VideoKeyframe.uuid` (inferred from the asset filename today) as their canonical
+  anchor and retain the legacy keyframe id, asset names/keys, SHA-256, georef
+  provenance and any capture/frame ids an enriched manifest provides. Opening the
+  office re-resolves and reprojects these observations against the newest manifest
+  without rewriting the stored source or coordinates; a stable identity that no
+  longer resolves is never replaced by a legacy array index, and no failed match
+  deletes an annotation. Exact duplicate image clicks are deduplicated once; later
+  retries return the existing point through an expression uniqueness index.
+  **TODO:** independent annotator identities/sessions and the 50-object
+  double-annotation workflow remain out of scope while only one annotator works.
 - `object-search-review/` — detection-review API client, review controls, and
   per-query TP/FP state with undo/redo whose history survives a re-search. Its
   per-query annotation list is independent of displayed results, and counters

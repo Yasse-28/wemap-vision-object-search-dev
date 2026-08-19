@@ -926,6 +926,87 @@ tr:last-child td {
   font-size: 0.72rem;
 }
 
+.annotation-contract-panel {
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--c-accent) 24%, var(--c-border));
+  border-left: 4px solid var(--c-accent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-accent-soft) 32%, var(--c-surface));
+}
+
+.annotation-contract-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.annotation-contract-heading p {
+  margin: 3px 0 0;
+}
+
+.annotation-contract-status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+}
+
+.annotation-contract-status.is-ready {
+  border-color: color-mix(in srgb, var(--c-ok) 44%, var(--c-border));
+  background: color-mix(in srgb, var(--c-ok) 10%, var(--c-surface));
+  color: var(--c-ok);
+}
+
+.annotation-contract-core,
+.annotation-contract-label-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.annotation-contract-core label,
+.annotation-contract-field,
+.annotation-contract-label-grid label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--c-text-secondary);
+  font-weight: var(--fw-bold);
+}
+
+.annotation-contract-core small,
+.annotation-contract-field small,
+.annotation-contract-label-grid small {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.annotation-contract-details {
+  border-color: color-mix(in srgb, var(--c-accent) 18%, var(--c-border));
+  background: var(--c-surface);
+}
+
+.annotation-contract-details > .collapsible-body {
+  gap: 10px;
+}
+
+.annotation-contract-field-wide {
+  grid-column: 1 / -1;
+}
+
+.annotation-depiction-check {
+  align-items: flex-start;
+  padding-top: 3px;
+  line-height: 1.35;
+}
+
 .explorer-annotation-secondary-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(180px, 1fr));
@@ -946,6 +1027,15 @@ tr:last-child td {
   .explorer-annotation-primary-grid,
   .explorer-annotation-secondary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .annotation-contract-core,
+  .annotation-contract-label-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .annotation-contract-field-wide {
+    grid-column: auto;
   }
 }
 
