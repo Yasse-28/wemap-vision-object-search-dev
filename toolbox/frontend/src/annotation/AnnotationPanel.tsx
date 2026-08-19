@@ -636,6 +636,18 @@ function AnnotationPanel(props: {
     activeSuggestion && activeSuggestion.targetKeyframeId === keyframeId,
   );
 
+  const discardSuggestions = useCallback(() => {
+    if (isReviewingSuggestion) {
+      closeSuggestionReview();
+    } else {
+      setActiveSuggestion(null);
+    }
+    setSuggestionSource(null);
+    setNeighborSuggestions(null);
+    setNeighborSuggestionsError(null);
+    setNeighborSuggestionsLoading(false);
+  }, [isReviewingSuggestion, closeSuggestionReview]);
+
   useEffect(() => {
     if (!isReviewingSuggestion) {
       setSuggestionViewerHeight(null);
@@ -1249,6 +1261,8 @@ function AnnotationPanel(props: {
                   : "—"
             }
             defaultOpen
+            onDismiss={discardSuggestions}
+            dismissLabel="Discard the suggested reprojections"
           >
             <p className="map-caption">
               Same object ({suggestionSource.annotation.groundTruth.objectId ?? "unnamed"}),
