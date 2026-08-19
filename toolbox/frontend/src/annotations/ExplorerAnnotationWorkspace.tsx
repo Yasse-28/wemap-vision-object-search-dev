@@ -1642,6 +1642,8 @@ export function ExplorerAnnotationList(props: {
   workspace: ExplorerAnnotationWorkspace;
   /** The Annotation tab's review mode shows the history open; elsewhere it folds. */
   defaultOpen?: boolean;
+  /** "Focus" also opens the annotation's keyframe in the Object view when given. */
+  onFocusKeyframe?: (annotation: AnnotationFeature) => void;
 }) {
   const { workspace } = props;
   const selectedRowRef = useRef<HTMLLIElement | null>(null);
@@ -1784,7 +1786,10 @@ export function ExplorerAnnotationList(props: {
                 <button
                   className="link-button"
                   type="button"
-                  onClick={() => workspace.focusAnnotation(item)}
+                  onClick={() => {
+                    workspace.focusAnnotation(item);
+                    props.onFocusKeyframe?.(item);
+                  }}
                 >
                   Focus
                 </button>
