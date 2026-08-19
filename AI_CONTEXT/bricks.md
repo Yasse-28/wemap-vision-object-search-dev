@@ -410,12 +410,16 @@ panoptic false positives — otherwise filtering an outlier scores worse than ke
 ### Centring the embeddings: measured, and it does not work
 
 `ingest_cli --center-embeddings` subtracts the index's own centroid from every stored
-vector and records it in `object_search_embedding_centroid`; the online service
-subtracts the same vector from each query for that georef. **The row's presence is the
-only switch**, so an index built centred is always queried centred — there is no flag
-the two halves can disagree about, and an uncentred ingest deletes the row.
+vector and records it in `object_search_embedding_centroid`.
 
-It is off by default because **it makes text retrieval much worse.** Measured on vinci
+**Only the ingest half is in the tree.** The query half — subtracting the same vector in
+`services/object_search_online/app.py` — was written, measured, and then **reverted from
+the mirror and from the backend**, because the measurement rejected it. The flag survives
+only to reproduce the experiment: run it today and the index is centred while queries are
+not, which scores worse than either choice held consistently. `run_ingest` logs a warning
+saying exactly that.
+
+It was rejected because **it makes text retrieval much worse.** Measured on vinci
 (`geo_ref` 30, 212117 rows, 258 annotations, 6 prompts), centring the only variable:
 
 | | mAP | best F1 |
@@ -434,6 +438,14 @@ centroid of the cutouts is not the centre of anything the query is near, so subt
 it relocates the query rather than de-biasing it. Do not restart "reduce hubness by
 centring" for a text-to-image path without first fixing which cloud the centre comes
 from.
+
+To reproduce: restore the query half in the backend (subtract
+`object_search_embedding_centroid.centroid` for the georef from the query embedding and
+renormalise, guarded by `to_regclass` — production has no migration for that table),
+re-sync the mirror, re-ingest with the flag, then benchmark. The four numbers above came
+from `object_search_http_benchmark --online --num-results 400 --min-similarity 0.15
+--candidate-count 1000`, with annotations exported from the store rather than read from
+`benchmark/annotations.geojson`.
 
 ### Typed errors, and the ground truth they need
 

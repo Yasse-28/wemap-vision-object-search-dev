@@ -406,9 +406,14 @@ def run_ingest(
                 raise RuntimeError(
                     "Centring was asked for but no kept row carries an embedding."
                 )
-            logger.info(
-                "Centroid over the kept rows: norm %.4f — subtracted from every "
-                "stored vector, and from every query for this georef.",
+            logger.warning(
+                "Centring is ON: centroid norm %.4f will be subtracted from every "
+                "stored vector. The online service does NOT subtract it from queries "
+                "— that half was reverted after it measured 9x worse (mAP 0.325 -> "
+                "0.036 on vinci). This index will be queried with uncentred vectors, "
+                "which is worse than either choice held consistently. Re-ingest "
+                "without --center-embeddings unless you are reproducing that "
+                "experiment and have restored the query side.",
                 float(np.linalg.norm(centroid)),
             )
 
@@ -512,10 +517,12 @@ def main(argv: list[str] | None = None) -> int:
         "--center-embeddings",
         action="store_true",
         help=(
-            "Subtract the index's own centroid from every stored vector, and record it"
-            " so the online service subtracts it from queries too. Reduces hubness"
-            " (s6 of map_analysis measures by how much). Off by default: it changes"
-            " what the index contains, so it is an experiment, not a default."
+            "Subtract the index's own centroid from every stored vector and record it."
+            " REQUIRES a matching query-side change that is NOT in the mirror: it was"
+            " reverted after measurement rejected it (mAP 0.325 -> 0.036 on vinci; see"
+            " AI_CONTEXT/bricks.md). Without it the index is centred and queries are"
+            " not, which scores worse than either choice held consistently. Kept only"
+            " to reproduce the experiment."
         ),
     )
     args = parser.parse_args(argv)
