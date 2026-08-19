@@ -407,6 +407,34 @@ literature reports. `panoptic_quality` and its two factors are also on every row
 out whole"), the rest duplicates `hota`. Dropped detections are excluded from the
 panoptic false positives — otherwise filtering an outlier scores worse than keeping it.
 
+### Centring the embeddings: measured, and it does not work
+
+`ingest_cli --center-embeddings` subtracts the index's own centroid from every stored
+vector and records it in `object_search_embedding_centroid`; the online service
+subtracts the same vector from each query for that georef. **The row's presence is the
+only switch**, so an index built centred is always queried centred — there is no flag
+the two halves can disagree about, and an uncentred ingest deletes the row.
+
+It is off by default because **it makes text retrieval much worse.** Measured on vinci
+(`geo_ref` 30, 212117 rows, 258 annotations, 6 prompts), centring the only variable:
+
+| | mAP | best F1 |
+|---|---|---|
+| uncentred, `min_kf` 1 | **0.325** | **0.427** |
+| uncentred, `min_kf` 2 | 0.196 | 0.334 |
+| centred, `min_kf` 1 | 0.036 | 0.104 |
+| centred, `min_kf` 2 | 0.022 | 0.098 |
+
+The ingest half is provably right: stored vectors stay unit-norm, their centre of mass
+falls 0.7563 -> 0.0469, and their hubness drops exactly as `map_analysis` s6 predicts
+(skew 2.841 -> 1.266, antihubs 5.5% -> 1.1%). The index is less hubby and retrieval is
+9x worse, which is the whole finding: **s6 measures image-to-image neighbour structure,
+and a text query does not live in that cloud.** MetaCLIP's modality gap means the
+centroid of the cutouts is not the centre of anything the query is near, so subtracting
+it relocates the query rather than de-biasing it. Do not restart "reduce hubness by
+centring" for a text-to-image path without first fixing which cloud the centre comes
+from.
+
 ### Typed errors, and the ground truth they need
 
 `toolbox/benchmark/error_decomposition.py` (`--decompose` on the sweep) types every

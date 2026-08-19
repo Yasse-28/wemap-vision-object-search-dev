@@ -1751,9 +1751,15 @@ def section_hubness(
     nearest neighbour of everything, every prompt inherits the same false positives,
     and no threshold, association or rescoring downstream can undo it.
 
-    The centred figure is the actionable half. Hubness is largely caused by the cloud
-    having a centre of mass at all, so subtracting it is a one-line change in the
-    scoring path; the drop measured here is what that change would buy.
+    The centred column says what removing the cloud's centre of mass would do to
+    **image-to-image** neighbour structure, and nothing more. It is *not* a prediction
+    about text queries, and it was read that way once: an index ingested with
+    `--center-embeddings` on vinci did drop exactly as measured here (skew 2.841 ->
+    1.266, antihubs 5.5% -> 1.1%) and text retrieval collapsed 9x anyway, mAP 0.325 ->
+    0.036. A text embedding does not sit inside this cloud — MetaCLIP's modality gap —
+    so the centre subtracted here is not its centre, and removing it moves the query
+    somewhere unrelated. Hubness among the cutouts is real; it is not what limits
+    text-to-image retrieval.
     """
     report.head("S6 — hubness de l'espace d'embedding")
     embeddings = data.embeddings

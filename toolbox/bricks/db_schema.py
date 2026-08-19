@@ -72,6 +72,22 @@ CREATE TABLE IF NOT EXISTS object_search_candidate (
 )
 """
 
+#: Per-map embedding centroid, written by ingest when it centres the vectors it
+#: stores. The online service subtracts it from every query embedding for that
+#: georef, so **the presence of the row is the switch**: an index built centred is
+#: always queried centred, and there is no flag the two sides can disagree about.
+#: Absent row = untouched vectors = the behaviour production has today.
+#:
+#: Dev-only for now. Production owns this table through a Django migration that does
+#: not exist yet — see `docs/adr/` before promoting it.
+CREATE_EMBEDDING_CENTROID = """
+CREATE TABLE IF NOT EXISTS object_search_embedding_centroid (
+    geo_ref_id BIGINT PRIMARY KEY,
+    centroid   halfvec(1024) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+"""
+
 CREATE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS object_search_candidate_geo_ref_id_idx "
     "ON object_search_candidate (geo_ref_id)",
@@ -125,6 +141,7 @@ def ensure_schema(conn: Connection) -> None:
             cursor.execute(statement)
         cursor.execute(CREATE_GEOKEYFRAME)
         cursor.execute(CREATE_CANDIDATE)
+        cursor.execute(CREATE_EMBEDDING_CENTROID)
         for statement in CREATE_INDEXES:
             cursor.execute(statement)
     conn.commit()
