@@ -433,11 +433,49 @@ The ingest half is provably right: stored vectors stay unit-norm, their centre o
 falls 0.7563 -> 0.0469, and their hubness drops exactly as `map_analysis` s6 predicts
 (skew 2.841 -> 1.266, antihubs 5.5% -> 1.1%). The index is less hubby and retrieval is
 9x worse, which is the whole finding: **s6 measures image-to-image neighbour structure,
-and a text query does not live in that cloud.** MetaCLIP's modality gap means the
-centroid of the cutouts is not the centre of anything the query is near, so subtracting
-it relocates the query rather than de-biasing it. Do not restart "reduce hubness by
-centring" for a text-to-image path without first fixing which cloud the centre comes
-from.
+and a text query does not live in that cloud.**
+
+The mechanism, replicated offline from the files alone (no service, no database — same
+212117 vectors, same centroid norm 0.7563):
+
+| | value |
+|---|---|
+| cos(image, centroid), mean | **0.7563** |
+| cos(text query, centroid), 6 prompts | **0.188 – 0.228** |
+| `\|\|d - m\|\|` after centring, mean | 0.650 |
+| `\|\|q - m\|\|` after centring, mean | 1.120 |
+| cos between the 6 prompts, raw | min 0.677 / mean 0.735 / max 0.794 |
+| cos between the 6 prompts, centred | min 0.740 / mean **0.789** / max 0.837 |
+| top-1000 overlap, raw vs centred | **5 – 25 / 1000** |
+| dominant label share in top-100 | 75–89% -> 43–50% |
+
+Read the second and fourth rows together: `\|\|m\|\| = 0.7563` is 68% of the centred
+query's length, and it is *the same vector for every query*. So centring makes the
+prompts **more** alike (mean pairwise cosine 0.735 -> 0.789) instead of separating them,
+all of them drifting toward `-m`. The top-1000 then barely intersects the raw one, which
+is what a 9x mAP drop looks like. Centring is an intra-modal hubness fix and the query
+path is cross-modal.
+
+This is a named, documented phenomenon, not a local quirk. The **modality gap** (Liang et
+al., *Mind the Gap*, NeurIPS 2022) is a consequence of the cone effect: each encoder's
+outputs occupy a narrow cone, the two cones start apart at initialisation, and the
+contrastive loss preserves the separation rather than closing it. The 0.7563-vs-0.22 pair
+of numbers above is that gap, measured on our own index.
+
+Two families of post-hoc fix, neither needing retraining, neither implemented here:
+
+- **Per-modality centring.** Subtract the *text* mean from text and the *image* mean from
+  images — two centroids, not one shared. This is what the experiment above got wrong.
+  GR-CLIP reports up to +26 NDCG@10 doing exactly this. For us it would mean storing a
+  text centroid too, and knowing which modality a query came from (`by-text` vs
+  `by-image` already distinguishes them).
+- **Similarity normalisation against a query bank.** **QB-Norm** (Bogolin et al., CVPR
+  2022) re-normalises query-gallery similarities using a fixed bank of probe queries, with
+  a Dynamic Inverted Softmax; it needs no retraining and no access to test queries. Dual
+  Bank Sinkhorn normalisation and NeighborRetr extend the same idea.
+
+Do not restart "reduce hubness by centring" for a text-to-image path with a single
+centroid — that is the experiment above, and it has already been run.
 
 To reproduce: restore the query half in the backend (subtract
 `object_search_embedding_centroid.centroid` for the georef from the query embedding and
