@@ -635,6 +635,26 @@ function AnnotationPanel(props: {
     [markers, props.mapId, updateHandoff],
   );
 
+  // The review list's "Focus" only pans the livemap; this also opens the annotation's
+  // keyframe in the Object view, selecting its proposal row when it came from one.
+  const openAnnotationKeyframe = useCallback(
+    (annotation: AnnotationFeature) => {
+      const targetKeyframeId = annotation.source?.keyframeId;
+      if (!targetKeyframeId || !markers.some((marker) => marker.id === targetKeyframeId)) {
+        return;
+      }
+      startedForRowRef.current = null;
+      setMode("object");
+      let next = withKeyframe(readHandoff(props.mapId), targetKeyframeId);
+      const rowIndex = annotation.source?.rowIndex;
+      if (rowIndex !== null && rowIndex !== undefined) {
+        next = withSelection(next, rowIndex);
+      }
+      updateHandoff(next);
+    },
+    [markers, props.mapId, updateHandoff],
+  );
+
   const openNeighborSuggestion = useCallback(
     (projection: ProposalNeighborProjection) => {
       if (!suggestionSource || !keyframeId) {
@@ -1361,7 +1381,13 @@ function AnnotationPanel(props: {
         {mode === "zones" ? (
           <ExplorerAnnotationControls workspace={workspace} sections={["roi"]} bare />
         ) : null}
-        {mode === "review" ? <ExplorerAnnotationList workspace={workspace} defaultOpen /> : null}
+        {mode === "review" ? (
+          <ExplorerAnnotationList
+            workspace={workspace}
+            defaultOpen
+            onFocusKeyframe={openAnnotationKeyframe}
+          />
+        ) : null}
       </div>
 
       {isReviewingSuggestion ? null : actionBarNode}
