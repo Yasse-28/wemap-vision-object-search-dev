@@ -1385,7 +1385,7 @@ function AnnotationPanel(props: {
           <ExplorerAnnotationList
             workspace={workspace}
             defaultOpen
-            onFocusKeyframe={openAnnotationKeyframe}
+            onOpenKeyframe={openAnnotationKeyframe}
           />
         ) : null}
       </div>
