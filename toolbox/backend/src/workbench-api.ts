@@ -26,6 +26,12 @@ import {
   startBenchmarkRun,
   type BenchmarkRunParams,
 } from "./benchmark-runner.js";
+import {
+  analysisLayerPayload,
+  analysisRunPayload,
+  analysisStatusPayload,
+  startAnalysisRun,
+} from "./map-analysis-runner.js";
 import { loadMapEntries, type MapEntry } from "./config.js";
 import {
   createDirectoryPayload,
@@ -169,6 +175,44 @@ export async function handleWorkbenchUiMapRoute(
     if (method === "POST" && suffix === "/benchmark/run") {
       const params = (await requestJson(request)) as BenchmarkRunParams;
       sendJson(response, 202, startBenchmarkRun(options, map, params));
+      return true;
+    }
+    if (method === "GET" && suffix === "/analysis/status") {
+      sendJson(response, 200, await analysisStatusPayload(map));
+      return true;
+    }
+    if (method === "POST" && suffix === "/analysis/run") {
+      sendJson(response, 202, startAnalysisRun(options, map));
+      return true;
+    }
+    // Matched before the run route below, whose `([^/]+)(\/report)?` would otherwise
+    // reject the extra segments rather than fall through.
+    const analysisLayerMatch = /^\/analysis\/runs\/([^/]+)\/layers\/([^/]+)$/.exec(
+      suffix,
+    );
+    if (method === "GET" && analysisLayerMatch) {
+      sendJson(
+        response,
+        200,
+        await analysisLayerPayload(
+          map,
+          decodeURIComponent(analysisLayerMatch[1]),
+          decodeURIComponent(analysisLayerMatch[2]),
+        ),
+      );
+      return true;
+    }
+    const analysisRunMatch = /^\/analysis\/runs\/([^/]+)(\/report)?$/.exec(suffix);
+    if (method === "GET" && analysisRunMatch) {
+      sendJson(
+        response,
+        200,
+        await analysisRunPayload(
+          map,
+          decodeURIComponent(analysisRunMatch[1]),
+          analysisRunMatch[2] === "/report",
+        ),
+      );
       return true;
     }
     if (method === "GET" && suffix === "/export-roi/directories") {

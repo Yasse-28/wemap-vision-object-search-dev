@@ -7,10 +7,16 @@ import "./export-roi/export-roi.css";
 import BenchmarkPanel from "./benchmark/BenchmarkPanel";
 import FeaturePanel from "./FeaturePanel";
 import MatchingPanel from "./matching/MatchingPanel";
+import AnalysisPanel from "./analysis/AnalysisPanel";
 import ObjectSearchExplorerPanel from "./object-search-explorer/ObjectSearchExplorerPanel";
 import ObjectSearchPanel from "./object-search/ObjectSearchPanel";
 
-type Feature = "object-search" | "object-search-explorer" | "matching" | "benchmark";
+type Feature =
+  | "object-search"
+  | "object-search-explorer"
+  | "matching"
+  | "benchmark"
+  | "analysis";
 
 function getPathMapId(): string | null {
   return parseMapRoute().mapId;
@@ -39,6 +45,8 @@ function parseMapRoute(): { mapId: string | null; feature: Feature } {
     feature = "matching";
   } else if (segments[1] === "benchmark") {
     feature = "benchmark";
+  } else if (segments[1] === "analysis") {
+    feature = "analysis";
   }
   return { mapId, feature };
 }
@@ -53,6 +61,9 @@ function mapExplorerPath(mapId: string, feature: Feature): string {
   }
   if (feature === "benchmark") {
     return `${base}/benchmark`;
+  }
+  if (feature === "analysis") {
+    return `${base}/analysis`;
   }
   return base;
 }
@@ -329,6 +340,15 @@ function MapExplorer(props: {
           >
             Benchmark
           </button>
+          <button
+            className={`feature-button${
+              activeFeature === "analysis" ? " is-active" : ""
+            }`}
+            type="button"
+            onClick={() => selectFeature("analysis")}
+          >
+            Analysis
+          </button>
         </nav>
       </FeaturePanel>
 
@@ -346,6 +366,12 @@ function MapExplorer(props: {
         />
       ) : activeFeature === "matching" ? (
         <MatchingPanel
+          map={props.map}
+          mapId={props.mapId}
+          isMapKnown={Boolean(props.map)}
+        />
+      ) : activeFeature === "analysis" ? (
+        <AnalysisPanel
           map={props.map}
           mapId={props.mapId}
           isMapKnown={Boolean(props.map)}

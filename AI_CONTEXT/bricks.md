@@ -1025,6 +1025,17 @@ embedding hubness, `s7` labels against the annotated label sets), a JSON payload
 GeoJSON layers for the livemap. Details and traps in
 [`../toolbox/benchmark/README.md`](../toolbox/benchmark/README.md).
 
+`map_layers.py` writes **ten** layers, in two geometries that mean different things:
+point layers are one measurement at one place (`ground-truth`, `capture-distance`,
+`keyframes`, `detection-grid`, `embedding-agreement`, `depth-blowups`), cell layers are
+2 m squares of ground carrying an aggregate (`depth-range`, `depth-scatter`,
+`detection-coverage`, `parallax`). The four depth/capture fields exist because these
+quantities are **not uniform over a building** and a distribution hides that: where
+depth degrades, where observations of one object scatter (the fragmentation predictor),
+where the detector misses, and where the capture never offered a baseline at all. A
+viewer's own heat-map style is only correct for `detection-grid` — it weights density,
+so on a mean it would draw a count. The Analysis tab of the toolbox draws them.
+
 Three facts it established that constrain any pipeline work (2026-08-18, both maps):
 
 - **the ground truth cannot judge placement.** An annotation position is

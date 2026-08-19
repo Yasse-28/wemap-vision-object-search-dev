@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   acquireLivemapHost,
   createLivemapState,
+  type AnalysisOverlay,
   getLivemapCallbacks,
   type GeoJsonFeature,
   type LivemapCone,
@@ -27,7 +28,7 @@ import {
   RoiPolygon,
 } from "./types";
 
-export type { LivemapCone };
+export type { AnalysisOverlay, LivemapCone };
 
 
 const POLYGON_SOURCE_ID = "annotation-polygons";
@@ -47,6 +48,10 @@ const CONE_SOURCE_ID = "annotation-cone";
 const CONE_LAYER_ID = "annotation-cone-layer";
 const CONE_ICON_ID = "annotation-cone-icon";
 const CONE_ICON_SIZE = 128;
+const ANALYSIS_SOURCE_ID = "analysis-overlay";
+const ANALYSIS_FILL_LAYER_ID = "analysis-overlay-fill";
+const ANALYSIS_LINE_LAYER_ID = "analysis-overlay-line";
+const ANALYSIS_CIRCLE_LAYER_ID = "analysis-overlay-circle";
 const ROI_SOURCE_ID = "annotation-roi";
 const ROI_FILL_LAYER_ID = "annotation-roi-fill";
 const ROI_LINE_LAYER_ID = "annotation-roi-line";
@@ -217,6 +222,12 @@ export type LivemapAnnotationProps = {
   height?: number | string;
   cone?: LivemapCone | null;
   coneColor?: string;
+  /**
+   * A measurement field drawn beneath everything else, from the analysis layers. Null
+   * clears it — the source is emptied rather than the layers removed, so switching
+   * layers never has to tear the map down.
+   */
+  overlay?: AnalysisOverlay | null;
   roiActive?: boolean;
   roiPolygon?: RoiPolygon | null;
   onRoiChange?: (polygon: RoiPolygon | null) => void;
@@ -366,6 +377,69 @@ function LivemapAnnotation(props: LivemapAnnotationProps) {
       map.addSource(SEGMENT_SOURCE_ID, {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
+      });
+    }
+
+    if (!map.getSource(ANALYSIS_SOURCE_ID)) {
+      map.addSource(ANALYSIS_SOURCE_ID, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+    }
+
+    // Added before every annotation layer: `addLayer` appends, so this is what puts
+    // the measurement field underneath the pins rather than over them. The colour is
+    // read straight off the feature — `map_layers.py` owns the scale.
+    if (!map.getLayer(ANALYSIS_FILL_LAYER_ID)) {
+      map.addLayer({
+        id: ANALYSIS_FILL_LAYER_ID,
+        source: ANALYSIS_SOURCE_ID,
+        type: "fill",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: {
+          "fill-color": ["get", "marker-color"],
+          "fill-opacity": ["coalesce", ["get", "overlay-opacity"], 0.55],
+        },
+      });
+    }
+
+    if (!map.getLayer(ANALYSIS_LINE_LAYER_ID)) {
+      map.addLayer({
+        id: ANALYSIS_LINE_LAYER_ID,
+        source: ANALYSIS_SOURCE_ID,
+        type: "line",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: {
+          // A hairline of the cell's own colour: without it, adjacent cells of the
+          // same value merge into one blob and the grid stops being readable.
+          "line-color": ["get", "marker-color"],
+          "line-width": 0.5,
+          "line-opacity": 0.8,
+        },
+      });
+    }
+
+    if (!map.getLayer(ANALYSIS_CIRCLE_LAYER_ID)) {
+      map.addLayer({
+        id: ANALYSIS_CIRCLE_LAYER_ID,
+        source: ANALYSIS_SOURCE_ID,
+        type: "circle",
+        filter: ["==", ["geometry-type"], "Point"],
+        paint: {
+          "circle-color": ["get", "marker-color"],
+          "circle-radius": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            15,
+            2.5,
+            20,
+            6,
+          ],
+          "circle-opacity": 0.85,
+          "circle-stroke-width": 0.5,
+          "circle-stroke-color": "#ffffff",
+        },
       });
     }
 
@@ -900,6 +974,31 @@ function LivemapAnnotation(props: LivemapAnnotationProps) {
     });
   }
 
+  function syncAnalysisOverlay() {
+    const state = stateRef.current;
+    const map = state.mapboxMap;
+    if (!map) return;
+    const source = map.getSource(ANALYSIS_SOURCE_ID);
+    if (!source) return;
+    const overlay = state.analysisOverlay;
+    if (!overlay) {
+      source.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    const opacity = overlay.opacity;
+    source.setData({
+      type: "FeatureCollection",
+      features: overlay.data.features.map((feature) =>
+        opacity === undefined
+          ? feature
+          : {
+              ...feature,
+              properties: { ...feature.properties, "overlay-opacity": opacity },
+            },
+      ),
+    });
+  }
+
   function syncRoi() {
     const state = stateRef.current;
     const map = state.mapboxMap;
@@ -971,6 +1070,7 @@ function LivemapAnnotation(props: LivemapAnnotationProps) {
     syncSegments();
     syncPolygons();
     syncRoi();
+    syncAnalysisOverlay();
 
     const draft = state.draftVertices;
     const draftFeatures: GeoJsonFeature[] = draft.map((vertex, index) => ({
@@ -1321,6 +1421,25 @@ function LivemapAnnotation(props: LivemapAnnotationProps) {
     syncCone();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.cone]);
+
+  // Analysis overlay — swap the measurement field under the annotations
+  useEffect(() => {
+    const state = stateRef.current;
+    state.analysisOverlay = props.overlay ?? null;
+    syncAnalysisOverlay();
+    // The layer comes from a fetch, so it routinely resolves before the livemap has
+    // built its mapbox map. Without this retry the first selected layer never appears.
+    if (!state.mapboxMap && !unmountedRef.current) {
+      const retryTimer = setTimeout(() => {
+        if (!unmountedRef.current) {
+          syncAnalysisOverlay();
+        }
+      }, 800);
+      return () => clearTimeout(retryTimer);
+    }
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.overlay]);
 
   // ROI active — set the drawing cursor; clears the in-progress ring when off
   useEffect(() => {

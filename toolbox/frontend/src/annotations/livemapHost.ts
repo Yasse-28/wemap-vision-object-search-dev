@@ -19,6 +19,24 @@ import {
  * only re-parents that container and re-synchronises its overlays.
  */
 
+/**
+ * A read-only measurement layer drawn beneath the annotation graphics.
+ *
+ * `data` is a GeoJSON collection straight from `toolbox/benchmark/map_layers.py`, whose
+ * features already carry a resolved `marker-color`: the colour scale is the analysis
+ * tool's decision, not the viewer's, so two maps read on the same scale.
+ *
+ * `geometry` is not cosmetic. `cell` layers are square metres of ground carrying an
+ * aggregate and are filled; `point` layers are one measurement at one place and are
+ * drawn as circles. Filling a point layer would invent an extent it does not have.
+ */
+export type AnalysisOverlay = {
+  data: GeoJsonFeatureCollection;
+  geometry: "cell" | "point";
+  /** Fill opacity for cell layers; the map underneath has to stay readable. */
+  opacity?: number;
+};
+
 export type LivemapCone = {
   latitude: number;
   longitude: number;
@@ -252,6 +270,7 @@ export type LivemapState = {
   markerClickHandlerRegistered: boolean;
   roiHandlersRegistered: boolean;
   cone: LivemapCone | null;
+  analysisOverlay: AnalysisOverlay | null;
   roiActive: boolean;
   roiVertices: LngLat[];
   roiClosed: boolean;
@@ -288,6 +307,7 @@ function createConsumerState() {
     polygons: [] as LivemapPolygon[],
     pendingPoint: null as LngLat | null,
     cone: null as LivemapCone | null,
+    analysisOverlay: null as AnalysisOverlay | null,
     roiActive: false,
     roiVertices: [] as LngLat[],
     roiClosed: false,

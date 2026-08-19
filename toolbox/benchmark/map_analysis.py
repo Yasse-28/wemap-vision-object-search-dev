@@ -67,6 +67,10 @@ COVERAGE_BINS = 12
 #: too shallow an angle to resolve their disagreement about its depth. Below it a
 #: second observation adds photometric evidence but no geometric evidence.
 USEFUL_PARALLAX_DEG = 5.0
+#: Highest `min_keyframes_per_cluster` the retention curve is reported at. The online
+#: default is 2, and the curve exists to show what raising it costs: past a handful of
+#: keyframes the surviving share is flat and the extra rows say nothing.
+KEYFRAME_THRESHOLD_MAX = 8
 #: Rows the hubness estimate samples. A k-occurrence count scales with how many rows
 #: could have retrieved it, so the sample is a fixed size rather than a fixed share:
 #: two maps only compare when every row had the same number of chances to be picked.
@@ -1060,6 +1064,60 @@ def observability(
     return result
 
 
+def keyframe_threshold_curve(
+    profile: Observability,
+    covered: np.ndarray,
+    indexed: np.ndarray,
+    max_keyframes: int = KEYFRAME_THRESHOLD_MAX,
+) -> list[dict[str, float]]:
+    """What `min_keyframes_per_cluster` costs, read against the ground truth.
+
+    The online path drops any cluster observed from fewer than
+    `min_keyframes_per_cluster` distinct keyframes (default 2). That threshold buys
+    precision by discarding evidence, and this curve prices it: at each candidate
+    value, how many annotations still have enough observing keyframes to survive, and
+    — among those — what share the depth-free measurement finds covered.
+
+    The two series answer different questions. `retained_share` is a ceiling the
+    threshold imposes before any ranking runs. `covered_share` says whether the
+    annotations it keeps are the ones the detector actually found: a threshold that
+    raises it is selecting for quality, one that leaves it flat is only losing recall.
+
+    Args:
+        profile: per-annotation observability; `keyframes` is the distinct-keyframe
+            count of the detections attached to each annotation.
+        covered: the depth-free result per annotation, from `seen_in_own_keyframe`.
+        indexed: whether each annotation's source panorama is in the index at all —
+            annotations without one are not measurable by `covered` and are excluded
+            from `covered_share`, though they still count in `retained_share`.
+        max_keyframes: highest threshold reported.
+
+    Returns:
+        One row per threshold from 1 upwards, ordered.
+    """
+    total = int(profile.keyframes.size)
+    rows: list[dict[str, float]] = []
+    for threshold in range(1, max_keyframes + 1):
+        survives = profile.keyframes >= threshold
+        measurable = survives & indexed
+        rows.append(
+            {
+                "min_keyframes": float(threshold),
+                "retained": float(survives.sum()),
+                "retained_share": (
+                    float(survives.sum() / total) if total else float("nan")
+                ),
+                "covered_share": (
+                    float(covered[measurable].mean())
+                    if measurable.any()
+                    else float("nan")
+                ),
+                "measurable": float(measurable.sum()),
+            }
+        )
+    return rows
+
+
 def section_ground_truth(
     data: MapData, report: Report, radii: Sequence[float] = DEFAULT_RADII_M
 ) -> None:
@@ -1161,6 +1219,21 @@ def section_ground_truth(
         " géométrie ou seulement une redondance photométrique)"
     )
 
+    curve = keyframe_threshold_curve(profile, covered, indexed)
+    report.say()
+    report.say("  --- coût du seuil min_keyframes_per_cluster (défaut en ligne : 2)")
+    for row in curve:
+        report.say(
+            f"    >={int(row['min_keyframes']):2d} keyframes : "
+            f"{int(row['retained']):4d}/{len(ground_truth)} annotations retenues "
+            f"({row['retained_share']:6.1%})  couvertes {row['covered_share']:6.1%}"
+        )
+    report.say(
+        "  (la part retenue est un plafond que le seuil impose avant tout classement ;"
+        " si la part couverte ne monte pas avec lui, il ne trie rien,"
+        " il perd du rappel)"
+    )
+
     degenerate = (profile.available_keyframes > 0) & (
         profile.available_parallax_deg < USEFUL_PARALLAX_DEG
     )
@@ -1218,6 +1291,7 @@ def section_ground_truth(
             "available_gap_deg": _percentiles(profile.available_gap_deg),
             "useful_pair_share": _percentiles(profile.useful_pair_share),
         },
+        "keyframe_threshold": curve,
         "degenerate_baseline": int(degenerate.sum()),
         "unseen": {
             "total": int(unseen.sum()),

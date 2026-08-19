@@ -239,11 +239,32 @@ PYTHONPATH=.:third_party/object_search python -m toolbox.benchmark.map_analysis 
 | `s0` | what the map holds, and **what it is missing** — a prepare run that wrote no label or no score makes several sections below silently empty, and a table of zeros looks the same as a measured zero |
 | `s1` | per-detection distributions split by detector: range, angular size and aspect, `phi`/`theta`, score, implied physical size, proposals per panorama |
 | `s2` | the free labels against the ground truth — `P(attached \| label, source)` at several radii **next to the base rate**, `P(label \| class)` and its inverse, normalised mutual information, score calibration, and the embedding neighbourhood purity |
-| `s3` | annotations against detections, **depth-free measurement first** |
+| `s3` | annotations against detections, **depth-free measurement first**, then observability and what `min_keyframes_per_cluster` costs — a retention curve, not a single number: it prices the threshold against the ground truth *before* any ranking runs, and says whether the annotations it keeps are the ones the detector actually found |
 | `s4` | pairwise cues over three deliberately drawn populations, raw and conditional AUC, with the share of pairs each cue applies to |
 | `s5` | intra-view duplicates split by detector and settled by embedding, and the co-visible lower bound on the number of objects |
 | `s6` | hubness of the embedding space, with **no ground truth at all** — how unevenly the index shares out the role of nearest neighbour, and what a plain recentring would change |
 | `s7` | detector labels against the annotation's *set* of acceptable labels (ADR 0009); reports that no annotation carries sets rather than a table of zeros |
+
+### The layers (`map_layers.py`)
+
+A distribution says how much; these say **where**, which for depth is the whole point —
+it degrades in particular parts of a building, and a percentile hides that.
+
+| layer | geometry | what it shows |
+|---|---|---|
+| `depth-range` | 2 m cells | mean distance from keyframe to detection, against the 15 m trusted range. `beyond_trusted_share` is the property to check: a moderate mean held down by near rows can hide a far minority |
+| `depth-blowups` | points | every row placed past 30 m, worst first and capped. Deliberately not aggregated — they line up along windows, mirrors and glass, and that alignment is the diagnostic |
+| `depth-scatter` | 2 m cells | how far apart the observations of one annotated object land. **The fragmentation field**: read it against the clustering radius, since a spread at or past it cannot survive one cluster. Needs annotations |
+| `detection-coverage` | 2 m cells | the depth-free measurement, spatialised — a red cell is the detector missing that part of the building, owing nothing to depth. Needs annotations |
+| `parallax` | 2 m cells | the widest baseline any two keyframes within trusted range ever offered that cell, plus the trajectory anisotropy. A capture ceiling: red here cannot be fixed by any algorithm |
+| `ground-truth`, `capture-distance`, `embedding-agreement` | points | one per annotation — reached or not and why, how close the capture came, how alike the cutouts look |
+| `keyframes`, `detection-grid` | points | the capture itself, and detection density per cell |
+
+**Only `detection-grid` is a density.** A viewer's own heat-map style weights how many
+features are in a place, so pointing it at a *mean* draws a count instead: every cell
+layer above therefore carries its value and an already-resolved `marker-color`, and is
+meant to be drawn as a flat filled square. Cells carry an `altitude_m` but **no indoor
+level**, so on a multi-storey map read one floor at a time.
 
 **Two readings this tool exists to protect.** A label or a cue is only informative
 above the **base rate** — on a densely annotated map half of all detections sit within

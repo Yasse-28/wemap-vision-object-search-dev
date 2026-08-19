@@ -27,6 +27,7 @@ The annotation ownership boundary is recorded in
 | `workbench-api.ts` | `/ui/api/...` route handling | `isWorkbenchUiMapRoute` (its trailing segment is optional, so `DELETE /ui/api/maps/{id}` reaches the same dispatcher), `handleWorkbenchUiMapRoute` |
 | `python-process.ts` | One place for the interpreter search order and PYTHONPATH, which `benchmark-runner.ts` and `workbench-index.ts` each held a copy of | `pythonBinaryCandidates`, `pythonEnv`, `runPython`, `lastJsonLine` |
 | `export-roi.ts` | ROI export + map deletion routes. Thin: the work is `toolbox/bricks/export_roi.py` and `delete_map.py` — the geometry lives beside the manifest reader, and this backend has no Postgres client. Job shape copied from `benchmark-runner.ts` (202 + poll), one export at a time so two runs cannot allocate the same `geo_ref_id`. The directory browser is **confined** to the source map's parent and the config directory. | `listDirectoriesPayload`, `createDirectoryPayload`, `exportPreviewPayload`, `startExportRun`, `exportStatusPayload`, `deletionPreviewPayload`, `deleteMapPayload` |
+| `map-analysis-runner.ts` | Run `toolbox.benchmark.map_analysis` for one map and cache its payload **and its GeoJSON layers** (`--layers-dir`, so the heat maps and the score card always come from the same run). No service to reach (the tool reads the whole parquet and needs neither Postgres nor the ANN service), so it only spawns python through `runPython`. Progress is read off stdout — the `===== S{n}` section heads — since the tool has no progress flag. Runs land in `{map_path}/analysis/{runId}/` as `analysis.json`, `report.txt` and `layers/*.geojson`; a directory without a parseable `analysis.json` is skipped, so an in-flight or crashed run is never offered as the latest. One run at a time. | `startAnalysisRun`, `analysisStatusPayload`, `analysisRunPayload`, `analysisLayerPayload`, `ANALYSIS_SECTIONS` |
 | `keyframe-graph.ts` | 360-viewer graph payload, read straight from `360-viewer/graph.geojson` — no pose source involved | `parseKeyframeGraph`, `keyframeGraphPayload` |
 | `map-manifest.ts` | **The v2 manifest reader**, mirroring `toolbox/bricks/map_manifest.py`, plus the EUS→WDS pose adapter every route below depends on | `loadMapManifest`, `findManifest`, `parseManifest`, `MANIFEST_PATTERN`, `assetBasename`, `formatLevel`, `quaternionToMatrix3`, `manifestKeyframeToWorldToCameraWds` |
 | `benchmark-runner.ts` | Run the HTTP benchmark and synchronously score one prompt | **Spawns the bricks service** (`python -m toolbox.bricks.service --config <the toolbox config>`) when unreachable, and keeps it alive across runs. **Only health-checks the mirrored online service** — never spawns it (it loads MetaCLIP on the GPU); `assertAnnServiceReachable` fails early with instructions. Before each run or prompt score exports the integrated annotation SQLite store to `{map}/benchmark/annotations.geojson` atomically (best-effort: falls back to the file on disk). Spawns `toolbox/benchmark/object_search_http_benchmark.py` with `cwd=repoRoot` and `PYTHONPATH` set by `pythonEnv()`. Full results live in `{map_path}/benchmark/{runId}/`; prompt scores live one level deeper under `benchmark/prompt-scores/<slug>/` so `listRuns` cannot expose them. | `startBenchmarkRun`, `scorePromptPayload`, `benchmark{Run,Status}Payload` |
@@ -55,6 +56,7 @@ The annotation ownership boundary is recorded in
 | `POST /export-roi/preview` | Synchronous `--dry-run`: the **authoritative** keyframe count, the per-level split, and the allocated `geo_ref_id`. |
 | `POST /export-roi`, `GET /export-roi/status` | 202 + poll, as the benchmark does. |
 | `GET /deletion-preview`, `DELETE /ui/api/maps/{id}` | What deletion would remove, then the deletion. `DELETE` requires `{confirm_id}` equal to the map id — re-checked server-side, so the typed confirmation is not only cosmetic. 409 when the map is not a sub-map or still has children. |
+| `GET /analysis/status`, `POST /analysis/run`, `GET /analysis/runs/{id}[/report]`, `GET /analysis/runs/{id}/layers/{name}` | The Analysis tab. `status` returns the newest cached payload inline (~80 KB) plus the run list, the layer names that run wrote and the in-flight job; `run` is 202 + poll, as the benchmark is. Never analysed implicitly — a run is minutes long. The layer route serves one `map_layers.py` GeoJSON verbatim; its regex is matched **before** the run route, whose `([^/]+)(/report)?` would otherwise reject the extra segments. |
 | `POST /benchmark/score-prompt` | Runs the existing Python evaluator for one ground-truth prompt with the Annotation panel's current localization parameters; returns 404 when that prompt has no benchmark ground truth. |
 
 The prefix was `/object-search-index`, which promised a database that no longer
@@ -197,6 +199,24 @@ Panels (each in its own dir with `api.ts` + `types.ts`):
   measures the clusters actually listed rather than the script's defaults.
   Its ✓/× detection reviews affect feedback only; they do not create the
   positional manual annotations used as benchmark ground truth.
+- `analysis/` — the **Analysis** tab: the `map_analysis` payload as a score card
+  over collapsible `s0`–`s7` sections (`AnalysisPanel.tsx`). Three pieces carry
+  the intent: `metricCatalogue.ts` is the single place a metric's explanation and
+  its good/bad bands live — the hover overlay and the badge colour read the same
+  entry, so they cannot drift; `indicators.ts` holds the only *computed* numbers
+  (attachment lift over the base rate, the `min_keyframes_per_cluster` cost) and
+  is unit-tested because a wrong derivation would show as a confident colour; and
+  `KeyframeThresholdChart.tsx` draws `s3.keyframe_threshold` so the cost of that
+  threshold is read as a curve rather than a single number. **The bands are
+  calibration marks from bbhotel-choisy and from the pipeline's own constants**
+  (15 m trusted depth, 5° useful parallax), not thresholds to quote — the overlay
+  says so on every metric that has them. A section whose input is missing says it
+  is not measurable instead of drawing zeros. `AnalysisMap.tsx` mounts a read-only
+  `LivemapAnnotation` and draws one `map_layers.py` layer at a time through its new
+  `overlay` prop, described by `layerCatalogue.ts` (same hover overlay as the
+  metrics). One layer at a time because they all share one green-to-red scale.
+  **The wrapper must be at least 560px tall** — `.livemap-container` has that as a
+  min-height, and under it the map is clipped to nothing and mapbox loads no tile.
 - `App.tsx`, `main.tsx`, top-level `api.ts` — shell + shared client.
 
 ## Run
