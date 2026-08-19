@@ -83,6 +83,13 @@ type Props = {
   selectedRowIndex: number | null;
   /** Rows that already carry a saved ground-truth annotation, styled apart from the rest. */
   annotatedRowIndices?: ReadonlySet<number>;
+  /**
+   * Saved annotations with no detector row behind them for this keyframe — a
+   * missed detection traced by hand, or a reprojected suggestion once confirmed
+   * — drawn from the outline stored on the annotation, styled the same as an
+   * already-annotated proposal.
+   */
+  annotationOutlines?: Array<{ id: string; region: Array<[number, number]> }>;
   /** A reprojected suggestion the annotator can drag and resize before saving it. */
   editableBox?: EditableBox | null;
   onEditableBoxChange?: (box: EditableBox) => void;
@@ -1244,6 +1251,31 @@ export default function EquirectPhotoSphereViewer(props: Props) {
       runtime.overlayGroup.add(line);
     }
 
+    for (const outline of props.annotationOutlines ?? []) {
+      if (outline.region.length < 2) {
+        continue;
+      }
+      const points: THREE.Vector3[] = [];
+      for (let index = 0; index < outline.region.length; index += 1) {
+        points.push(
+          ...interpolatedEdgePoints(
+            outline.region[index],
+            outline.region[(index + 1) % outline.region.length],
+          ).slice(index === 0 ? 0 : 1),
+        );
+      }
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const material = new THREE.LineBasicMaterial({
+        linewidth: 2,
+        depthTest: false,
+        transparent: true,
+      });
+      const line = new THREE.LineLoop(geometry, material);
+      line.userData.markerType = "annotation-outline";
+      styleBboxLine(line, false, false, true);
+      runtime.overlayGroup.add(line);
+    }
+
     // Smallest first: a box fully inside another must win the hit, or it could never
     // be hovered at all.
     hoverTargets.sort(
@@ -1327,6 +1359,7 @@ export default function EquirectPhotoSphereViewer(props: Props) {
     props.polygonForDetection,
     props.selectedRowIndex,
     props.annotatedRowIndices,
+    props.annotationOutlines,
   ]);
 
   /** One button press, as a ratio of the current field of view. */

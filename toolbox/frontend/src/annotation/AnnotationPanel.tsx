@@ -105,6 +105,16 @@ function boxCenterRatio(box: EditableBox): { xRatio: number; yRatio: number } {
   return { xRatio: (box.u0 + box.u1) / 2, yRatio: (box.v0 + box.v1) / 2 };
 }
 
+/** The four corners of an editable box, in the outline format a saved annotation stores. */
+function boxToRegionVertices(box: EditableBox): RegionVertex[] {
+  return [
+    [box.u0, box.v0],
+    [box.u1, box.v0],
+    [box.u1, box.v1],
+    [box.u0, box.v1],
+  ];
+}
+
 /** A reprojected point + angular size, converted to the box the viewer overlays. */
 function editableBoxFromProjection(projection: ProposalNeighborProjection): EditableBox {
   const halfWidthRatio = projection.angular_width / (2 * Math.PI) / 2;
@@ -301,6 +311,25 @@ function AnnotationPanel(props: {
     [annotationByRowIndex],
   );
 
+  // Missed detections and confirmed reprojected suggestions have no detector row to
+  // key off, so they are drawn from the outline stored when they were saved instead
+  // of the proposal-box pipeline.
+  const annotationOutlines = useMemo(() => {
+    if (!keyframeId) {
+      return [];
+    }
+    return workspace.annotations
+      .filter(
+        (annotation) =>
+          annotation.source?.keyframeId === keyframeId &&
+          (annotation.source.erpRegion?.length ?? 0) >= 3,
+      )
+      .map((annotation) => ({
+        id: annotation.id,
+        region: annotation.source!.erpRegion!,
+      }));
+  }, [workspace.annotations, keyframeId]);
+
   const keyframeMarker = useMemo(
     () => markers.find((marker) => marker.id === keyframeId) ?? null,
     [markers, keyframeId],
@@ -320,6 +349,9 @@ function AnnotationPanel(props: {
       yRatio: number;
       rowIndex: number | null;
       region?: RegionVertex[] | null;
+      // Only true for a region traced over a genuine missed detection; a
+      // reprojected suggestion's box rides the same `region` field but is not one.
+      missedDetection?: boolean;
     }) => {
       if (!keyframeId) {
         return;
@@ -334,7 +366,7 @@ function AnnotationPanel(props: {
         // `saveDraft` spreads the draft source into the saved feature, so these ride
         // to the store without the write path needing to know about them.
         ...(request.region?.length
-          ? { erpRegion: request.region, missedDetection: true }
+          ? { erpRegion: request.region, missedDetection: request.missedDetection ?? true }
           : {}),
       });
       if (request.projection === "erp") {
@@ -503,7 +535,14 @@ function AnnotationPanel(props: {
     }
     startedSuggestionRef.current = activeSuggestion;
     const center = boxCenterRatio(activeSuggestion.box);
-    startDraft({ projection: "erp", xRatio: center.xRatio, yRatio: center.yRatio, rowIndex: null });
+    startDraft({
+      projection: "erp",
+      xRatio: center.xRatio,
+      yRatio: center.yRatio,
+      rowIndex: null,
+      region: boxToRegionVertices(activeSuggestion.box),
+      missedDetection: false,
+    });
   }, [activeSuggestion, keyframeId, startDraft]);
 
   // `saveDraft` reports success by clearing the draft and appending the stored row;
@@ -1126,6 +1165,7 @@ function AnnotationPanel(props: {
                     detections={rows}
                     selectedRowIndex={handoff.rowIndex}
                     annotatedRowIndices={annotatedRowIndices}
+                    annotationOutlines={annotationOutlines}
                     editableBox={
                       activeSuggestion && activeSuggestion.targetKeyframeId === keyframeId
                         ? activeSuggestion.box
