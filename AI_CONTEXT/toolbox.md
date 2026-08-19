@@ -363,10 +363,24 @@ created **once per `emmid`** in a detached `<div>` and cached:
   annotations must read the store: `toolbox/benchmark/annotation_store.py`
   (`build_ground_truth`, `load_store_annotations`) mirrors `buildGroundTruth` for that,
   and feeds `parse_annotations` so both readers parse the ADR 0009 fields identically.
-  `validate_annotations` uses it; the benchmark and the sweeps still read the export.
-  Skipping this cost a day of confusion on vinci-st-domingue-zone-1: the export showed
-  9 annotations of 6 classes with no contract fields where the store held 12 complete
-  ones.
+  `validate_annotations` and `map_analysis.load_ground_truth` use it; the benchmark and
+  the sweeps still read the export, which is correct for them — the benchmark rewrites
+  it before running, and a sweep must score what was scored. Skipping this cost a day of
+  confusion on vinci-st-domingue-zone-1: the export showed 9 annotations of 6 classes
+  with no contract fields where the store held 12 complete ones, so both the contract
+  report and s0 described a map already fixed.
+- **A click's panorama, pixel and depth come in two spellings.** The Annotation tab
+  nests them (`source.keyframeId`, `source.erpU`, `source.erpV`, `source.depthM`); older
+  writers flattened them (`source_keyframe_id`, `source_erp_u`, …) and the exports on
+  disk still carry that. Read them through `annotation_store.source_field`, which tries
+  both — reading only the flat spelling gives NaN pixels for every annotation the tab
+  wrote, which breaks s3 silently instead of loudly. `keyframeId` is an **int** and
+  keyframe 0 exists, so test it against `None`, never for falsiness.
+- **Pair an annotation with its own feature, never by index.** `parse_annotations` drops
+  features with no class or no usable geometry, so zipping its result against
+  `features` misaligns past the first skip. `parse_annotated_features` returns
+  `(properties, annotation)` pairs for callers wanting a property `Annotation` does not
+  carry.
 - **A map's `geo_ref_id` comes from its manifest, and it partitions a shared table.**
   Deleting a map means `DELETE ... WHERE geo_ref_id = %s` on rows every map lives in,
   so both the export (allocate a free id) and the deletion (refuse a shared one) are

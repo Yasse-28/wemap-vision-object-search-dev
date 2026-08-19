@@ -305,7 +305,8 @@ empty table.
 ## Checking the annotations before trusting a measurement
 
 `validate_annotations.py` judges the ground truth, not the pipeline. It reads the map's
-`object-search-annotations.db` **directly**, not `benchmark/annotations.geojson`: that
+`object-search-annotations.db` **directly**, not `benchmark/annotations.geojson` — as
+does `map_analysis` — because that
 export is only rewritten when a benchmark run starts, so it describes the map as the last
 run saw it. On vinci-st-domingue-zone-1 it sat a day behind — 9 annotations of 6 classes
 where the store held 12, every ADR 0009 field reported absent because the export predated

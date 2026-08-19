@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,18 @@ from toolbox.benchmark.object_search_http_benchmark import (
     Annotation,
     parse_annotations,
 )
+
+#: Where a click's panorama, pixel and depth are recorded, newest spelling first. The
+#: Annotation tab nests them under `source` (`source.erpU`); older writers flattened
+#: them (`source_erp_u`), and the exports on disk still carry that. `_label_set` in the
+#: benchmark already accepts both for labels — this is the same drift, for the three
+#: fields `Annotation` does not carry.
+SOURCE_FIELD_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "keyframe_id": ("source.keyframeId", "source_keyframe_id"),
+    "erp_u": ("source.erpU", "source_erp_u"),
+    "erp_v": ("source.erpV", "source_erp_v"),
+    "depth_m": ("source.depthM", "depth_m"),
+}
 
 #: Mirrors `ANNOTATION_DB_FILENAME` in `toolbox/backend/src/annotation-store.ts`.
 ANNOTATION_DB_FILENAME = "object-search-annotations.db"
@@ -185,3 +198,43 @@ def load_store_annotations(
 ) -> list[Annotation]:
     """Annotations read from the SQLite store, parsed exactly as the export is."""
     return parse_annotations(build_ground_truth(db_path), default_accuracy_m)
+
+
+def _dig(properties: Mapping[str, Any], dotted: str) -> Any:
+    """Read a possibly nested property by dotted path, None when any step is missing."""
+    current: Any = properties
+    for step in dotted.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(step)
+    return current
+
+
+def source_field(properties: Mapping[str, Any], name: str) -> Any:
+    """One of `SOURCE_FIELD_SPELLINGS`, whichever spelling this feature happens to use.
+
+    Reading only the flat spelling is what made the analysis report NaN pixels for every
+    annotation written by the Annotation tab: the store nests them.
+    """
+    for dotted in SOURCE_FIELD_SPELLINGS[name]:
+        value = _dig(properties, dotted)
+        if value is not None:
+            return value
+    return None
+
+
+def read_ground_truth_collection(map_path: Path) -> tuple[Path | None, dict[str, Any]]:
+    """The map's ground truth and where it came from: store first, export as fallback.
+
+    An empty collection with a `None` source means the map has neither — a freshly
+    prepared map, which callers describe rather than treat as an error.
+    """
+    db_path = annotation_database_path(map_path)
+    if db_path.is_file():
+        return db_path, build_ground_truth(db_path)
+
+    export = map_path / "benchmark" / "annotations.geojson"
+    if export.is_file():
+        with export.open("r", encoding="utf-8") as handle:
+            return export, json.load(handle)
+    return None, {"type": "FeatureCollection", "features": []}

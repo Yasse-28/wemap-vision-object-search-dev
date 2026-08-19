@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,13 +33,20 @@ import numpy as np
 import pyarrow.parquet as pq
 from scipy.spatial import cKDTree
 
+from toolbox.benchmark.annotation_store import (
+    read_ground_truth_collection,
+    source_field,
+)
 from toolbox.benchmark.label_set_metrics import (
     DEFAULT_TOP_N,
     evaluate_label_sets,
     has_label_sets,
 )
 from toolbox.benchmark.label_set_metrics import report_lines as label_set_report_lines
-from toolbox.benchmark.object_search_http_benchmark import Annotation, load_annotations
+from toolbox.benchmark.object_search_http_benchmark import (
+    Annotation,
+    parse_annotated_features,
+)
 from toolbox.bricks.georef_source import PoseSource
 from toolbox.bricks.ingest_cli import EMBEDDING_DIM
 from toolbox.bricks.vendored.erp import theta_phi_to_opengl_ray_batch
@@ -242,10 +249,31 @@ def load_detections(map_path: Path, pose_source: PoseSource) -> Detections:
     )
 
 
+def _as_float(value: object) -> float:
+    """A float, or NaN for a property that is absent or unparseable."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _altitude(properties: Mapping[str, object]) -> float:
+    """The click's altitude, 0.0 when it has none — the third coordinate is optional."""
+    value = _as_float(properties.get("altitude"))
+    return 0.0 if math.isnan(value) else value
+
+
 def load_ground_truth(map_path: Path, pose_source: PoseSource) -> GroundTruth:
-    """Annotations in EUS, keeping the panorama and pixel each one was clicked in."""
-    path = map_path / "benchmark" / "annotations.geojson"
-    if not path.is_file():
+    """Annotations in EUS, keeping the panorama and pixel each one was clicked in.
+
+    Read from `object-search-annotations.db` when it exists, not from
+    `benchmark/annotations.geojson`: that export is only rewritten when a benchmark run
+    starts, so s0 counted 9 annotations on vinci-st-domingue-zone-1 where the store held
+    12. See `toolbox.benchmark.annotation_store`.
+    """
+    _, collection = read_ground_truth_collection(map_path)
+    pairs = parse_annotated_features(collection, 5.0)
+    if not pairs:
         # A freshly prepared map has no annotations yet, which is a state to describe
         # rather than an error: s0 still says what the index holds, and every
         # ground-truth section reports that it has nothing to compare against.
@@ -259,24 +287,24 @@ def load_ground_truth(map_path: Path, pose_source: PoseSource) -> GroundTruth:
             depth_m=empty,
             level=np.empty(0, dtype=object),
         )
-    annotations: Sequence[Annotation] = load_annotations(path, 5.0)
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    annotations: Sequence[Annotation] = [item for _, item in pairs]
     wgs84 = []
     keyframes: list[str] = []
     uv = []
     depths = []
-    for feature in raw["features"]:
-        point = feature["geometry"]["coordinates"]
-        properties = feature["properties"]
-        wgs84.append([point[0], point[1], point[2] if len(point) > 2 else 0.0])
-        keyframes.append(str(properties.get("source_keyframe_id") or ""))
+    for properties, annotation in pairs:
+        wgs84.append([annotation.lng, annotation.lat, _altitude(properties)])
+        keyframe_id = source_field(properties, "keyframe_id")
+        # Not `or ""`: the store writes `keyframeId` as an integer and keyframe 0 is a
+        # real keyframe, which a falsiness test would erase.
+        keyframes.append("" if keyframe_id is None else str(keyframe_id))
         uv.append(
             [
-                float(properties.get("source_erp_u", np.nan)),
-                float(properties.get("source_erp_v", np.nan)),
+                _as_float(source_field(properties, "erp_u")),
+                _as_float(source_field(properties, "erp_v")),
             ]
         )
-        depths.append(float(properties.get("depth_m", np.nan)))
+        depths.append(_as_float(source_field(properties, "depth_m")))
     eus = np.asarray(
         pose_source.geo_transform.wgs84_to_local_positions(
             np.asarray(wgs84, dtype=np.float64)
@@ -438,7 +466,7 @@ def section_inventory(data: MapData, report: Report) -> None:
         accuracy = _label_counts(ground_truth.accuracy_m.astype(str))
         report.say(f"    précisions déclarées     {accuracy}")
     else:
-        missing.append("aucune vérité terrain (benchmark/annotations.geojson absent)")
+        missing.append("aucune vérité terrain (magasin d'annotations vide)")
     report.say(
         f"  verdicts humains           {len(data.reviews)} ; "
         f"étiquettes de partition {len(data.group_labels)}"

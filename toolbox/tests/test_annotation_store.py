@@ -17,7 +17,10 @@ from toolbox.benchmark.annotation_store import (
     ANNOTATION_DB_FILENAME,
     build_ground_truth,
     load_store_annotations,
+    read_ground_truth_collection,
+    source_field,
 )
+from toolbox.benchmark.object_search_http_benchmark import parse_annotated_features
 from toolbox.benchmark.validate_annotations import read_annotations
 
 POINT_SCHEMA = """
@@ -199,3 +202,70 @@ def test_a_map_with_neither_source_says_so(tmp_path: Path) -> None:
         read_annotations(tmp_path, None, 5.0)
 
     assert ANNOTATION_DB_FILENAME in str(error.value)
+
+
+def test_the_source_fields_are_read_under_either_spelling() -> None:
+    """The store nests them under `source`; the exports on disk are flat."""
+    nested = {"source": {"keyframeId": 0, "erpU": 0.25, "erpV": 0.5, "depthM": 1.99}}
+    flat = {
+        "source_keyframe_id": "127",
+        "source_erp_u": 0.25,
+        "source_erp_v": 0.5,
+        "depth_m": 1.99,
+    }
+
+    for properties in (nested, flat):
+        assert source_field(properties, "erp_u") == pytest.approx(0.25)
+        assert source_field(properties, "depth_m") == pytest.approx(1.99)
+    assert source_field(nested, "keyframe_id") == 0
+    assert source_field(flat, "keyframe_id") == "127"
+
+
+def test_a_missing_source_field_is_none_not_a_crash() -> None:
+    assert source_field({}, "erp_u") is None
+    assert source_field({"source": "not a mapping"}, "erp_u") is None
+
+
+def test_keyframe_zero_survives_being_read(tmp_path: Path) -> None:
+    """`or ""` would erase it: 0 is a real panorama, and the store writes an int."""
+    db_path = _store(tmp_path)
+    _add_point(db_path, extra_properties=json.dumps({"source": {"keyframeId": 0}}))
+
+    ((properties, _),) = parse_annotated_features(build_ground_truth(db_path), 5.0)
+
+    assert source_field(properties, "keyframe_id") == 0
+    assert source_field(properties, "keyframe_id") is not None
+
+
+def test_features_are_paired_with_their_own_properties(tmp_path: Path) -> None:
+    """Zipping the parsed list against `features` would misalign past a skipped one."""
+    collection = {
+        "type": "FeatureCollection",
+        "features": [
+            {  # dropped: no class
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [2.0, 48.0]},
+                "properties": {"source": {"erpU": 0.1}},
+            },
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [2.0, 48.001]},
+                "properties": {"class": "maglock", "source": {"erpU": 0.9}},
+            },
+        ],
+    }
+
+    pairs = parse_annotated_features(collection, 5.0)
+
+    assert len(pairs) == 1
+    properties, annotation = pairs[0]
+    assert annotation.class_name == "maglock"
+    assert source_field(properties, "erp_u") == pytest.approx(0.9)
+
+
+def test_a_map_with_no_annotations_at_all_reads_as_empty(tmp_path: Path) -> None:
+    """What `map_analysis` relies on to describe a freshly prepared map."""
+    source, collection = read_ground_truth_collection(tmp_path)
+
+    assert source is None
+    assert collection["features"] == []

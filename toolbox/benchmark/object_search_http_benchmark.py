@@ -225,11 +225,25 @@ def parse_annotations(
     same field parsing as a caller reading the exported file. Two readers of the ADR
     0009 contract would drift.
     """
+    return [item for _, item in parse_annotated_features(data, default_accuracy_m)]
+
+
+def parse_annotated_features(
+    data: Mapping[str, Any], default_accuracy_m: float
+) -> list[tuple[Mapping[str, Any], Annotation]]:
+    """Each annotation with the feature it came from, skipped features left out.
+
+    A caller needing a property `Annotation` does not carry — `map_analysis` wants the
+    panorama and pixel each click was made in — must not zip `features` against the
+    parsed list: features with no class or no usable geometry are dropped here, so the
+    two sequences are not the same length. Returning pairs is what makes that
+    impossible to get wrong.
+    """
     features = data.get("features")
     if data.get("type") != "FeatureCollection" or not isinstance(features, list):
         raise ValueError("must be a GeoJSON FeatureCollection")
 
-    annotations: list[Annotation] = []
+    annotations: list[tuple[Mapping[str, Any], Annotation]] = []
     for idx, feature in enumerate(features):
         if not isinstance(feature, dict):
             continue
@@ -261,26 +275,29 @@ def parse_annotations(
         lng, lat = lng_lat
         annotation_prompt = str(properties.get("prompt") or class_name)
         annotations.append(
-            Annotation(
-                id=str(feature.get("id") or idx),
-                class_name=str(class_name),
-                lat=lat,
-                lng=lng,
-                accuracy_m=accuracy_m,
-                prompt=annotation_prompt,
-                level=(
-                    str(properties["level"])
-                    if properties.get("level") is not None
-                    else None
-                ),
-                object_id=_optional_str(properties.get("object_id")),
-                extent_m=_optional_float(properties.get("extent_m")),
-                exhaustive_zone=_optional_str(properties.get("exhaustive_zone")),
-                synonyms=_label_set(properties, "synonyms"),
-                depictions=_label_set(properties, "depictions"),
-                visually_similar=_label_set(properties, "visually_similar"),
-                clutter=_label_set(properties, "clutter"),
-                is_depiction=bool(properties.get("is_depiction", False)),
+            (
+                properties,
+                Annotation(
+                    id=str(feature.get("id") or idx),
+                    class_name=str(class_name),
+                    lat=lat,
+                    lng=lng,
+                    accuracy_m=accuracy_m,
+                    prompt=annotation_prompt,
+                    level=(
+                        str(properties["level"])
+                        if properties.get("level") is not None
+                        else None
+                    ),
+                    object_id=_optional_str(properties.get("object_id")),
+                    extent_m=_optional_float(properties.get("extent_m")),
+                    exhaustive_zone=_optional_str(properties.get("exhaustive_zone")),
+                    synonyms=_label_set(properties, "synonyms"),
+                    depictions=_label_set(properties, "depictions"),
+                    visually_similar=_label_set(properties, "visually_similar"),
+                    clutter=_label_set(properties, "clutter"),
+                    is_depiction=bool(properties.get("is_depiction", False)),
+                )
             )
         )
     return annotations
