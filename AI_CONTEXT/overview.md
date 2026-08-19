@@ -184,8 +184,8 @@ already enriched instead of re-enriching through an index. The object-search exp
 browses `{map}/object-search/metadata.parquet` directly (read in TypeScript, see ADR
 0005); OCR and cluster ids have no source in v2 and that surface is gone.
 
-The Annotation tab can explicitly score its current prompt through the same Python
-benchmark evaluator used by full runs. Single-prompt artifacts live under
+The Object Search tab's review toolbar can explicitly score its current prompt
+through the same Python benchmark evaluator used by full runs. Single-prompt artifacts live under
 `benchmark/prompt-scores/<slug>/`, below the run-list scan depth, and therefore never
 appear in `/benchmark/status`.
 

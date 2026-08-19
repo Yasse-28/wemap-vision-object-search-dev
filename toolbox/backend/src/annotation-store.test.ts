@@ -20,6 +20,7 @@ import {
   listWorkspaceAnnotations,
   parseReviewMutation,
   parseWorkspaceAnnotation,
+  updateWorkspaceAnnotation,
   parseWorkspaceClass,
   upsertDetectionReview,
   upsertWorkspaceClass,
@@ -223,7 +224,24 @@ test("a point annotation is stored as benchmark ground truth", async () => {
         level: "1",
         prompt: "red fire extinguisher",
         accuracyM: 2,
-        source: { keyframeId: "42", depthM: 4.2 },
+        source: {
+          keyframeId: "42",
+          videoKeyframeUuid: "99ec6c90-61f5-4ae4-aedd-3f1a83898a4c",
+          imageSha256: "abc123",
+          depthM: 4.2,
+        },
+        groundTruth: {
+          objectId: "fire-extinguisher-001",
+          extentM: 0.4,
+          exhaustiveZone: "hall",
+          isDepiction: false,
+          labels: {
+            synonyms: ["fire extinguisher", "extincteur"],
+            depictions: [],
+            visuallySimilar: ["hydrant cabinet"],
+            clutter: ["wall"],
+          },
+        },
       }),
     );
     assert.ok(id.startsWith("gt:"));
@@ -236,6 +254,12 @@ test("a point annotation is stored as benchmark ground truth", async () => {
     const properties = feature.properties as Record<string, unknown>;
     assert.equal(properties.class, "fire extinguisher");
     assert.equal(properties.prompt, "red fire extinguisher");
+    assert.equal(properties.object_id, "fire-extinguisher-001");
+    assert.equal(properties.extent_m, 0.4);
+    assert.deepEqual(
+      (properties.labels as Record<string, unknown>).synonyms,
+      ["fire extinguisher", "extincteur"],
+    );
     assert.deepEqual(
       (feature.geometry as Record<string, unknown>).coordinates,
       [2.35, 48.85, 3.5],
@@ -246,8 +270,26 @@ test("a point annotation is stored as benchmark ground truth", async () => {
     assert.equal(stored.annotations[0].id, id);
     assert.deepEqual(stored.annotations[0].source, {
       keyframeId: "42",
+      videoKeyframeUuid: "99ec6c90-61f5-4ae4-aedd-3f1a83898a4c",
+      imageSha256: "abc123",
       depthM: 4.2,
     });
+    assert.equal(stored.annotations[0].groundTruth.objectId, "fire-extinguisher-001");
+    assert.deepEqual(stored.annotations[0].groundTruth.labels.clutter, ["wall"]);
+
+    const updated = {
+      ...stored.annotations[0],
+      groundTruth: {
+        ...stored.annotations[0].groundTruth,
+        extentM: 0.6,
+        labels: {
+          ...stored.annotations[0].groundTruth.labels,
+          synonyms: ["fire extinguisher", "extincteur", "extinguisher"],
+        },
+      },
+    };
+    assert.equal(updateWorkspaceAnnotation(fixture.map, updated), true);
+    assert.equal(listWorkspaceAnnotations(fixture.map).annotations[0].groundTruth.extentM, 0.6);
   } finally {
     await fixture.cleanup();
   }
@@ -298,6 +340,41 @@ test("malformed geometry is refused rather than stored", async () => {
     () => parseWorkspaceAnnotation({ className: "  ", coordinates: [2.35, 48.85] }),
     /class name/,
   );
+  assert.throws(
+    () =>
+      parseWorkspaceAnnotation({
+        className: "chair",
+        coordinates: [2.35, 48.85],
+        groundTruth: { objectId: "chair-001", extentM: 0.5, labels: {} },
+      }),
+    /exact synonym/,
+  );
+});
+
+test("creating the same image click twice returns the existing point", async () => {
+  const fixture = await createMap();
+  try {
+    const annotation = parseWorkspaceAnnotation({
+      className: "chair",
+      coordinates: [2.35, 48.85],
+      source: {
+        videoKeyframeUuid: "99ec6c90-61f5-4ae4-aedd-3f1a83898a4c",
+        erpU: 0.12345678,
+        erpV: 0.87654321,
+      },
+      groundTruth: {
+        objectId: "chair-001",
+        extentM: 0.5,
+        labels: { synonyms: ["chair"] },
+      },
+    });
+    const first = createWorkspaceAnnotation(fixture.map, annotation);
+    const second = createWorkspaceAnnotation(fixture.map, annotation);
+    assert.equal(second, first);
+    assert.equal(listWorkspaceAnnotations(fixture.map).annotations.length, 1);
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 test("classes existing only in the ground truth are given a palette entry", async () => {

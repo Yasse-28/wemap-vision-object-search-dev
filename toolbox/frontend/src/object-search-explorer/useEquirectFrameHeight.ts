@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent } from "rea
 
 const STORAGE_KEY = "object-search-gui.explorerEquirectHeight";
 export const EQUIRECT_FRAME_DEFAULT_HEIGHT = 280;
+export const EQUIRECT_FRAME_MIN = 120;
+export const EQUIRECT_FRAME_MAX = 600;
 const EQUIRECT_FRAME_MIN_HEIGHT = 120;
 const EQUIRECT_FRAME_MAX_HEIGHT = 600;
 
@@ -12,35 +14,45 @@ function clampHeight(value: number): number {
   );
 }
 
-function readStoredHeight(): number {
+function readStoredHeight(storageKey: string, fallback: number): number {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (raw === null) {
-      return EQUIRECT_FRAME_DEFAULT_HEIGHT;
+      return fallback;
     }
     const value = Number(raw);
     if (!Number.isFinite(value)) {
-      return EQUIRECT_FRAME_DEFAULT_HEIGHT;
+      return fallback;
     }
     return clampHeight(value);
   } catch {
-    return EQUIRECT_FRAME_DEFAULT_HEIGHT;
+    return fallback;
   }
 }
 
-export function useEquirectFrameHeight() {
-  const [height, setHeight] = useState(readStoredHeight);
+/**
+ * Two panes use this — the Explorer's panorama and the Annotation capsule's — and
+ * they are resized independently, so the caller names its own stored key. The
+ * defaults are the Explorer's, which is what every existing caller gets.
+ */
+export function useEquirectFrameHeight(options?: {
+  storageKey?: string;
+  defaultHeight?: number;
+}) {
+  const storageKey = options?.storageKey ?? STORAGE_KEY;
+  const fallback = clampHeight(options?.defaultHeight ?? EQUIRECT_FRAME_DEFAULT_HEIGHT);
+  const [height, setHeight] = useState(() => readStoredHeight(storageKey, fallback));
   const [isDragging, setIsDragging] = useState(false);
   const heightRef = useRef(height);
   heightRef.current = height;
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, String(height));
+      localStorage.setItem(storageKey, String(height));
     } catch {
       /* ignore */
     }
-  }, [height]);
+  }, [storageKey, height]);
 
   const startResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault();

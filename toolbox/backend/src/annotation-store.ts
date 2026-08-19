@@ -358,6 +358,55 @@ function addMissingManualDetectionColumns(database: Database.Database): void {
   }
 }
 
+const SOURCE_KEY_SQL = `COALESCE(
+  json_extract(extra_properties, '$.source.videoKeyframeUuid'),
+  json_extract(extra_properties, '$.source.video_keyframe_uuid'),
+  json_extract(extra_properties, '$.source.keyframeId'),
+  json_extract(extra_properties, '$.source_keyframe_id')
+)`;
+const SOURCE_ERP_U_SQL = `ROUND(COALESCE(
+  json_extract(extra_properties, '$.source.erpU'),
+  json_extract(extra_properties, '$.source.erp_u'),
+  json_extract(extra_properties, '$.source_erp_u')
+), 6)`;
+const SOURCE_ERP_V_SQL = `ROUND(COALESCE(
+  json_extract(extra_properties, '$.source.erpV'),
+  json_extract(extra_properties, '$.source.erp_v'),
+  json_extract(extra_properties, '$.source_erp_v')
+), 6)`;
+
+/** Remove the historical double inserts, then make one image click idempotent. */
+function enforceGroundTruthClickUniqueness(database: Database.Database): void {
+  database.exec(`
+    DELETE FROM ground_truth_point
+    WHERE ground_truth_point_id NOT IN (
+      SELECT MIN(ground_truth_point_id)
+      FROM ground_truth_point
+      WHERE json_valid(extra_properties)
+        AND ${SOURCE_KEY_SQL} IS NOT NULL
+        AND ${SOURCE_ERP_U_SQL} IS NOT NULL
+        AND ${SOURCE_ERP_V_SQL} IS NOT NULL
+      GROUP BY class, ${SOURCE_KEY_SQL}, ${SOURCE_ERP_U_SQL}, ${SOURCE_ERP_V_SQL}
+    )
+      AND json_valid(extra_properties)
+      AND ${SOURCE_KEY_SQL} IS NOT NULL
+      AND ${SOURCE_ERP_U_SQL} IS NOT NULL
+      AND ${SOURCE_ERP_V_SQL} IS NOT NULL;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_ground_truth_click
+      ON ground_truth_point (
+        class,
+        ${SOURCE_KEY_SQL},
+        ${SOURCE_ERP_U_SQL},
+        ${SOURCE_ERP_V_SQL}
+      )
+      WHERE json_valid(extra_properties)
+        AND ${SOURCE_KEY_SQL} IS NOT NULL
+        AND ${SOURCE_ERP_U_SQL} IS NOT NULL
+        AND ${SOURCE_ERP_V_SQL} IS NOT NULL;
+  `);
+}
+
 function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -467,6 +516,7 @@ function openAnnotationDatabase(map: MapEntry): Database.Database {
     addMissingManualDetectionColumns(database);
     importBenchmarkGeoJsonOnce(database, map);
     importOfficeGeoJsonOnce(database, map);
+    enforceGroundTruthClickUniqueness(database);
     databaseCache.set(databasePath, database);
     registerCleanup();
     return database;
@@ -905,6 +955,20 @@ export type WorkspaceAnnotation = {
   /** `[lng, lat]` for a point; an open ring of `[lng, lat]` for a polygon. */
   coordinates: number[] | number[][];
   source: Record<string, unknown> | null;
+  groundTruth: WorkspaceGroundTruth;
+};
+
+export type WorkspaceGroundTruth = {
+  objectId: string | null;
+  extentM: number | null;
+  exhaustiveZone: string | null;
+  isDepiction: boolean;
+  labels: {
+    synonyms: string[];
+    depictions: string[];
+    visuallySimilar: string[];
+    clutter: string[];
+  };
 };
 
 type AnnotationClassRow = {
@@ -926,6 +990,72 @@ function parseJsonObject(value: unknown): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function stringList(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  return [...new Set(values.flatMap((item) => {
+    if (typeof item !== "string") {
+      return [];
+    }
+    const trimmed = item.trim();
+    return trimmed ? [trimmed] : [];
+  }))];
+}
+
+function groundTruthFromRecord(
+  value: Record<string, unknown> | null,
+): WorkspaceGroundTruth {
+  const labels = asObject(value?.labels) ?? {};
+  return {
+    objectId: optionalString(value?.objectId ?? value?.object_id),
+    extentM:
+      typeof (value?.extentM ?? value?.extent_m) === "number"
+        ? Number(value?.extentM ?? value?.extent_m)
+        : null,
+    exhaustiveZone: optionalString(
+      value?.exhaustiveZone ?? value?.exhaustive_zone,
+    ),
+    isDepiction: (value?.isDepiction ?? value?.is_depiction) === true,
+    labels: {
+      synonyms: stringList(labels.synonyms ?? value?.synonyms),
+      depictions: stringList(labels.depictions ?? value?.depictions),
+      visuallySimilar: stringList(
+        labels.visuallySimilar ?? labels.visually_similar
+          ?? value?.visuallySimilar ?? value?.visually_similar,
+      ),
+      clutter: stringList(labels.clutter ?? value?.clutter),
+    },
+  };
+}
+
+function annotationExtraProperties(
+  annotation: WorkspaceAnnotation,
+): Record<string, unknown> {
+  const properties: Record<string, unknown> = {
+    is_depiction: annotation.groundTruth.isDepiction,
+    labels: {
+      synonyms: annotation.groundTruth.labels.synonyms,
+      depictions: annotation.groundTruth.labels.depictions,
+      visually_similar: annotation.groundTruth.labels.visuallySimilar,
+      clutter: annotation.groundTruth.labels.clutter,
+    },
+  };
+  if (annotation.source) properties.source = annotation.source;
+  if (annotation.groundTruth.objectId) {
+    properties.object_id = annotation.groundTruth.objectId;
+  }
+  if (annotation.groundTruth.extentM !== null) {
+    properties.extent_m = annotation.groundTruth.extentM;
+  }
+  if (annotation.groundTruth.exhaustiveZone) {
+    properties.exhaustive_zone = annotation.groundTruth.exhaustiveZone;
+  }
+  return properties;
 }
 
 /**
@@ -1023,6 +1153,7 @@ export function listWorkspaceAnnotations(map: MapEntry): {
         accuracyM: point.accuracy,
         coordinates: [point.lng, point.lat],
         source: parseJsonObject(extra?.source ? JSON.stringify(extra.source) : null),
+        groundTruth: groundTruthFromRecord(extra),
       });
     }
 
@@ -1058,6 +1189,7 @@ export function listWorkspaceAnnotations(map: MapEntry): {
         accuracyM: polygon.accuracy,
         coordinates: ring,
         source: null,
+        groundTruth: groundTruthFromRecord(null),
       });
     }
 
@@ -1100,6 +1232,20 @@ export function parseWorkspaceAnnotation(body: Record<string, unknown>): Workspa
     throw new Error("A polygon annotation needs at least 3 [lng, lat] vertices.");
   }
 
+  const groundTruthRecord = asObject(body.groundTruth);
+  const groundTruth = groundTruthFromRecord(groundTruthRecord);
+  if (annotationType === "point" && groundTruthRecord) {
+    if (!groundTruth.objectId) {
+      throw new Error("A ground-truth point needs an object ID.");
+    }
+    if (groundTruth.extentM === null || groundTruth.extentM <= 0) {
+      throw new Error("A ground-truth point needs a positive horizontal extent.");
+    }
+    if (!groundTruth.labels.synonyms.length) {
+      throw new Error("A ground-truth point needs at least one exact synonym.");
+    }
+  }
+
   return {
     id: typeof body.id === "string" ? body.id : "",
     className,
@@ -1113,6 +1259,7 @@ export function parseWorkspaceAnnotation(body: Record<string, unknown>): Workspa
       body.source && typeof body.source === "object" && !Array.isArray(body.source)
         ? (body.source as Record<string, unknown>)
         : null,
+    groundTruth,
   };
 }
 
@@ -1122,10 +1269,10 @@ function insertWorkspaceAnnotation(
 ): string {
   if (annotation.annotationType === "point") {
     const [lng, lat] = annotation.coordinates as number[];
-    const extra = annotation.source ? JSON.stringify({ source: annotation.source }) : null;
+    const extra = JSON.stringify(annotationExtraProperties(annotation));
     const result = database
       .prepare(`
-        INSERT INTO ground_truth_point
+        INSERT OR IGNORE INTO ground_truth_point
           (lng, lat, alt, level, class, prompt, accuracy, extra_properties, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
@@ -1140,7 +1287,33 @@ function insertWorkspaceAnnotation(
         extra,
         nowIso(),
       );
-    return `${POINT_ID_PREFIX}${Number(result.lastInsertRowid)}`;
+    if (result.changes > 0) {
+      return `${POINT_ID_PREFIX}${Number(result.lastInsertRowid)}`;
+    }
+    const source = annotation.source ?? {};
+    const sourceKey = optionalString(
+      source.videoKeyframeUuid
+        ?? source.video_keyframe_uuid
+        ?? source.keyframeId
+        ?? source.legacy_keyframe_id,
+    );
+    const erpU = Number(source.erpU ?? source.erp_u);
+    const erpV = Number(source.erpV ?? source.erp_v);
+    const existing = sourceKey && Number.isFinite(erpU) && Number.isFinite(erpV)
+      ? database.prepare(`
+          SELECT ground_truth_point_id AS id
+          FROM ground_truth_point
+          WHERE class = ?
+            AND ${SOURCE_KEY_SQL} = ?
+            AND ${SOURCE_ERP_U_SQL} = ROUND(?, 6)
+            AND ${SOURCE_ERP_V_SQL} = ROUND(?, 6)
+          LIMIT 1
+        `).get(annotation.className, sourceKey, erpU, erpV) as { id: number } | undefined
+      : undefined;
+    if (!existing) {
+      throw new Error("The point annotation could not be stored.");
+    }
+    return `${POINT_ID_PREFIX}${existing.id}`;
   }
 
   const result = database
@@ -1167,6 +1340,36 @@ export function createWorkspaceAnnotation(
   annotation: WorkspaceAnnotation,
 ): string {
   return withDatabase(map, (database) => insertWorkspaceAnnotation(database, annotation));
+}
+
+/** Replace one existing point annotation while preserving its stable row id. */
+export function updateWorkspaceAnnotation(
+  map: MapEntry,
+  annotation: WorkspaceAnnotation,
+): boolean {
+  if (!annotation.id.startsWith(POINT_ID_PREFIX) || annotation.annotationType !== "point") {
+    return false;
+  }
+  const [lng, lat] = annotation.coordinates as number[];
+  return withDatabase(map, (database) => {
+    const result = database.prepare(`
+      UPDATE ground_truth_point SET
+        lng = ?, lat = ?, alt = ?, level = ?, class = ?, prompt = ?, accuracy = ?,
+        extra_properties = ?
+      WHERE ground_truth_point_id = ?
+    `).run(
+      lng,
+      lat,
+      annotation.altitude,
+      annotation.level,
+      annotation.className,
+      annotation.prompt,
+      annotation.accuracyM,
+      JSON.stringify(annotationExtraProperties(annotation)),
+      Number(annotation.id.slice(POINT_ID_PREFIX.length)),
+    );
+    return result.changes > 0;
+  });
 }
 
 /** Delete one annotation by its prefixed id. Returns false when nothing matched. */
@@ -1327,6 +1530,14 @@ function importCollection(
           color,
           ...rest
         } = properties;
+        const hasGroundTruthContract = [
+          "objectId",
+          "object_id",
+          "extentM",
+          "extent_m",
+          "labels",
+          "synonyms",
+        ].some((key) => Object.hasOwn(rest, key));
 
         let annotation: WorkspaceAnnotation;
         try {
@@ -1342,6 +1553,7 @@ function importCollection(
               prompt,
               accuracyM: accuracy,
               source: rest.source,
+              groundTruth: hasGroundTruthContract ? rest : undefined,
             });
           } else if (geometry?.type === "Polygon") {
             const rings = geometry.coordinates as number[][][];

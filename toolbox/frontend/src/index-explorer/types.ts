@@ -164,6 +164,26 @@ export type DepthPinResponse = {
   point_local: [number, number, number];
   point_world: [number, number, number];
   point_world_wds: [number, number, number];
+  source_identity?: {
+    source_schema_version: number;
+    map_uuid: string | null;
+    geo_ref_id: number | null;
+    geo_ref_version: number | null;
+    geo_keyframe_id: number | null;
+    legacy_keyframe_id: string;
+    video_keyframe_id: number | null;
+    video_keyframe_uuid: string | null;
+    video_capture_id: number | null;
+    video_capture_uuid: string | null;
+    video_capture_index: number | null;
+    frame_number: number | null;
+    frame_time_s: number | null;
+    image_filename: string | null;
+    image_storage_key: string | null;
+    image_sha256: string | null;
+    depth_filename: string | null;
+    depth_storage_key: string | null;
+  };
   latitude: number;
   longitude: number;
   altitude: number;

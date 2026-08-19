@@ -18,6 +18,7 @@ import {
   upsertDetectionGroupLabel,
   upsertDetectionReview,
   upsertWorkspaceClass,
+  updateWorkspaceAnnotation,
 } from "./annotation-store.js";
 import {
   benchmarkRunPayload,
@@ -63,6 +64,7 @@ import {
   objectSearchMetadataMarkersPayload,
   objectSearchMetadataStatusPayload,
   previewFromPathPng,
+  reprojectAnnotationSources,
   proposalNeighborProjectionRenderPng,
   proposalNeighborProjectionsPayload,
   rowFilterParamsFromQuery,
@@ -281,7 +283,9 @@ export async function handleWorkbenchUiMapRoute(
       return true;
     }
     if (method === "GET" && suffix === "/annotations") {
-      sendJson(response, 200, listWorkspaceAnnotations(map));
+      const workspace = listWorkspaceAnnotations(map);
+      const annotations = await reprojectAnnotationSources(map, workspace.annotations);
+      sendJson(response, 200, { ...workspace, annotations });
       return true;
     }
     // A whole FeatureCollection in: the file-import path. It merges rather than
@@ -303,6 +307,23 @@ export async function handleWorkbenchUiMapRoute(
         throw new WorkbenchRouteError(400, (error as Error).message);
       }
       sendJson(response, 201, { id: createWorkspaceAnnotation(map, annotation) });
+      return true;
+    }
+    if (method === "PUT" && suffix === "/annotations/annotation") {
+      const body = await requestJson(request);
+      let annotation;
+      try {
+        annotation = parseWorkspaceAnnotation(body);
+      } catch (error) {
+        throw new WorkbenchRouteError(400, (error as Error).message);
+      }
+      if (!annotation.id) {
+        throw new WorkbenchRouteError(400, "An annotation id is required.");
+      }
+      if (!updateWorkspaceAnnotation(map, annotation)) {
+        throw new WorkbenchRouteError(404, `Annotation ${annotation.id} was not found.`);
+      }
+      sendJson(response, 200, { id: annotation.id });
       return true;
     }
     if (method === "DELETE" && suffix === "/annotations/annotation") {

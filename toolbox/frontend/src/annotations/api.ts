@@ -32,9 +32,25 @@ type WireAnnotation = {
   accuracyM: number | null;
   coordinates: number[] | number[][];
   source: AnnotationFeature["source"];
+  groundTruth?: AnnotationFeature["groundTruth"];
 };
 
 export const DEFAULT_ACCURACY_FALLBACK_M = 2;
+
+function emptyGroundTruth(): AnnotationFeature["groundTruth"] {
+  return {
+    objectId: null,
+    extentM: null,
+    exhaustiveZone: null,
+    isDepiction: false,
+    labels: {
+      synonyms: [],
+      depictions: [],
+      visuallySimilar: [],
+      clutter: [],
+    },
+  };
+}
 
 function base(mapId: string): string {
   return `/ui/api/maps/${encodeURIComponent(mapId)}/annotations`;
@@ -87,6 +103,7 @@ export async function fetchWorkspaceAnnotations(mapId: string): Promise<{
     level: item.level,
     accuracyM: item.accuracyM ?? DEFAULT_ACCURACY_FALLBACK_M,
     source: item.source ?? null,
+    groundTruth: item.groundTruth ?? emptyGroundTruth(),
   }));
   return { classes, annotations };
 }
@@ -96,11 +113,21 @@ export async function createAnnotation(
   mapId: string,
   annotation: AnnotationFeature,
 ): Promise<string> {
+  const data = (await send(
+    `${base(mapId)}/annotation`,
+    "POST",
+    annotationPayload(annotation),
+  )) as { id: string };
+  return data.id;
+}
+
+function annotationPayload(annotation: AnnotationFeature): Record<string, unknown> {
   const coordinates =
     annotation.annotationType === "polygon"
       ? (annotation.coordinates as number[][][])[0]
       : (annotation.coordinates as number[]);
-  const data = (await send(`${base(mapId)}/annotation`, "POST", {
+  return {
+    id: annotation.id,
     className: annotation.className,
     annotationType: annotation.annotationType,
     prompt: annotation.prompt,
@@ -109,8 +136,15 @@ export async function createAnnotation(
     accuracyM: annotation.accuracyM,
     coordinates,
     source: annotation.source,
-  })) as { id: string };
-  return data.id;
+    groundTruth: annotation.groundTruth,
+  };
+}
+
+export async function updateAnnotation(
+  mapId: string,
+  annotation: AnnotationFeature,
+): Promise<void> {
+  await send(`${base(mapId)}/annotation`, "PUT", annotationPayload(annotation));
 }
 
 export async function deleteAnnotation(mapId: string, id: string): Promise<void> {

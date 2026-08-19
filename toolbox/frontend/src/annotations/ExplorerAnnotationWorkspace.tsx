@@ -18,8 +18,10 @@ import {
   fetchWorkspaceAnnotations,
   importAnnotations as importStoredAnnotations,
   saveClass as saveStoredClass,
+  updateAnnotation as updateStoredAnnotation,
 } from "./api";
 import CollapsibleSection from "./CollapsibleSection";
+import ObjectIdCombobox, { type ObjectIdOption } from "./ObjectIdCombobox";
 import { canonicalLevel, pointInPolygon } from "./geometry";
 import {
   newAnnotationId,
@@ -62,11 +64,20 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
   const [altitudeInput, setAltitudeInput] = useState("");
   const [levelInput, setLevelInput] = useState("");
   const [accuracyInput, setAccuracyInput] = useState(DEFAULT_ACCURACY_M);
+  const [objectIdInput, setObjectIdInput] = useState("");
+  const [extentInput, setExtentInput] = useState("");
+  const [exhaustiveZoneInput, setExhaustiveZoneInput] = useState("");
+  const [synonymsInput, setSynonymsInput] = useState("");
+  const [depictionsInput, setDepictionsInput] = useState("");
+  const [visuallySimilarInput, setVisuallySimilarInput] = useState("");
+  const [clutterInput, setClutterInput] = useState("");
+  const [isDepictionInput, setIsDepictionInput] = useState(false);
   const [draft, setDraft] = useState<AnnotationDraft | null>(null);
   const [focusTarget, setFocusTarget] = useState<FocusTarget | null>(null);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(
     null,
   );
+  const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [roiActive, setRoiActive] = useState(false);
@@ -83,9 +94,18 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
     setAltitudeInput("");
     setLevelInput("");
     setAccuracyInput(DEFAULT_ACCURACY_M);
+    setObjectIdInput("");
+    setExtentInput("");
+    setExhaustiveZoneInput("");
+    setSynonymsInput("");
+    setDepictionsInput("");
+    setVisuallySimilarInput("");
+    setClutterInput("");
+    setIsDepictionInput(false);
     setDraft(null);
     setFocusTarget(null);
     setSelectedAnnotationId(null);
+    setEditingAnnotationId(null);
     setErrorMessage(null);
     setInfoMessage(null);
     setRoiActive(false);
@@ -131,6 +151,10 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
       classes.length > 0 &&
       classes.every((item) => !hiddenClassKeys.has(classKey(item))),
     [classes, hiddenClassKeys],
+  );
+  const editingAnnotation = useMemo(
+    () => annotations.find((item) => item.id === editingAnnotationId) ?? null,
+    [annotations, editingAnnotationId],
   );
   const markers: LivemapMarker[] = useMemo(
     () =>
@@ -231,6 +255,7 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
     source: Omit<AnnotationSource, "erpU" | "erpV" | "depthM">,
   ) {
     setFocusTarget(null);
+    setEditingAnnotationId(null);
     setDraft({
       requestId,
       status: "resolving",
@@ -247,10 +272,35 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
       if (!current || current.requestId !== requestId) {
         return current;
       }
+      const identity = response.source_identity;
       setAltitudeInput(String(response.altitude));
       setLevelInput(response.level ?? "");
       return {
         ...current,
+        source: {
+          ...current.source,
+          ...(identity
+            ? {
+                sourceSchemaVersion: identity.source_schema_version,
+                mapUuid: identity.map_uuid,
+                geoRefId: identity.geo_ref_id,
+                geoRefVersion: identity.geo_ref_version,
+                geoKeyframeId: identity.geo_keyframe_id,
+                videoKeyframeId: identity.video_keyframe_id,
+                videoKeyframeUuid: identity.video_keyframe_uuid,
+                videoCaptureId: identity.video_capture_id,
+                videoCaptureUuid: identity.video_capture_uuid,
+                videoCaptureIndex: identity.video_capture_index,
+                frameNumber: identity.frame_number,
+                frameTimeS: identity.frame_time_s,
+                imageFilename: identity.image_filename,
+                imageStorageKey: identity.image_storage_key,
+                imageSha256: identity.image_sha256,
+                depthFilename: identity.depth_filename,
+                depthStorageKey: identity.depth_storage_key,
+              }
+            : {}),
+        },
         status: "resolved",
         response,
         message: `Depth ${response.depth_m.toFixed(2)} m`,
@@ -278,6 +328,20 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
       return;
     }
     const response = draft.response;
+    const extentM = parseOptionalNumber(extentInput);
+    const synonyms = parseLabelList(synonymsInput);
+    if (!objectIdInput.trim()) {
+      setErrorMessage("Object ID is required, for example chair-017.");
+      return;
+    }
+    if (extentM === null || extentM <= 0) {
+      setErrorMessage("Extent must be a positive horizontal size in metres.");
+      return;
+    }
+    if (!synonyms.length) {
+      setErrorMessage("Add at least one exact synonym for this object.");
+      return;
+    }
     const altitude = parseOptionalNumber(altitudeInput);
     const feature: AnnotationFeature = {
       id: newAnnotationId(),
@@ -296,6 +360,18 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
         erpV: response.erp_v,
         depthM: response.depth_m,
       },
+      groundTruth: {
+        objectId: objectIdInput.trim(),
+        extentM,
+        exhaustiveZone: exhaustiveZoneInput.trim() || null,
+        isDepiction: isDepictionInput,
+        labels: {
+          synonyms,
+          depictions: parseLabelList(depictionsInput),
+          visuallySimilar: parseLabelList(visuallySimilarInput),
+          clutter: parseLabelList(clutterInput),
+        },
+      },
     };
     // Written through immediately, then the row is shown with the id the store gave
     // it. Optimistic insertion was rejected: a point that looks saved but is not is
@@ -305,6 +381,13 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
         const id = await createStoredAnnotation(mapId, feature);
         setAnnotations((current) => [...current, { ...feature, id }]);
         setDraft(null);
+        setObjectIdInput("");
+        setExtentInput("");
+        setSynonymsInput("");
+        setDepictionsInput("");
+        setVisuallySimilarInput("");
+        setClutterInput("");
+        setIsDepictionInput(false);
         setInfoMessage(`Added ${activeClass.name} annotation.`);
         setErrorMessage(null);
       } catch (error) {
@@ -319,6 +402,111 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
 
   function discardDraft() {
     setDraft(null);
+  }
+
+  /** The fields `editAnnotation` and `beginSuggestedDraft` both load into the form. */
+  function prefillFromAnnotation(annotation: AnnotationFeature) {
+    setActiveClassKey(annotationClassKey(annotation));
+    setPromptInput(annotation.prompt ?? "");
+    setAltitudeInput(annotation.altitude === null ? "" : String(annotation.altitude));
+    setLevelInput(annotation.level ?? "");
+    setAccuracyInput(annotation.accuracyM);
+    setObjectIdInput(annotation.groundTruth.objectId ?? "");
+    setExtentInput(
+      annotation.groundTruth.extentM === null
+        ? ""
+        : String(annotation.groundTruth.extentM),
+    );
+    setExhaustiveZoneInput(annotation.groundTruth.exhaustiveZone ?? "");
+    setSynonymsInput(annotation.groundTruth.labels.synonyms.join(", "));
+    setDepictionsInput(annotation.groundTruth.labels.depictions.join(", "));
+    setVisuallySimilarInput(
+      annotation.groundTruth.labels.visuallySimilar.join(", "),
+    );
+    setClutterInput(annotation.groundTruth.labels.clutter.join(", "));
+    setIsDepictionInput(annotation.groundTruth.isDepiction);
+  }
+
+  function editAnnotation(annotation: AnnotationFeature) {
+    if (annotation.annotationType !== "point") {
+      return;
+    }
+    setDraft(null);
+    setEditingAnnotationId(annotation.id);
+    setSelectedAnnotationId(annotation.id);
+    prefillFromAnnotation(annotation);
+    setErrorMessage(null);
+    setInfoMessage(null);
+  }
+
+  /**
+   * Loads another annotation's fields (same object, same class, same labels) without
+   * entering edit mode, so the point the caller resolves next is saved as a new
+   * record — the reprojection flow's "suggest this object here too".
+   */
+  function beginSuggestedDraft(annotation: AnnotationFeature) {
+    if (annotation.annotationType !== "point") {
+      return;
+    }
+    setEditingAnnotationId(null);
+    prefillFromAnnotation(annotation);
+    setErrorMessage(null);
+    setInfoMessage(null);
+  }
+
+  function cancelAnnotationEdit() {
+    setEditingAnnotationId(null);
+  }
+
+  function saveAnnotationEdit() {
+    if (!editingAnnotation || !activeClass) {
+      setErrorMessage("The annotation or its class is no longer available.");
+      return;
+    }
+    const extentM = parseOptionalNumber(extentInput);
+    const synonyms = parseLabelList(synonymsInput);
+    if (!objectIdInput.trim() || extentM === null || extentM <= 0 || !synonyms.length) {
+      setErrorMessage("Object ID, a positive extent and one exact synonym are required.");
+      return;
+    }
+    const updated: AnnotationFeature = {
+      ...editingAnnotation,
+      className: activeClass.name,
+      classColor: activeClass.color,
+      prompt: promptInput.trim() || activeClass.prompt || null,
+      altitude: parseOptionalNumber(altitudeInput),
+      level: levelInput.trim() || null,
+      accuracyM: clampAccuracy(accuracyInput),
+      groundTruth: {
+        objectId: objectIdInput.trim(),
+        extentM,
+        exhaustiveZone: exhaustiveZoneInput.trim() || null,
+        isDepiction: isDepictionInput,
+        labels: {
+          synonyms,
+          depictions: parseLabelList(depictionsInput),
+          visuallySimilar: parseLabelList(visuallySimilarInput),
+          clutter: parseLabelList(clutterInput),
+        },
+      },
+    };
+    void (async () => {
+      try {
+        await updateStoredAnnotation(mapId, updated);
+        setAnnotations((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        setEditingAnnotationId(null);
+        setInfoMessage(`Updated ${updated.groundTruth.objectId}.`);
+        setErrorMessage(null);
+      } catch (error) {
+        setErrorMessage(
+          `Could not update the annotation: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    })();
   }
 
   function deleteAnnotation(id: string) {
@@ -387,6 +575,22 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
     setLevelInput,
     accuracyInput,
     setAccuracyInput,
+    objectIdInput,
+    setObjectIdInput,
+    extentInput,
+    setExtentInput,
+    exhaustiveZoneInput,
+    setExhaustiveZoneInput,
+    synonymsInput,
+    setSynonymsInput,
+    depictionsInput,
+    setDepictionsInput,
+    visuallySimilarInput,
+    setVisuallySimilarInput,
+    clutterInput,
+    setClutterInput,
+    isDepictionInput,
+    setIsDepictionInput,
     draft,
     beginDraft,
     resolveDraft,
@@ -398,6 +602,11 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
     selectAnnotationMarker,
     focusTarget,
     selectedAnnotationId,
+    editingAnnotation,
+    editAnnotation,
+    beginSuggestedDraft,
+    cancelAnnotationEdit,
+    saveAnnotationEdit,
     markers,
     polygons,
     roiActive,
@@ -416,10 +625,62 @@ export function useExplorerAnnotationWorkspace(mapId: string) {
   };
 }
 
+/**
+ * The blocks the tool is made of. The Annotation tab renders subsets of them under
+ * its own modes; anything that still wants the whole panel omits `sections` and
+ * gets what it always got.
+ */
+export type AnnotationControlsSection =
+  | "mode"
+  | "classes"
+  | "object"
+  | "metadata"
+  | "roi"
+  | "io";
+
+/**
+ * Whether the annotation on screen can be written. The Annotation tab renders its own
+ * Save button, and a second copy of this condition is exactly how a button ends up
+ * enabled over a save that then refuses.
+ */
+export function canSaveAnnotation(workspace: ExplorerAnnotationWorkspace): boolean {
+  return Boolean(
+    (workspace.draft?.status === "resolved" || workspace.editingAnnotation) &&
+      workspace.activeClass &&
+      workspace.objectIdInput.trim() &&
+      (parseOptionalNumber(workspace.extentInput) ?? 0) > 0 &&
+      parseLabelList(workspace.synonymsInput).length,
+  );
+}
+
+const ALL_CONTROLS_SECTIONS: AnnotationControlsSection[] = [
+  "mode",
+  "classes",
+  "object",
+  "metadata",
+  "roi",
+  "io",
+];
+
 export function ExplorerAnnotationControls(props: {
   workspace: ExplorerAnnotationWorkspace;
+  /** Defaults to every section, which is the original panel. */
+  sections?: AnnotationControlsSection[];
+  /** Render without the "Annotation tools" collapsible around it. */
+  bare?: boolean;
+  /** The caller renders Save/Discard itself (the Annotation tab's action bar). */
+  hideSaveActions?: boolean;
+  /**
+   * An offered horizontal extent, from the proposal's angular width at the resolved
+   * depth. Shown beside the field and applied only on request: it assumes the object
+   * faces the camera and that the depth sample is the object's, so it is a starting
+   * point, not a measurement.
+   */
+  extentSuggestion?: { valueM: number; explanation: string; onApply: () => void } | null;
 }) {
   const { workspace } = props;
+  const sections = props.sections ?? ALL_CONTROLS_SECTIONS;
+  const showSection = (name: AnnotationControlsSection) => sections.includes(name);
   const [newClassName, setNewClassName] = useState("");
   const [newClassColor, setNewClassColor] = useState(DEFAULT_NEW_CLASS_COLOR);
   const [isImportDragOver, setIsImportDragOver] = useState(false);
@@ -437,6 +698,53 @@ export function ExplorerAnnotationControls(props: {
   const [editClassColor, setEditClassColor] = useState(DEFAULT_NEW_CLASS_COLOR);
   const [editClassPrompt, setEditClassPrompt] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Every id already in use, with the class it belongs to and how many views it has:
+  // reusing an id is what makes two points the same physical object, so the list has
+  // to carry enough to tell `chair-017` from `door-017` at a glance.
+  const knownObjectIds = useMemo<ObjectIdOption[]>(() => {
+    const byId = new Map<string, ObjectIdOption>();
+    for (const item of workspace.annotations) {
+      const objectId = item.groundTruth.objectId;
+      if (!objectId) {
+        continue;
+      }
+      const entry = byId.get(objectId);
+      if (entry) {
+        entry.count += 1;
+      } else {
+        byId.set(objectId, { objectId, className: item.className, count: 1 });
+      }
+    }
+    return [...byId.values()].sort((a, b) => a.objectId.localeCompare(b.objectId));
+  }, [workspace.annotations]);
+  const knownZones = useMemo(
+    () => [...new Set(workspace.annotations.flatMap((item) =>
+      item.groundTruth.exhaustiveZone ? [item.groundTruth.exhaustiveZone] : [],
+    ))].sort(),
+    [workspace.annotations],
+  );
+
+  useEffect(() => {
+    if (
+      !workspace.draft ||
+      !workspace.activeClass ||
+      workspace.objectIdInput.trim()
+    ) {
+      return;
+    }
+    workspace.setObjectIdInput(
+      nextObjectId(
+        workspace.activeClass.name,
+        knownObjectIds.map((option) => option.objectId),
+      ),
+    );
+  }, [
+    knownObjectIds,
+    workspace.activeClass,
+    workspace.draft,
+    workspace.objectIdInput,
+    workspace.setObjectIdInput,
+  ]);
 
   useEffect(() => {
     if (!classMenu && !editingClass) {
@@ -749,16 +1057,9 @@ export function ExplorerAnnotationControls(props: {
     ? workspace.classes.find((item) => classKey(item) === classMenu.classKey) ?? null
     : null;
 
-  return (
-    <CollapsibleSection
-      title="Annotation tools"
-      summary={`${workspace.enabled ? "Active · " : ""}${
-        workspace.annotations.length
-      } saved`}
-      sectionClassName="explorer-annotation-toolbar"
-      defaultOpen={false}
-      forceOpen={Boolean(workspace.draft)}
-    >
+  const body = (
+    <>
+      {showSection("mode") ? (
       <div className="explorer-annotation-mode-row">
         <label className="inline-check">
           <input
@@ -798,8 +1099,11 @@ export function ExplorerAnnotationControls(props: {
           />
         </label>
       </div>
+      ) : null}
 
+      {showSection("classes") || showSection("object") ? (
       <div className="explorer-annotation-primary-grid">
+        {showSection("classes") ? (
         <section>
           <div className="explorer-class-heading">
             <h4>Classes</h4>
@@ -963,44 +1267,195 @@ export function ExplorerAnnotationControls(props: {
             </form>
           ) : null}
         </section>
+        ) : null}
 
-        <section>
-          <h4>Pending point</h4>
-          {workspace.draft ? (
+        {showSection("object") ? (
+        <section className="annotation-contract-panel">
+          <div className="annotation-contract-heading">
+            <div>
+              <h4>Ground-truth object</h4>
+              <p className="muted">Identify the physical object before saving its point.</p>
+            </div>
+            <span className={`annotation-contract-status${
+              workspace.objectIdInput.trim() &&
+              (parseOptionalNumber(workspace.extentInput) ?? 0) > 0 &&
+              parseLabelList(workspace.synonymsInput).length
+                ? " is-ready"
+                : ""
+            }`}>
+              {workspace.objectIdInput.trim() &&
+              (parseOptionalNumber(workspace.extentInput) ?? 0) > 0 &&
+              parseLabelList(workspace.synonymsInput).length
+                ? "Ready"
+                : "Needs details"}
+            </span>
+          </div>
+          {workspace.draft || workspace.editingAnnotation ? (
             <>
-              <p className={`object-search-depth-pin-caption is-${workspace.draft.status}`}>
-                {workspace.draft.message}
-                {workspace.draft.response
-                  ? ` | ${workspace.draft.response.latitude.toFixed(7)}, ${workspace.draft.response.longitude.toFixed(7)}`
-                  : ""}
-              </p>
+              {workspace.draft ? (
+                <p className={`object-search-depth-pin-caption is-${workspace.draft.status}`}>
+                  {workspace.draft.message}
+                  {workspace.draft.response
+                    ? ` | ${workspace.draft.response.latitude.toFixed(7)}, ${workspace.draft.response.longitude.toFixed(7)}`
+                    : ""}
+                </p>
+              ) : (
+                <p className="object-search-depth-pin-caption is-resolved">
+                  Editing saved annotation {workspace.editingAnnotation?.groundTruth.objectId
+                    ?? workspace.editingAnnotation?.id}
+                </p>
+              )}
+              <div className="annotation-contract-core">
+                <label>
+                  Object ID
+                  <ObjectIdCombobox
+                    value={workspace.objectIdInput}
+                    options={knownObjectIds}
+                    placeholder="chair-017"
+                    describedBy="annotation-object-id-help"
+                    onChange={workspace.setObjectIdInput}
+                  />
+                  <small id="annotation-object-id-help">
+                    Reuse an existing ID when this is another view of the same object.
+                  </small>
+                </label>
+                <label>
+                  Horizontal extent (m)
+                  <input
+                    type="number"
+                    min="0.02"
+                    max="20"
+                    step="0.05"
+                    value={workspace.extentInput}
+                    onChange={(event) => workspace.setExtentInput(event.target.value)}
+                    placeholder="0.5"
+                  />
+                  {props.extentSuggestion ? (
+                    <button
+                      type="button"
+                      className="annotation-extent-suggestion"
+                      title={props.extentSuggestion.explanation}
+                      onClick={props.extentSuggestion.onApply}
+                    >
+                      Use {props.extentSuggestion.valueM.toFixed(2)} m
+                      <span>{props.extentSuggestion.explanation}</span>
+                    </button>
+                  ) : null}
+                  <small>Estimate the largest horizontal dimension, not a match radius.</small>
+                </label>
+              </div>
+              <label className="annotation-contract-field">
+                Exact synonyms
+                <input
+                  value={workspace.synonymsInput}
+                  onChange={(event) => workspace.setSynonymsInput(event.target.value)}
+                  placeholder="chair, seat, chaise"
+                />
+                <small>Comma-separated. Use shared English terms and keep the local term.</small>
+              </label>
+
+              <CollapsibleSection
+                title="Coverage and label sets"
+                summary={workspace.exhaustiveZoneInput.trim() ? "Zone set" : "Optional details"}
+                sectionClassName="collapsible-subsection annotation-contract-details"
+                defaultOpen={false}
+              >
+                <label className="annotation-contract-field">
+                  Exhaustive zone
+                  <input
+                    list="annotation-exhaustive-zones"
+                    value={workspace.exhaustiveZoneInput}
+                    onChange={(event) =>
+                      workspace.setExhaustiveZoneInput(event.target.value)
+                    }
+                    placeholder="restaurant"
+                  />
+                  <small>Only set a zone where every relevant object was annotated.</small>
+                </label>
+                <datalist id="annotation-exhaustive-zones">
+                  {knownZones.map((zone) => <option key={zone} value={zone} />)}
+                </datalist>
+                <div className="annotation-contract-label-grid">
+                  <label>
+                    Depictions
+                    <input
+                      value={workspace.depictionsInput}
+                      onChange={(event) => workspace.setDepictionsInput(event.target.value)}
+                      placeholder="airplane, exit pictogram"
+                    />
+                  </label>
+                  <label>
+                    Visually similar
+                    <input
+                      value={workspace.visuallySimilarInput}
+                      onChange={(event) =>
+                        workspace.setVisuallySimilarInput(event.target.value)
+                      }
+                      placeholder="stool, armchair"
+                    />
+                  </label>
+                  <label className="annotation-contract-field-wide">
+                    Cutout clutter
+                    <input
+                      value={workspace.clutterInput}
+                      onChange={(event) => workspace.setClutterInput(event.target.value)}
+                      placeholder="table, floor, wall"
+                    />
+                    <small>Name only what the crop collected around the object.</small>
+                  </label>
+                </div>
+                <label className="inline-check annotation-depiction-check">
+                  <input
+                    type="checkbox"
+                    checked={workspace.isDepictionInput}
+                    onChange={(event) =>
+                      workspace.setIsDepictionInput(event.target.checked)
+                    }
+                  />
+                  This annotation is a printed or displayed image of its class
+                </label>
+              </CollapsibleSection>
+              {props.hideSaveActions ? null : (
               <div className="button-row">
                 <button
                   className="primary-button"
                   type="button"
-                  disabled={
-                    workspace.draft.status !== "resolved" || !workspace.activeClass
+                  disabled={!canSaveAnnotation(workspace)}
+                  onClick={
+                    workspace.editingAnnotation
+                      ? workspace.saveAnnotationEdit
+                      : workspace.saveDraft
                   }
-                  onClick={workspace.saveDraft}
                 >
-                  Save annotation
+                  {workspace.editingAnnotation ? "Update annotation" : "Save annotation"}
                 </button>
                 <button
                   className="secondary-button"
                   type="button"
-                  onClick={workspace.discardDraft}
+                  onClick={
+                    workspace.editingAnnotation
+                      ? workspace.cancelAnnotationEdit
+                      : workspace.discardDraft
+                  }
                 >
                   Discard
                 </button>
               </div>
+              )}
             </>
           ) : (
-            <p className="muted">No pending image point.</p>
+            <p className="muted">
+              Ctrl+click a panorama or selected proposal to create an object point.
+            </p>
           )}
         </section>
+        ) : null}
       </div>
+      ) : null}
 
+      {showSection("metadata") || showSection("roi") || showSection("io") ? (
       <div className="explorer-annotation-secondary-grid">
+        {showSection("metadata") ? (
         <CollapsibleSection
           title="Metadata"
           sectionClassName="collapsible-subsection annotation-compact-panel"
@@ -1038,7 +1493,9 @@ export function ExplorerAnnotationControls(props: {
             />
           </label>
         </CollapsibleSection>
+        ) : null}
 
+        {showSection("roi") ? (
         <CollapsibleSection
           title="ROI count"
           sectionClassName="collapsible-subsection annotation-compact-panel"
@@ -1078,7 +1535,9 @@ export function ExplorerAnnotationControls(props: {
             )}
           </div>
         </CollapsibleSection>
+        ) : null}
 
+        {showSection("io") ? (
         <CollapsibleSection
           title="Load / Save"
           sectionClassName="collapsible-subsection annotation-compact-panel"
@@ -1154,13 +1613,35 @@ export function ExplorerAnnotationControls(props: {
             />
           </div>
         </CollapsibleSection>
+        ) : null}
       </div>
+      ) : null}
+    </>
+  );
+
+  if (props.bare) {
+    return <div className="explorer-annotation-toolbar is-bare">{body}</div>;
+  }
+
+  return (
+    <CollapsibleSection
+      title="Annotation tools"
+      summary={`${workspace.enabled ? "Active · " : ""}${
+        workspace.annotations.length
+      } saved`}
+      sectionClassName="explorer-annotation-toolbar"
+      defaultOpen={false}
+      forceOpen={Boolean(workspace.draft || workspace.editingAnnotation)}
+    >
+      {body}
     </CollapsibleSection>
   );
 }
 
 export function ExplorerAnnotationList(props: {
   workspace: ExplorerAnnotationWorkspace;
+  /** The Annotation tab's review mode shows the history open; elsewhere it folds. */
+  defaultOpen?: boolean;
 }) {
   const { workspace } = props;
   const selectedRowRef = useRef<HTMLLIElement | null>(null);
@@ -1223,7 +1704,7 @@ export function ExplorerAnnotationList(props: {
           ? String(workspace.annotations.length)
           : undefined
       }
-      defaultOpen={workspace.annotations.length <= 10}
+      defaultOpen={props.defaultOpen ?? workspace.annotations.length <= 10}
       forceOpen={Boolean(workspace.selectedAnnotationId)}
     >
       <CollapsibleSection
@@ -1280,10 +1761,22 @@ export function ExplorerAnnotationList(props: {
                   {item.prompt ? <span>{item.prompt}</span> : null}
                   <small>
                     {item.annotationType}
+                    {item.groundTruth.objectId
+                      ? ` | ${item.groundTruth.objectId}`
+                      : " | missing object ID"}
+                    {item.groundTruth.extentM !== null
+                      ? ` | ${item.groundTruth.extentM} m extent`
+                      : " | missing extent"}
                     {coordinates
                       ? ` | ${coordinates.latitude.toFixed(7)}, ${coordinates.longitude.toFixed(7)}`
                       : ""}
                     {item.source ? ` | depth ${item.source.depthM.toFixed(2)} m` : ""}
+                    {item.source?.resolutionStatus === "orphaned"
+                      ? " | source missing"
+                      : ""}
+                    {item.source?.resolutionStatus === "legacy-unverified"
+                      ? " | legacy source unverified"
+                      : ""}
                     {item.level !== null ? ` | level ${item.level}` : ""}
                     {` | ±${item.accuracyM.toFixed(1)} m`}
                   </small>
@@ -1295,6 +1788,15 @@ export function ExplorerAnnotationList(props: {
                 >
                   Focus
                 </button>
+                {item.annotationType === "point" ? (
+                  <button
+                    className="link-button"
+                    type="button"
+                    onClick={() => workspace.editAnnotation(item)}
+                  >
+                    Edit
+                  </button>
+                ) : null}
                 <button
                   className="link-button danger"
                   type="button"
@@ -1317,7 +1819,7 @@ function classKey(item: AnnotationClass): string {
   return `${item.name}::${item.annotationType}`;
 }
 
-function annotationClassKey(item: AnnotationFeature): string {
+export function annotationClassKey(item: AnnotationFeature): string {
   return `${item.className}::${item.annotationType}`;
 }
 
@@ -1338,6 +1840,28 @@ function parseOptionalNumber(value: string): number | null {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseLabelList(value: string): string[] {
+  return [...new Set(value
+    .split(/[,;\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
+function nextObjectId(className: string, existing: string[]): string {
+  const prefix = className
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "") || "object";
+  const matcher = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)$`);
+  const next = existing.reduce((highest, value) => {
+    const match = matcher.exec(value);
+    return match ? Math.max(highest, Number(match[1])) : highest;
+  }, 0) + 1;
+  return `${prefix}-${String(next).padStart(3, "0")}`;
 }
 
 function clampAccuracy(value: number): number {

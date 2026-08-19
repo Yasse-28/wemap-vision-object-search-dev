@@ -170,6 +170,50 @@ test("parses origin, levels, geo_ref and keyframes", () => {
   assert.equal(manifest.keyframeIdByImageFilename.get("a.jpg"), 0);
 });
 
+test("keeps optional production identities when an enriched export provides them", () => {
+  const manifest = parseManifest(
+    "/m/m_2_20260101_000000.json",
+    manifestJson({
+      geo_keyframes: [{
+        id: 71,
+        video_keyframe_id: 42,
+        video_keyframe_uuid: "99ec6c90-61f5-4ae4-aedd-3f1a83898a4c",
+        video_capture_id: 8,
+        video_capture_uuid: "8a28ed0a-c3b1-4e61-a5a9-091bb8f9bcaf",
+        video_capture_index: 3,
+        frame_number: 1800,
+        frame_time_s: 60.04,
+        x: 0,
+        y: 0,
+        z: 0,
+        orientation: [1, 0, 0, 0],
+        image_url: "https://example/images/a.jpg",
+        depth_url: "https://example/depths/a.tif",
+      }],
+    }),
+  );
+  assert.deepEqual(
+    {
+      geoKeyframeId: manifest.keyframes[0].geoKeyframeId,
+      videoKeyframeId: manifest.keyframes[0].videoKeyframeId,
+      videoKeyframeUuid: manifest.keyframes[0].videoKeyframeUuid,
+      videoCaptureId: manifest.keyframes[0].videoCaptureId,
+      videoCaptureUuid: manifest.keyframes[0].videoCaptureUuid,
+      frameNumber: manifest.keyframes[0].frameNumber,
+      frameTimeS: manifest.keyframes[0].frameTimeS,
+    },
+    {
+      geoKeyframeId: 71,
+      videoKeyframeId: 42,
+      videoKeyframeUuid: "99ec6c90-61f5-4ae4-aedd-3f1a83898a4c",
+      videoCaptureId: 8,
+      videoCaptureUuid: "8a28ed0a-c3b1-4e61-a5a9-091bb8f9bcaf",
+      frameNumber: 1800,
+      frameTimeS: 60.04,
+    },
+  );
+});
+
 test("null altitude bounds are unbounded, not zero", () => {
   // asNumber(null) === 0 would collapse the band to [0, 0]: every point falls
   // outside every level, `level` becomes null everywhere, and floor filtering

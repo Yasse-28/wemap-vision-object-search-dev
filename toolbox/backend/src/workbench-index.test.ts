@@ -19,6 +19,7 @@ import {
   previewFromPathPng,
   projectionOcclusionAssessment,
   projectProposalIntoNearestKeyframes,
+  reprojectAnnotationSources,
   WorkbenchRouteError,
 } from "./workbench-index.js";
 
@@ -98,6 +99,104 @@ async function createMap(
     cleanup: () => rm(mapPath, { recursive: true, force: true }),
   };
 }
+
+test("reprojects an image annotation when the manifest renumbers its keyframe", async () => {
+  const fixture = await createMap([0, 0, 0]);
+  try {
+    const annotation: {
+      coordinates: number[];
+      altitude: number | null;
+      level: string | null;
+      source: Record<string, unknown>;
+    } = {
+      coordinates: [6, 45],
+      altitude: 100,
+      level: "0",
+      source: {
+        keyframeId: "2",
+        imageFilename: "2.jpg",
+        erpU: 0.5,
+        erpV: 0.5,
+        depthM: 2,
+      },
+    };
+    const first = (await reprojectAnnotationSources(fixture.map, [annotation]))[0];
+    assert.equal(first.source?.resolutionStatus, "resolved");
+    assert.equal(first.source?.keyframeId, "2");
+
+    const movedManifest = {
+      local_origin: [6.0, 45.0, 100.0],
+      map: { name: "test", uuid: "u", venue_type: "rail" },
+      geo_levels: [
+        { value: 0, min_altitude: -10, max_altitude: 10, geo_ref: 2 },
+      ],
+      geo_keyframes: [
+        {
+          x: 5,
+          y: 0,
+          z: 0,
+          orientation: [0, 0, 1, 0],
+          image_url: "https://e/images/2.jpg",
+          depth_url: "https://e/depths/2.tif",
+        },
+      ],
+    };
+    await writeFile(
+      path.join(fixture.map.path, "test_2_20260102_000000.json"),
+      JSON.stringify(movedManifest),
+      "utf8",
+    );
+    const second = (await reprojectAnnotationSources(fixture.map, [first]))[0];
+    assert.equal(second.source?.keyframeId, "0");
+    assert.equal(second.source?.geoRefId, 2);
+    assert.equal(second.source?.geoRefVersion, 2);
+    assert.notDeepEqual(second.coordinates, first.coordinates);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("does not silently rebind an annotation from an unresolved identity", async () => {
+  const fixture = await createMap([0, 0, 0]);
+  try {
+    const base = {
+      coordinates: [6, 45] as number[],
+      altitude: 100,
+      level: "0",
+    };
+    const annotations: Array<{
+      coordinates: number[];
+      altitude: number | null;
+      level: string | null;
+      source: Record<string, unknown>;
+    }> = [
+      {
+        ...base,
+        source: { keyframeId: "2", erpU: 0.5, erpV: 0.5, depthM: 2 },
+      },
+      {
+        ...base,
+        source: {
+          keyframeId: "2",
+          videoKeyframeUuid: "99ec6c90-61f5-4ae4-aedd-3f1a83898a4c",
+          erpU: 0.5,
+          erpV: 0.5,
+          depthM: 2,
+        },
+      },
+    ];
+    const [legacy, missingUuid] = await reprojectAnnotationSources(
+      fixture.map,
+      annotations,
+    );
+    assert.equal(legacy.source?.resolutionStatus, "legacy-unverified");
+    assert.deepEqual(legacy.coordinates, base.coordinates);
+    assert.equal(missingUuid.source?.resolutionStatus, "orphaned");
+    assert.deepEqual(missingUuid.coordinates, base.coordinates);
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
 async function createMetadataMap(): Promise<{
   map: MapEntry;
