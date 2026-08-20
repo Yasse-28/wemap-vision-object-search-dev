@@ -61,35 +61,6 @@ function BboxPostProcessControls(props: Props) {
             />
           </label>
 
-          <div className="bbox-postprocess-source-toggles">
-            <label>
-              <input
-                type="checkbox"
-                checked={props.params.showYolo}
-                onChange={(event) =>
-                  props.onChange({
-                    ...props.params,
-                    showYolo: event.target.checked,
-                  })
-                }
-              />
-              YOLO boxes
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={props.params.showGdino}
-                onChange={(event) =>
-                  props.onChange({
-                    ...props.params,
-                    showGdino: event.target.checked,
-                  })
-                }
-              />
-              G-DINO boxes
-            </label>
-          </div>
-
           <label className="bbox-postprocess-slider">
             <span className="bbox-postprocess-slider-label">
               Min angular area <strong>{formatArea(props.params.minBboxArea)}</strong>
@@ -135,8 +106,8 @@ function BboxPostProcessControls(props: Props) {
 
           <p className="map-caption">
             Greedy NMS uses the detector score (or angular area when it is NULL), across the
-            whole keyframe — v2 has no cutouts to group by. Areas are in square degrees; max
-            area at the slider end means no upper limit.
+            whole keyframe. Detector visibility is controlled from the toolbar above. Areas
+            are in square degrees; max area at the slider end means no upper limit.
           </p>
 
           <button type="button" className="link-button" onClick={props.onReset}>

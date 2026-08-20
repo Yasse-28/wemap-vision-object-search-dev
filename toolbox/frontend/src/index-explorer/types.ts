@@ -164,6 +164,26 @@ export type DepthPinResponse = {
   point_local: [number, number, number];
   point_world: [number, number, number];
   point_world_wds: [number, number, number];
+  source_identity?: {
+    source_schema_version: number;
+    map_uuid: string | null;
+    geo_ref_id: number | null;
+    geo_ref_version: number | null;
+    geo_keyframe_id: number | null;
+    legacy_keyframe_id: string;
+    video_keyframe_id: number | null;
+    video_keyframe_uuid: string | null;
+    video_capture_id: number | null;
+    video_capture_uuid: string | null;
+    video_capture_index: number | null;
+    frame_number: number | null;
+    frame_time_s: number | null;
+    image_filename: string | null;
+    image_storage_key: string | null;
+    image_sha256: string | null;
+    depth_filename: string | null;
+    depth_storage_key: string | null;
+  };
   latitude: number;
   longitude: number;
   altitude: number;
@@ -178,6 +198,44 @@ export type ProjectWorldPointResponse = {
   distance_m: number;
   point_keyframe: [number, number, number];
   point_world_wds: [number, number, number];
+};
+
+export type ProposalNeighborProjection = {
+  keyframe_id: string;
+  distance_from_source_m: number;
+  distance_to_proposal_m: number;
+  erp_u: number;
+  erp_v: number;
+  theta_center: number;
+  phi_center: number;
+  angular_width: number;
+  angular_height: number;
+  viewpoint_angle_deg: number;
+  apparent_area_ratio: number;
+  distance_score: number;
+  view_angle_score: number;
+  apparent_size_score: number;
+  geometric_confidence: number;
+  observed_depth_m: number | null;
+  occlusion_margin_m: number | null;
+  occlusion_confidence: number | null;
+  occlusion_status: "clear" | "occluded" | "depth_mismatch" | "unknown";
+  feature_match_score: number | null;
+  feature_matches: number;
+  feature_inliers: number;
+  feature_inlier_ratio: number | null;
+  feature_match_status: "matched" | "weak" | "no_features" | "unavailable";
+  edge_ncc_score: number | null;
+  edge_ncc_status: "matched" | "weak" | "uninformative" | "unavailable";
+};
+
+export type ProposalNeighborProjectionsResponse = {
+  row_index: number;
+  source_keyframe_id: string;
+  requested_count: number;
+  minimum_baseline_m: number;
+  projections: ProposalNeighborProjection[];
+  note: string;
 };
 
 export type ViewConeResponse = {

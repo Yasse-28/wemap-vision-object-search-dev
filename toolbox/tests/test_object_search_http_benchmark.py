@@ -21,6 +21,7 @@ from toolbox.benchmark.object_search_http_benchmark import (
     group_annotations,
     haversine_m,
     load_annotations,
+    match_radius_m,
     parse_args,
     parse_predictions,
     precision_recall_curve,
@@ -810,3 +811,101 @@ def test_grouped_targets_match_on_their_nearest_member() -> None:
     )
     assert curve.points[-1].true_positives == 1
     assert curve.best_f1 == pytest.approx(1.0)
+
+
+def _adr_0009_geojson(properties: dict[str, object]) -> dict[str, object]:
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "id": "ann-1",
+                "geometry": {"type": "Point", "coordinates": [2.0, 48.0]},
+                "properties": {"class": "chaise", **properties},
+            }
+        ],
+    }
+
+
+def test_load_annotations_reads_the_adr_0009_fields(tmp_path: Path) -> None:
+    # The whole contract with the annotation tool, which is owned separately: if this
+    # test passes, both sides agree on the key names.
+    path = tmp_path / "annotations.geojson"
+    path.write_text(
+        json.dumps(
+            _adr_0009_geojson(
+                {
+                    "object_id": "chair-17",
+                    "extent_m": 0.6,
+                    "exhaustive_zone": "lobby",
+                    "is_depiction": True,
+                    "labels": {
+                        "synonyms": ["chair", "seat"],
+                        "depictions": ["chair pictogram"],
+                        "visually_similar": ["stool"],
+                        "clutter": ["table"],
+                    },
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    annotation = load_annotations(path, default_accuracy_m=5.0)[0]
+
+    assert annotation.object_id == "chair-17"
+    assert annotation.extent_m == 0.6
+    assert annotation.exhaustive_zone == "lobby"
+    assert annotation.is_depiction
+    assert annotation.synonyms == ("chair", "seat")
+    assert annotation.depictions == ("chair pictogram",)
+    assert annotation.visually_similar == ("stool",)
+    assert annotation.clutter == ("table",)
+    # The radius now comes from the extent, not from the flat accuracy.
+    assert match_radius_m(annotation) == pytest.approx(0.3)
+
+
+def test_load_annotations_accepts_the_flattened_label_keys(tmp_path: Path) -> None:
+    # The GeoJSON export flattens nested properties depending on which side wrote it.
+    path = tmp_path / "annotations.geojson"
+    path.write_text(
+        json.dumps(_adr_0009_geojson({"synonyms": ["chair"], "clutter": "table"})),
+        encoding="utf-8",
+    )
+
+    annotation = load_annotations(path, default_accuracy_m=5.0)[0]
+
+    assert annotation.synonyms == ("chair",)
+    # A lone string is one label, not a sequence of characters.
+    assert annotation.clutter == ("table",)
+
+
+def test_load_annotations_survives_junk_in_the_new_fields(tmp_path: Path) -> None:
+    path = tmp_path / "annotations.geojson"
+    path.write_text(
+        json.dumps(
+            _adr_0009_geojson(
+                {
+                    "extent_m": "pas un nombre",
+                    "object_id": "   ",
+                    "labels": {"synonyms": [" chair ", "", "chair"]},
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    annotation = load_annotations(path, default_accuracy_m=5.0)[0]
+
+    assert annotation.extent_m is None
+    assert annotation.object_id is None
+    # Trimmed, blanks dropped, duplicates collapsed, order kept.
+    assert annotation.synonyms == ("chair",)
+    # No extent means the old flat radius, which is what makes the two incomparable.
+    assert match_radius_m(annotation) == pytest.approx(5.0)
+
+
+def test_an_annotation_with_no_class_accepts_no_label() -> None:
+    bare = Annotation(id="a", class_name="", lat=48.0, lng=2.0, accuracy_m=5.0)
+
+    assert bare.accepted_labels == ()

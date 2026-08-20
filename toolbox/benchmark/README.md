@@ -112,6 +112,60 @@ python -m toolbox.benchmark.association_sweep \
   --cache-dir .cache/assoc --grid grid.json --out-dir out/ --verify
 ```
 
+**HOTA is the row to read when a configuration changes the granularity.** Every row also
+carries `det_a`, `ass_a` and `hota`, the higher-order tracking accuracy transposed to
+this problem: `det_a` is `TP/(TP+FP+FN)` over detections against annotations, `ass_a` is
+the mean Jaccard overlap between the cluster a detection landed in and the set of
+detections belonging to its annotation, and `hota` is the geometric mean of the two,
+averaged over five localisation radii. Splitting an object and merging two cost `ass_a`
+symmetrically and leave `det_a` untouched, which is precisely what strict and grouped mAP
+cannot do — on vinci, three `clustering_eps_m` values give an identical `det_a` of 0.306
+while `ass_a` ranks them 0.492 / 0.474 / 0.313. Prefer it over `pair_f1`, which measures
+the same partition but weights objects by the square of their observation count.
+
+**Calibration, and what a shared threshold costs.** `ece`, `mce` and `overconfidence`
+compare each cluster's score against the rate at which clusters of that score are right,
+over quantile bins (fixed-width bins would put nearly every prediction in one).
+`threshold_spread_strict` is the p90−p10 of the thresholds each prompt would pick for
+itself — the dispersion a single fitted threshold has to paper over. Read the numbers
+against `accuracy_ceiling`: the match is one-to-one, so returning four clusters per
+object makes three of them wrong whatever the score says, and an error beyond that gap
+is granularity, which is `ass_a`'s business rather than calibration's. The reliability
+table (`reliability`, JSON only) is where the useful shape is — on vinci the score is
+monotone up to about 0.95 and then **inverts**, which is why 0.9 has to be re-fitted per
+map.
+
+**Where an object was lost, in three numbers.** `r_obj` is the share of annotations some
+*retrieved candidate* came within `--near-m` of, measured before association and before
+any filter — an annotation missing there is out of reach of everything downstream.
+`recall_at_all` is the share a returned cluster matched, and `recall_at_1` / `recall_at`
+(JSON) the share a caller sees at each cutoff. The gaps are the diagnosis, and today's
+mAP sums all three: on vinci, `r_obj` 0.759 → returned 0.739 → **R@1 0.044**, R@20 0.378.
+Retrieval loses 24 points, association loses 2, and the ranking loses 36. `r_obj` is
+identical across association configurations by construction, which is also a useful
+sanity check on a grid.
+
+**Split and merge, counted outright.** `fragmentation_rate` is the share of well-covered
+annotations whose detections span more than one cluster, `merge_rate` the share of
+clusters holding more than one annotation's. Unlike `mean_clusters_per_annotation` these
+are bounded rates, so the two failure directions are directly comparable: at
+`clustering_eps_m` 0.5 vinci fragments 84 % of annotations and merges 3 % of clusters; at
+3.0 it fragments 15 % and merges 30 %. `homogeneity` and `completeness` are the entropy
+pair over the same partition — the first cannot see splitting and the second cannot see
+merging, which is why neither is reported alone. **Do not fit a radius on `v_measure`**:
+it is biased towards more clusters and reads 0.81–0.91 across configurations that HOTA
+separates cleanly.
+
+**`panoptic_quality` = `segmentation_quality` x `recognition_quality`.** A cluster matches
+an annotation when their detection sets overlap by more than half, which makes the match
+unique with no greedy pass. `recognition_quality` is the half worth having on its own —
+`TP/(TP + FP/2 + FN/2)`, how many objects came out as one whole cluster each, with no
+sensitivity to how precisely they are placed. Clusters the association *dropped* (a
+negative cluster label) are not predictions and are excluded from the false positives:
+counting them would make a filter that removes an outlier score worse than one that keeps
+it. The rest is largely redundant with `hota` by construction, and is kept for that one
+half.
+
 Each grid entry is a `LocalizationParams` override plus a `label`; an unknown key is an
 error, not a silent no-op. Every row carries both ground-truth views (strict and
 grouped, each with its own fitted shared threshold and leave-one-prompt-out estimate)
@@ -185,9 +239,32 @@ PYTHONPATH=.:third_party/object_search python -m toolbox.benchmark.map_analysis 
 | `s0` | what the map holds, and **what it is missing** — a prepare run that wrote no label or no score makes several sections below silently empty, and a table of zeros looks the same as a measured zero |
 | `s1` | per-detection distributions split by detector: range, angular size and aspect, `phi`/`theta`, score, implied physical size, proposals per panorama |
 | `s2` | the free labels against the ground truth — `P(attached \| label, source)` at several radii **next to the base rate**, `P(label \| class)` and its inverse, normalised mutual information, score calibration, and the embedding neighbourhood purity |
-| `s3` | annotations against detections, **depth-free measurement first** |
+| `s3` | annotations against detections, **depth-free measurement first**, then observability and what `min_keyframes_per_cluster` costs — a retention curve, not a single number: it prices the threshold against the ground truth *before* any ranking runs, and says whether the annotations it keeps are the ones the detector actually found |
 | `s4` | pairwise cues over three deliberately drawn populations, raw and conditional AUC, with the share of pairs each cue applies to |
 | `s5` | intra-view duplicates split by detector and settled by embedding, and the co-visible lower bound on the number of objects |
+| `s6` | hubness of the embedding space, with **no ground truth at all** — how unevenly the index shares out the role of nearest neighbour, and what a plain recentring would change |
+| `s7` | detector labels against the annotation's *set* of acceptable labels (ADR 0009); reports that no annotation carries sets rather than a table of zeros |
+
+### The layers (`map_layers.py`)
+
+A distribution says how much; these say **where**, which for depth is the whole point —
+it degrades in particular parts of a building, and a percentile hides that.
+
+| layer | geometry | what it shows |
+|---|---|---|
+| `depth-range` | 2 m cells | mean distance from keyframe to detection, against the 15 m trusted range. `beyond_trusted_share` is the property to check: a moderate mean held down by near rows can hide a far minority |
+| `depth-blowups` | points | every row placed past 30 m, worst first and capped. Deliberately not aggregated — they line up along windows, mirrors and glass, and that alignment is the diagnostic |
+| `depth-scatter` | 2 m cells | how far apart the observations of one annotated object land. **The fragmentation field**: read it against the clustering radius, since a spread at or past it cannot survive one cluster. Needs annotations |
+| `detection-coverage` | 2 m cells | the depth-free measurement, spatialised — a red cell is the detector missing that part of the building, owing nothing to depth. Needs annotations |
+| `parallax` | 2 m cells | the widest baseline any two keyframes within trusted range ever offered that cell, plus the trajectory anisotropy. A capture ceiling: red here cannot be fixed by any algorithm |
+| `ground-truth`, `capture-distance`, `embedding-agreement` | points | one per annotation — reached or not and why, how close the capture came, how alike the cutouts look |
+| `keyframes`, `detection-grid` | points | the capture itself, and detection density per cell |
+
+**Only `detection-grid` is a density.** A viewer's own heat-map style weights how many
+features are in a place, so pointing it at a *mean* draws a count instead: every cell
+layer above therefore carries its value and an already-resolved `marker-color`, and is
+meant to be drawn as a flat filled square. Cells carry an `altitude_m` but **no indoor
+level**, so on a multi-storey map read one floor at a time.
 
 **Two readings this tool exists to protect.** A label or a cue is only informative
 above the **base rate** — on a densely annotated map half of all detections sit within
@@ -202,9 +279,153 @@ is a comparison of two angles in one frame. It owes nothing to the depth map —
 the 3D attachment, which shares the annotation's own construction
 (`ray(u, v) * depth_map(u, v)`) and therefore measures agreement, never accuracy.
 
+**Observability, in two halves.** `s3` reports what the capture *achieved* next to what
+it made *available*: parallax, occupied azimuth sectors out of twelve, the widest empty
+sector, and the share of observation pairs wide enough to triangulate on
+(`>= 5 deg`). A poor achieved figure on a rich available one is an algorithm problem; a
+poor available one is a capture problem no association will ever fix, and the line
+counting annotations seen under a degenerate baseline is that ceiling stated outright.
+Only *positional* coverage is measured — every keyframe is a panorama and already looks
+in every direction, so rotational coverage carries no information here.
+
+**Hubness (`s6`) is the one section that needs nothing but the parquet.** In a
+high-dimensional space the nearest-neighbour relation stops being symmetric: a few
+cutouts sit near the centre of mass and surface for prompts they have nothing to do
+with, while others are never anyone's neighbour and no threshold can reach them. The
+report prints the raw figures next to the same figures after subtracting the mean
+embedding, because that subtraction is a one-line change in the scoring path and the
+gap between the two columns is what it would buy. On vinci (20 000 rows, k=10) the
+skewness of the k-occurrence count falls 3.96 → 1.95 and the antihub share 8.4 % → 2.7 %.
+Hub labels are printed against their base rate, per the reading rule above.
+
 **Known limit.** `detection_review` verdicts cannot be joined here: their `target_id` is
 a pgvector candidate id, not a parquet `row_index`. `s0` says so rather than printing an
 empty table.
+
+## Checking the annotations before trusting a measurement
+
+`validate_annotations.py` judges the ground truth, not the pipeline. It reads the map's
+`object-search-annotations.db` **directly**, not `benchmark/annotations.geojson` — as
+does `map_analysis` — because that
+export is only rewritten when a benchmark run starts, so it describes the map as the last
+run saw it. On vinci-st-domingue-zone-1 it sat a day behind — 9 annotations of 6 classes
+where the store held 12, every ADR 0009 field reported absent because the export predated
+them, and a separability alarm about clicks that had already been replaced. The command
+prints the path it read on the first line.
+
+```bash
+python -m toolbox.benchmark.validate_annotations --map-path /path/to/map
+```
+
+Pass `--geojson <path>` to read an export instead — the one case that wants it is asking
+what a past benchmark actually scored, rather than what is annotated now.
+
+Co-located same-class annotations are reported only when no single `object_id` covers
+them: one object clicked from several panoramas is what the contract asks for, and the
+clicks agreeing to the centimetre is the triangulation working, not a double insertion.
+
+Three blocks, in the order they should be acted on: which contract fields are present
+(a field at 40 % is reported as **worse than absent** — a metric reading it would score a
+biased slice), what contradicts itself (one click recorded twice, one `object_id` under
+two classes or two extents, one class under two synonym sets, an extent that is a typo),
+and what the map has earned — whether the separability gate opens the classification
+columns, and whether the label-set metrics have anything to measure. Exit status is
+non-zero only for contradictions: an unannotated map is incomplete, not wrong.
+
+The annotator's side is
+[docs/plans/2026-08-18-cahier-des-charges-annotation.md](../../docs/plans/2026-08-18-cahier-des-charges-annotation.md);
+the contract itself is [ADR 0009](../../docs/adr/0009-ground-truth-annotation-contract.md).
+
+## Typing the errors, and pricing each one
+
+`error_decomposition.py` types every returned cluster — *correct*, *duplicate*,
+*classification*, *localisation*, *classification+localisation*, *background* — plus the
+objects no cluster reached, *missed*, and then measures what recall would be if that one
+type of mistake had not happened. Run it from the sweep:
+
+```bash
+python -m toolbox.benchmark.association_sweep --map-path ... --decompose
+```
+
+**The base is recall, not mAP, and that is deliberate.** Strict mAP is paid for
+fragmentation here, so "suppress the duplicates" would come out near zero — the tool
+would mislead exactly where it is most useful. Two axes are reported instead: `dR@10`,
+which is rank-aware (needed for *duplicate* to be definable at all) and is where the
+pipeline loses, and `dR tous`, the same fix with every cluster allowed. **The pair is the
+diagnosis**: a type that costs `dR@10` and nothing overall is purely a ranking problem, a
+type that costs both loses the object. On vinci's baseline:
+
+| type | count | dR@10 | dR all |
+|---|---|---|---|
+| missed | 108 | +0.252 | +0.252 |
+| background | 161 | +0.095 | +0.000 |
+| duplicate | 96 | +0.037 | +0.000 |
+| localisation | 44 | +0.029 | +0.063 |
+
+So 13 points of the ranking loss are junk and duplicates occupying top-10 slots — objects
+that *are* returned — and 25 points are objects never found at all.
+
+**Two columns are withheld by measurement, not by map name.** Telling a cluster on the
+wrong class from one on nothing needs classes further apart than the radius that matches
+them. `separability` measures the share of annotations with another class inside their own
+radius and withholds *classification* and *classification+localisation* above a third,
+printing the number it refused on. With today's ground truth — no `extent_m`, so a flat
+5 m radius — that is 60.5 % on vinci and both columns are withheld on both maps. They
+become available as `extent_m` lands, which is why that field is the one to annotate
+first: see [ADR 0009](../../docs/adr/0009-ground-truth-annotation-contract.md).
+
+Matching here is greedy **by rank**, not by distance as `match_predictions` does, because
+a duplicate is defined by a better-scoring cluster having already taken the object.
+Recall figures from this module are therefore close to but not identical with the sweep's
+`recall_at`.
+
+## Scoring a label against a set, not a string
+
+`label_set_metrics.py` implements OpenLex3D's two open-set metrics — **top-N frequency**
+(does any of the N proposed labels fall in category C) and **set ranking** (does the
+proposed order match the ideal order of the categories, as nDCG against the object's own
+best possible ordering). Both read the four ranked label sets ADR 0009 puts on an
+annotation: synonyms, depictions, visually similar, clutter.
+
+The module never produces labels — it takes a ranked list per object, because that list
+can come from the detector's own `label` column, from `gdino_labels.encode_classes`
+scored against a cluster embedding, or from a VLM, and choosing between those is a
+separate question. `rank_labels` covers the embedding case and is pure numpy.
+
+`map_analysis.py` section `s7` wires it to the map's own detector labels, ordered by
+detector score — deliberately not a MetaCLIP ranking, because that tool loads no model
+and keeping that property is worth more than a sharper ranking. Until the annotations
+carry label sets, `s7` says `0/258 annotations portent des ensembles` rather than printing
+a table of zeros.
+
+## Depth quality where it places a detection
+
+`depth_boundary_quality.py` measures the depth maps **under the detector's boxes**,
+which is the only place a detection's position comes from. It needs no ground truth and
+no pose.
+
+```bash
+PYTHONPATH=.:third_party/object_search python -m toolbox.benchmark.depth_boundary_quality \
+  --map-path /path/to/map --sample 150 --workers 6
+```
+
+The standard monocular-depth figures (AbsRel, `delta1`) cannot answer this: they are
+dominated by large flat surfaces, which is exactly the part of the panorama no detection
+is placed from. Three quantities come out instead, per detection and pooled by range
+band — whether the sampled pixel is within two pixels of a depth discontinuity, whether
+it *is* a flying pixel (a value stranded between two surfaces, corresponding to empty
+space), and the p90/p10 depth ratio inside the box.
+
+Read every one of them against the `scene` block, which is the same rate over the whole
+map. On vinci (40 keyframes, 3 871 boxes): borders cover **1.0 %** of the map's pixels
+but **5.3 %** of sampled pixels sit on one — detections land on discontinuities five
+times more often than chance — rising to 16.6 % beyond 15 m. Flying pixels are rare
+everywhere (0.06 % of the map, 0.10 % at the sample), so they are *not* the mechanism
+here; the in-box depth ratio of 1.68 (2.45 beyond 15 m) is.
+
+The scene pass runs at full resolution in row bands on purpose: subsampling the map
+first would compare pixels several apart and report a larger, different quantity than
+the per-detection figures it is the baseline for.
 
 ## Putting a name back on a G-DINO box
 

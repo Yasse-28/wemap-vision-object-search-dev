@@ -1,3 +1,5 @@
+import type { RegionVertex } from "../annotation/regionGeometry";
+
 export type AnnotationType = "point" | "polygon";
 
 export type AnnotationGeometryType = "Point" | "Polygon";
@@ -9,8 +11,42 @@ export type AnnotationClass = {
   annotationType: AnnotationType;
 };
 
+export type AnnotationLabels = {
+  synonyms: string[];
+  depictions: string[];
+  visuallySimilar: string[];
+  clutter: string[];
+};
+
+export type AnnotationGroundTruth = {
+  objectId: string | null;
+  extentM: number | null;
+  exhaustiveZone: string | null;
+  isDepiction: boolean;
+  labels: AnnotationLabels;
+};
+
 export type AnnotationSource = {
+  sourceSchemaVersion?: number;
   keyframeId: string;
+  /** Stable identity from `VideoKeyframe.uuid`, inferred from the image asset today. */
+  videoKeyframeUuid?: string | null;
+  videoKeyframeId?: number | null;
+  videoCaptureUuid?: string | null;
+  videoCaptureId?: number | null;
+  videoCaptureIndex?: number | null;
+  frameNumber?: number | null;
+  frameTimeS?: number | null;
+  mapUuid?: string | null;
+  geoRefId?: number | null;
+  geoRefVersion?: number | null;
+  geoKeyframeId?: number | null;
+  imageFilename?: string | null;
+  imageStorageKey?: string | null;
+  imageSha256?: string | null;
+  depthFilename?: string | null;
+  depthStorageKey?: string | null;
+  resolutionStatus?: "resolved" | "orphaned" | "legacy-unverified" | "ambiguous";
   projection: "erp" | "cutout";
   /**
    * `metadata.parquet` row the click came from, when `projection === "cutout"`.
@@ -20,6 +56,15 @@ export type AnnotationSource = {
    * `geojson.ts`, which keeps the old key on the way in but no longer writes it.
    */
   rowIndex: number | null;
+  /**
+   * The outline the annotator traced on the panorama, in ERP texture ratios, when no
+   * detector proposed this object. `u` is unwrapped exactly as `erp_bbox_ratios` is,
+   * so a region across the seam keeps vertices on both sides. The stored point is its
+   * centroid; this is what says how big the thing actually was.
+   */
+  erpRegion?: RegionVertex[] | null;
+  /** True when the point was drawn over a missed detection rather than a proposal. */
+  missedDetection?: boolean;
   xRatio: number;
   yRatio: number;
   erpU: number;
@@ -39,6 +84,7 @@ export type AnnotationFeature = {
   level: string | null;
   accuracyM: number;
   source: AnnotationSource | null;
+  groundTruth: AnnotationGroundTruth;
 };
 
 export type LngLat = {

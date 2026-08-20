@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -18,6 +19,7 @@ import {
   formatLevel,
   loadMapManifest,
   manifestKeyframeToWorldToCameraWds,
+  type ManifestKeyframe,
   type MapManifest,
 } from "./map-manifest.js";
 import {
@@ -43,8 +45,14 @@ const VIEW_CONE_ARC_STEPS = 48;
 /** Default long side of a re-rendered proposal view, in pixels. */
 const DEFAULT_ROW_RENDER_SIZE = 512;
 const MAX_ROW_RENDER_SIZE = 2048;
+const DEFAULT_NEIGHBOR_PROJECTION_COUNT = 5;
+const MAX_NEIGHBOR_PROJECTION_COUNT = 12;
+const MIN_NEIGHBOR_PROJECTION_BASELINE_M = 0.5;
+const PROJECTION_DISTANCE_CONFIDENCE_SCALE_M = 5;
+const PROJECTION_VIEW_ANGLE_CONFIDENCE_SCALE_RAD = Math.PI / 4;
 /** How long the status route waits on the bricks service for pgvector coverage. */
 const COVERAGE_TIMEOUT_MS = 2500;
+const sourceImageSha256Cache = new Map<string, Promise<string | null>>();
 
 export class WorkbenchRouteError extends Error {
   constructor(
@@ -620,6 +628,204 @@ async function lookupKeyframeDepthFilename(
   }
 }
 
+function uuidFromAssetFilename(filename: string): string | null {
+  const stem = path.parse(filename).name;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(stem)
+    ? stem
+    : null;
+}
+
+async function fileSha256(filename: string | null): Promise<string | null> {
+  if (!filename) {
+    return null;
+  }
+  const cached = sourceImageSha256Cache.get(filename);
+  if (cached) {
+    return cached;
+  }
+  const promise = readFile(filename)
+    .then((data) => createHash("sha256").update(data).digest("hex"))
+    .catch(() => null);
+  sourceImageSha256Cache.set(filename, promise);
+  if (sourceImageSha256Cache.size > 256) {
+    sourceImageSha256Cache.delete(sourceImageSha256Cache.keys().next().value as string);
+  }
+  return promise;
+}
+
+async function keyframeSourceIdentity(
+  map: MapEntry,
+  keyframeId: string,
+): Promise<Record<string, unknown>> {
+  const manifest = await loadMapManifest(map.path);
+  const keyframe = manifest.keyframeById.get(Number(keyframeId));
+  if (!keyframe) {
+    return { source_schema_version: 1, legacy_keyframe_id: keyframeId };
+  }
+  const imagePath = await resolveSourceImagePath(map, keyframeId);
+  return {
+    source_schema_version: 1,
+    map_uuid: manifest.mapUuid || null,
+    geo_ref_id: manifest.geoRefId,
+    geo_ref_version: manifest.mapVersion,
+    geo_keyframe_id: keyframe.geoKeyframeId ?? null,
+    legacy_keyframe_id: keyframeId,
+    video_keyframe_id: keyframe.videoKeyframeId ?? null,
+    video_keyframe_uuid:
+      keyframe.videoKeyframeUuid ?? uuidFromAssetFilename(keyframe.imageFilename),
+    video_capture_id: keyframe.videoCaptureId ?? null,
+    video_capture_uuid: keyframe.videoCaptureUuid ?? null,
+    video_capture_index: keyframe.videoCaptureIndex ?? null,
+    frame_number: keyframe.frameNumber ?? null,
+    frame_time_s: keyframe.frameTimeS ?? null,
+    image_filename: keyframe.imageFilename,
+    image_storage_key: manifest.mapUuid
+      ? `${manifest.mapUuid}/images/${keyframe.imageFilename}`
+      : null,
+    image_sha256: await fileSha256(imagePath),
+    depth_filename: keyframe.depthFilename || null,
+    depth_storage_key:
+      manifest.mapUuid && keyframe.depthFilename
+        ? `${manifest.mapUuid}/depths/${keyframe.depthFilename}`
+        : null,
+  };
+}
+
+type ReprojectableAnnotation = {
+  coordinates: number[] | number[][];
+  altitude: number | null;
+  level: string | null;
+  source: Record<string, unknown> | null;
+};
+
+function sourceNumber(source: Record<string, unknown>, ...keys: string[]): number | null {
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== null && value !== undefined && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return null;
+}
+
+function sourceString(source: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+/** Re-anchor image observations to the newest manifest without losing old coordinates. */
+export async function reprojectAnnotationSources<T extends ReprojectableAnnotation>(
+  map: MapEntry,
+  annotations: T[],
+): Promise<T[]> {
+  let manifest: MapManifest;
+  try {
+    manifest = await loadMapManifest(map.path);
+  } catch {
+    return annotations;
+  }
+  const byUuid = new Map(
+    manifest.keyframes.flatMap((keyframe) => {
+      const uuid =
+        keyframe.videoKeyframeUuid ?? uuidFromAssetFilename(keyframe.imageFilename);
+      return uuid ? [[uuid, keyframe] as const] : [];
+    }),
+  );
+
+  return Promise.all(annotations.map(async (annotation) => {
+    if (!annotation.source || !Array.isArray(annotation.coordinates)) {
+      return annotation;
+    }
+    const uuid = sourceString(
+      annotation.source,
+      "videoKeyframeUuid",
+      "video_keyframe_uuid",
+    );
+    const imageFilename = sourceString(
+      annotation.source,
+      "imageFilename",
+      "image_filename",
+    );
+    const legacyId = sourceString(annotation.source, "keyframeId", "legacy_keyframe_id");
+    // Never fall back from a stable identity that no longer resolves: doing so
+    // could silently attach the observation to an unrelated array index after a
+    // GeoRef rebuild. Historical index-only observations remain visible but are
+    // deliberately not reprojected until they can be reconciled explicitly.
+    const keyframe = uuid
+      ? byUuid.get(uuid)
+      : imageFilename
+        ? manifest.keyframes.find((item) => item.imageFilename === imageFilename)
+        : undefined;
+    if (!uuid && !imageFilename && legacyId) {
+      return {
+        ...annotation,
+        source: {
+          ...annotation.source,
+          resolutionStatus: "legacy-unverified",
+        },
+      };
+    }
+    if (!keyframe) {
+      return {
+        ...annotation,
+        source: { ...annotation.source, resolutionStatus: "orphaned" },
+      };
+    }
+    const erpU = sourceNumber(annotation.source, "erpU", "erp_u");
+    const erpV = sourceNumber(annotation.source, "erpV", "erp_v");
+    const depthM = sourceNumber(annotation.source, "depthM", "depth_m");
+    const identity = await keyframeSourceIdentity(map, String(keyframe.keyframeId));
+    const nextSource = {
+      ...annotation.source,
+      keyframeId: String(keyframe.keyframeId),
+      sourceSchemaVersion: identity.source_schema_version,
+      mapUuid: identity.map_uuid,
+      geoRefId: identity.geo_ref_id,
+      geoRefVersion: identity.geo_ref_version,
+      geoKeyframeId: identity.geo_keyframe_id,
+      videoKeyframeId: identity.video_keyframe_id,
+      videoKeyframeUuid: identity.video_keyframe_uuid,
+      videoCaptureId: identity.video_capture_id,
+      videoCaptureUuid: identity.video_capture_uuid,
+      videoCaptureIndex: identity.video_capture_index,
+      frameNumber: identity.frame_number,
+      frameTimeS: identity.frame_time_s,
+      imageFilename: identity.image_filename,
+      imageStorageKey: identity.image_storage_key,
+      imageSha256: annotation.source.imageSha256 ?? identity.image_sha256,
+      depthFilename: identity.depth_filename,
+      depthStorageKey: identity.depth_storage_key,
+      resolutionStatus: "resolved",
+    };
+    if (erpU === null || erpV === null || depthM === null || depthM <= 0) {
+      return { ...annotation, source: nextSource };
+    }
+    const ray = equirectUvToRay(erpU, erpV);
+    const pointKeyframe: [number, number, number] = [
+      ray[0] * depthM,
+      ray[1] * depthM,
+      ray[2] * depthM,
+    ];
+    const pointWorldWds = transformPoint4(
+      invertRigid4(manifestKeyframeToWorldToCameraWds(keyframe)),
+      pointKeyframe,
+    );
+    const geo = localWorldPointToGeo(geoRefContextFromManifest(manifest), pointWorldWds);
+    return {
+      ...annotation,
+      coordinates: [geo.longitude, geo.latitude],
+      altitude: geo.altitude,
+      level: geo.level,
+      source: nextSource,
+    };
+  }));
+}
+
 async function lookupKeyframeHeadings(
   map: MapEntry,
   keyframeIds: string[],
@@ -1044,6 +1250,373 @@ function rowAngles(row: MetadataRow): ErpViewAngles {
   };
 }
 
+export type ProposalNeighborProjection = {
+  keyframe_id: string;
+  distance_from_source_m: number;
+  distance_to_proposal_m: number;
+  erp_u: number;
+  erp_v: number;
+  theta_center: number;
+  phi_center: number;
+  angular_width: number;
+  angular_height: number;
+  viewpoint_angle_deg: number;
+  apparent_area_ratio: number;
+  distance_score: number;
+  view_angle_score: number;
+  apparent_size_score: number;
+  geometric_confidence: number;
+  observed_depth_m: number | null;
+  occlusion_margin_m: number | null;
+  occlusion_confidence: number | null;
+  occlusion_status: "clear" | "occluded" | "depth_mismatch" | "unknown";
+  feature_match_score: number | null;
+  feature_matches: number;
+  feature_inliers: number;
+  feature_inlier_ratio: number | null;
+  feature_match_status: "matched" | "weak" | "no_features" | "unavailable";
+  edge_ncc_score: number | null;
+  edge_ncc_status: "matched" | "weak" | "uninformative" | "unavailable";
+};
+
+type ProposalProjectionGeometry = {
+  row: MetadataRow;
+  manifest: MapManifest;
+  pointWorldWds: [number, number, number];
+  sourceOriginWorldWds: [number, number, number];
+  physicalWidthM: number;
+  physicalHeightM: number;
+};
+
+type ProposalProjectionCandidate = {
+  projection: ProposalNeighborProjection;
+  originWorldWds: [number, number, number];
+};
+
+function keyframeOriginWorldWds(keyframe: ManifestKeyframe): [number, number, number] {
+  return transformPoint4(invertRigid4(manifestKeyframeToWorldToCameraWds(keyframe)), [0, 0, 0]);
+}
+
+function proposalProjectionGeometry(
+  row: MetadataRow,
+  manifest: MapManifest,
+): ProposalProjectionGeometry {
+  if (row.depth === null || !Number.isFinite(row.depth) || row.depth <= 0) {
+    throw new WorkbenchRouteError(
+      422,
+      `Row ${row.rowIndex} has no positive depth, so it cannot be projected into neighbours.`,
+    );
+  }
+  const angles = rowAngles(row);
+  if (!isRenderableGnomonic(angles)) {
+    throw new WorkbenchRouteError(
+      422,
+      `Row ${row.rowIndex} has a degenerate angular extent and cannot be projected.`,
+    );
+  }
+  const sourceKeyframe = manifest.keyframeById.get(row.videoKeyframeId);
+  if (!sourceKeyframe) {
+    throw new WorkbenchRouteError(
+      404,
+      `GeoRef pose not found for source keyframe ${row.videoKeyframeId}.`,
+    );
+  }
+  const sourcePose = manifestKeyframeToWorldToCameraWds(sourceKeyframe);
+  const [u, v] = yawPitchToEquirectUv(row.thetaCenter, row.phiCenter);
+  const ray = equirectUvToRay(u, v);
+  const pointWorldWds = transformPoint4(invertRigid4(sourcePose), [
+    ray[0] * row.depth,
+    ray[1] * row.depth,
+    ray[2] * row.depth,
+  ]);
+  return {
+    row,
+    manifest,
+    pointWorldWds,
+    sourceOriginWorldWds: keyframeOriginWorldWds(sourceKeyframe),
+    physicalWidthM: 2 * row.depth * Math.tan(row.angularWidth / 2),
+    physicalHeightM: 2 * row.depth * Math.tan(row.angularHeight / 2),
+  };
+}
+
+function projectProposalIntoKeyframe(
+  geometry: ProposalProjectionGeometry,
+  target: ManifestKeyframe,
+): ProposalNeighborProjection | null {
+  const targetPose = manifestKeyframeToWorldToCameraWds(target);
+  const pointKeyframe = transformPoint4(targetPose, geometry.pointWorldWds);
+  const uv = cameraPointToEquirectUv(pointKeyframe);
+  if (!uv) {
+    return null;
+  }
+  const distanceToProposal = Math.hypot(
+    pointKeyframe[0],
+    pointKeyframe[1],
+    pointKeyframe[2],
+  );
+  const targetOrigin = keyframeOriginWorldWds(target);
+  const distanceFromSource = Math.hypot(
+    targetOrigin[0] - geometry.sourceOriginWorldWds[0],
+    targetOrigin[1] - geometry.sourceOriginWorldWds[1],
+    targetOrigin[2] - geometry.sourceOriginWorldWds[2],
+  );
+  const angularWidth = 2 * Math.atan(geometry.physicalWidthM / (2 * distanceToProposal));
+  const angularHeight = 2 * Math.atan(geometry.physicalHeightM / (2 * distanceToProposal));
+  const viewpointAngle = angleBetweenVectors(
+    [
+      geometry.sourceOriginWorldWds[0] - geometry.pointWorldWds[0],
+      geometry.sourceOriginWorldWds[1] - geometry.pointWorldWds[1],
+      geometry.sourceOriginWorldWds[2] - geometry.pointWorldWds[2],
+    ],
+    [
+      targetOrigin[0] - geometry.pointWorldWds[0],
+      targetOrigin[1] - geometry.pointWorldWds[1],
+      targetOrigin[2] - geometry.pointWorldWds[2],
+    ],
+  );
+  const apparentAreaRatio = Math.max(
+    0,
+    (angularWidth * angularHeight)
+      / (geometry.row.angularWidth * geometry.row.angularHeight),
+  );
+  const distanceScore = Math.exp(
+    -distanceFromSource / PROJECTION_DISTANCE_CONFIDENCE_SCALE_M,
+  );
+  const viewAngleScore = Math.exp(
+    -viewpointAngle / PROJECTION_VIEW_ANGLE_CONFIDENCE_SCALE_RAD,
+  );
+  const apparentSizeScore = Math.min(1, Math.sqrt(apparentAreaRatio));
+  // Weighted geometric mean: one weak dimension must lower the result without a
+  // single noisy input collapsing it. Distance and angle use 5 m / 45° e-folding
+  // scales; apparent size compares angular area with the source proposal.
+  const geometricConfidence =
+    distanceScore ** 0.35
+    * viewAngleScore ** 0.4
+    * apparentSizeScore ** 0.25;
+  return {
+    keyframe_id: String(target.keyframeId),
+    distance_from_source_m: distanceFromSource,
+    distance_to_proposal_m: distanceToProposal,
+    erp_u: uv[0],
+    erp_v: uv[1],
+    theta_center: (uv[0] - 0.5) * 2 * Math.PI,
+    phi_center: (uv[1] - 0.5) * Math.PI,
+    angular_width: angularWidth,
+    angular_height: angularHeight,
+    viewpoint_angle_deg: viewpointAngle * 180 / Math.PI,
+    apparent_area_ratio: apparentAreaRatio,
+    distance_score: confidencePercent(distanceScore),
+    view_angle_score: confidencePercent(viewAngleScore),
+    apparent_size_score: confidencePercent(apparentSizeScore),
+    geometric_confidence: confidencePercent(geometricConfidence),
+    observed_depth_m: null,
+    occlusion_margin_m: null,
+    occlusion_confidence: null,
+    occlusion_status: "unknown",
+    feature_match_score: null,
+    feature_matches: 0,
+    feature_inliers: 0,
+    feature_inlier_ratio: null,
+    feature_match_status: "unavailable",
+    edge_ncc_score: null,
+    edge_ncc_status: "unavailable",
+  };
+}
+
+function cameraBaselineM(
+  left: ProposalProjectionCandidate,
+  right: ProposalProjectionCandidate,
+): number {
+  return Math.hypot(
+    left.originWorldWds[0] - right.originWorldWds[0],
+    left.originWorldWds[1] - right.originWorldWds[1],
+    left.originWorldWds[2] - right.originWorldWds[2],
+  );
+}
+
+function angleBetweenVectors(left: number[], right: number[]): number {
+  const denominator = Math.hypot(...left) * Math.hypot(...right);
+  if (denominator <= Number.EPSILON) {
+    return 0;
+  }
+  const cosine = left.reduce((sum, value, index) => sum + value * right[index], 0)
+    / denominator;
+  return Math.acos(Math.max(-1, Math.min(1, cosine)));
+}
+
+function confidencePercent(value: number): number {
+  return Math.round(Math.max(0, Math.min(1, value)) * 100);
+}
+
+export function featureMatchAssessment(
+  rawMatches: number,
+  rawInliers: number,
+  hasFeatures: boolean = true,
+): FeatureMatchAssessment {
+  const matches = Math.max(0, Math.round(rawMatches));
+  const inliers = Math.max(0, Math.min(matches, Math.round(rawInliers)));
+  if (!hasFeatures) {
+    return {
+      feature_match_score: 0,
+      feature_matches: 0,
+      feature_inliers: 0,
+      feature_inlier_ratio: 0,
+      feature_match_status: "no_features",
+    };
+  }
+  const inlierRatio = matches > 0 ? inliers / matches : 0;
+  // A high ratio from only two points is not evidence. Saturate support at twenty
+  // verified correspondences, then combine support and purity symmetrically.
+  const support = Math.min(1, inliers / 20);
+  return {
+    feature_match_score: confidencePercent(Math.sqrt(inlierRatio * support)),
+    feature_matches: matches,
+    feature_inliers: inliers,
+    feature_inlier_ratio: inlierRatio,
+    feature_match_status:
+      inliers >= 8 && inlierRatio >= 0.25 ? "matched" : "weak",
+  };
+}
+
+export function edgeNccAssessment(
+  rawScore: number | null,
+): EdgeNccAssessment {
+  if (rawScore === null) {
+    return {
+      edge_ncc_score: null,
+      edge_ncc_status: "uninformative",
+    };
+  }
+  if (!Number.isFinite(rawScore)) {
+    return {
+      edge_ncc_score: null,
+      edge_ncc_status: "unavailable",
+    };
+  }
+  const score = confidencePercent(rawScore);
+  return {
+    edge_ncc_score: score,
+    edge_ncc_status: score >= 60 ? "matched" : "weak",
+  };
+}
+
+/** Project one depth-backed proposal into nearby, spatially distinct camera poses. */
+export function projectProposalIntoNearestKeyframes(
+  row: MetadataRow,
+  manifest: MapManifest,
+  requestedCount: number = DEFAULT_NEIGHBOR_PROJECTION_COUNT,
+  enforceMinimumBaseline: boolean = true,
+): ProposalNeighborProjection[] {
+  const geometry = proposalProjectionGeometry(row, manifest);
+  const count = Math.max(
+    1,
+    Math.min(MAX_NEIGHBOR_PROJECTION_COUNT, Math.round(requestedCount)),
+  );
+  const candidates = manifest.keyframes
+    .filter((keyframe) => keyframe.keyframeId !== row.videoKeyframeId)
+    .flatMap((keyframe): ProposalProjectionCandidate[] => {
+      const projection = projectProposalIntoKeyframe(geometry, keyframe);
+      return projection
+        ? [{ projection, originWorldWds: keyframeOriginWorldWds(keyframe) }]
+        : [];
+    })
+    .sort(
+      (a, b) =>
+        a.projection.distance_from_source_m - b.projection.distance_from_source_m
+        || Number(a.projection.keyframe_id) - Number(b.projection.keyframe_id),
+    );
+
+  if (!enforceMinimumBaseline) {
+    return candidates.slice(0, count).map((candidate) => candidate.projection);
+  }
+
+  const selected: ProposalProjectionCandidate[] = [];
+  const deferred: ProposalProjectionCandidate[] = [];
+  for (const candidate of candidates) {
+    if (
+      candidate.projection.distance_from_source_m >= MIN_NEIGHBOR_PROJECTION_BASELINE_M
+      && selected.every(
+        (other) => cameraBaselineM(candidate, other) >= MIN_NEIGHBOR_PROJECTION_BASELINE_M,
+      )
+    ) {
+      selected.push(candidate);
+    } else {
+      deferred.push(candidate);
+    }
+    if (selected.length === count) {
+      break;
+    }
+  }
+  // Dense or very small captures may not offer N distinct origins. Preserve the
+  // requested result count by falling back to the nearest deferred poses.
+  if (selected.length < count) {
+    selected.push(...deferred.slice(0, count - selected.length));
+  }
+  return selected.map((candidate) => candidate.projection);
+}
+
+async function proposalProjectionSource(
+  map: MapEntry,
+  rowIndex: number,
+): Promise<{ row: MetadataRow; manifest: MapManifest }> {
+  const metadata = await requireMetadata(map).catch(asRouteError);
+  const row = rowByIndex(metadata, rowIndex);
+  if (!row) {
+    throw new WorkbenchRouteError(404, `Row ${rowIndex} not found in ${metadata.metadataPath}.`);
+  }
+  let manifest: MapManifest;
+  try {
+    manifest = await loadMapManifest(map.path);
+  } catch (error) {
+    throw new WorkbenchRouteError(404, error instanceof Error ? error.message : String(error));
+  }
+  return { row, manifest };
+}
+
+export async function proposalNeighborProjectionsPayload(
+  map: MapEntry,
+  rowIndex: number,
+  requestedCount: number,
+  enforceMinimumBaseline: boolean = true,
+): Promise<Record<string, unknown>> {
+  const { row, manifest } = await proposalProjectionSource(map, rowIndex);
+  const baseProjections = projectProposalIntoNearestKeyframes(
+    row,
+    manifest,
+    requestedCount,
+    enforceMinimumBaseline,
+  );
+  const [occlusionScored, featureAssessments] = await Promise.all([
+    scoreProjectionOcclusion(map, baseProjections),
+    scoreProjectionFeatures(map, row, baseProjections),
+  ]);
+  const projections = occlusionScored.map((projection, index) => ({
+    ...projection,
+    ...(featureAssessments?.[index] ?? {}),
+  }));
+  return {
+    row_index: row.rowIndex,
+    source_keyframe_id: String(row.videoKeyframeId),
+    requested_count: Math.max(
+      1,
+      Math.min(MAX_NEIGHBOR_PROJECTION_COUNT, Math.round(requestedCount)),
+    ),
+    minimum_baseline_m: enforceMinimumBaseline
+      ? MIN_NEIGHBOR_PROJECTION_BASELINE_M
+      : 0,
+    projections,
+    note:
+      `${enforceMinimumBaseline
+        ? "Nearby views are spaced by at least 0.5 m when possible."
+        : "Views are the strictly nearest keyframes; no minimum spacing is applied."} Geometric `
+      + "confidence combines distance, viewpoint angle and apparent size. Visibility "
+      + "compares the projected distance with target depth. Feature match uses "
+      + "COLMAP-style SIFT ratio matching with geometric verification. Edge NCC "
+      + "compares proposal gradients across Gaussian scales and rejects "
+      + "low-structure regions.",
+  };
+}
+
 /**
  * Re-render one proposal's rectilinear view from the keyframe's ERP.
  *
@@ -1059,26 +1632,23 @@ function rowAngles(row: MetadataRow): ErpViewAngles {
  * true angular extent, not the masked square on disk — the UI must say which it is
  * showing.
  */
-async function rowRenderPng(
+async function renderGnomonicPng(
   map: MapEntry,
-  row: MetadataRow,
+  keyframeId: string,
+  angles: ErpViewAngles,
   options: { size?: number; fovScale?: number },
 ): Promise<Buffer> {
-  if (!isRenderableGnomonic(rowAngles(row))) {
+  if (!isRenderableGnomonic(angles)) {
     throw new WorkbenchRouteError(
       422,
-      `Row ${row.rowIndex} spans ${(row.angularWidth * 180 / Math.PI).toFixed(1)}x`
-      + `${(row.angularHeight * 180 / Math.PI).toFixed(1)} degrees, so no rectilinear view `
-      + "of it exists (a gnomonic projection diverges at 180). The stored thumbnail is "
-      + "degenerate for the same reason — this is an upstream property of the proposal, "
-      + "not a rendering limit.",
+      "The requested angular extent cannot be rendered as a rectilinear view.",
     );
   }
-  const sourceImagePath = await resolveSourceImagePath(map, String(row.videoKeyframeId));
+  const sourceImagePath = await resolveSourceImagePath(map, keyframeId);
   if (!sourceImagePath) {
     throw new WorkbenchRouteError(
       404,
-      `Equirectangular source image not found for keyframe ${row.videoKeyframeId}.`,
+      `Equirectangular source image not found for keyframe ${keyframeId}.`,
     );
   }
   const source = await imageSize(sourceImagePath);
@@ -1092,10 +1662,10 @@ async function rowRenderPng(
     Math.min(MAX_ROW_RENDER_SIZE, Math.round(options.size ?? DEFAULT_ROW_RENDER_SIZE)),
   );
   const fovScale = Math.max(1, Math.min(8, options.fovScale ?? 1));
-  const filter = gnomonicFfmpegFilter(rowAngles(row), { size, fovScale });
+  const filter = gnomonicFfmpegFilter(angles, { size, fovScale });
 
   const sourceMtime = (await stat(sourceImagePath)).mtimeMs;
-  const cacheKey = `${sourceImagePath}:${sourceMtime}:${row.rowIndex}:${filter}`;
+  const cacheKey = `${sourceImagePath}:${sourceMtime}:${filter}`;
   const cached = cutoutPreviewCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -1130,6 +1700,29 @@ async function rowRenderPng(
     cutoutPreviewCache.delete(cutoutPreviewCache.keys().next().value as string);
   }
   return promise;
+}
+
+async function rowRenderPng(
+  map: MapEntry,
+  row: MetadataRow,
+  options: { size?: number; fovScale?: number },
+): Promise<Buffer> {
+  if (!isRenderableGnomonic(rowAngles(row))) {
+    throw new WorkbenchRouteError(
+      422,
+      `Row ${row.rowIndex} spans ${(row.angularWidth * 180 / Math.PI).toFixed(1)}x`
+      + `${(row.angularHeight * 180 / Math.PI).toFixed(1)} degrees, so no rectilinear view `
+      + "of it exists (a gnomonic projection diverges at 180). The stored thumbnail is "
+      + "degenerate for the same reason — this is an upstream property of the proposal, "
+      + "not a rendering limit.",
+    );
+  }
+  return renderGnomonicPng(
+    map,
+    String(row.videoKeyframeId),
+    rowAngles(row),
+    options,
+  );
 }
 
 /**
@@ -1254,6 +1847,44 @@ export async function metadataRowRenderPng(
   return rowRenderPng(map, row, options);
 }
 
+export async function proposalNeighborProjectionRenderPng(
+  map: MapEntry,
+  rowIndex: number,
+  targetKeyframeId: string,
+  options: { size?: number; fovScale?: number },
+): Promise<Buffer> {
+  const { row, manifest } = await proposalProjectionSource(map, rowIndex);
+  const geometry = proposalProjectionGeometry(row, manifest);
+  const target = manifest.keyframeById.get(Number(targetKeyframeId));
+  if (!target) {
+    throw new WorkbenchRouteError(
+      404,
+      `GeoRef pose not found for target keyframe ${targetKeyframeId}.`,
+    );
+  }
+  if (target.keyframeId === row.videoKeyframeId) {
+    throw new WorkbenchRouteError(400, "The source keyframe is not a neighbour.");
+  }
+  const projection = projectProposalIntoKeyframe(geometry, target);
+  if (!projection) {
+    throw new WorkbenchRouteError(
+      422,
+      `The proposal coincides with target keyframe ${targetKeyframeId}.`,
+    );
+  }
+  return renderGnomonicPng(
+    map,
+    targetKeyframeId,
+    {
+      thetaCenter: projection.theta_center,
+      phiCenter: projection.phi_center,
+      angularWidth: projection.angular_width,
+      angularHeight: projection.angular_height,
+    },
+    options,
+  );
+}
+
 /**
  * Virtual `thumbnail_key` for an index with no thumbnail JPEGs on disk.
  *
@@ -1292,6 +1923,290 @@ type DepthSample = {
   height: number;
   sample_count: number;
 };
+
+type DepthBatchSample = {
+  sample: DepthSample | null;
+  error: string | null;
+};
+
+type FeatureMatchAssessment = Pick<
+  ProposalNeighborProjection,
+  | "feature_match_score"
+  | "feature_matches"
+  | "feature_inliers"
+  | "feature_inlier_ratio"
+  | "feature_match_status"
+>;
+
+type EdgeNccAssessment = Pick<
+  ProposalNeighborProjection,
+  "edge_ncc_score" | "edge_ncc_status"
+>;
+
+type ProjectionVisualAssessment = FeatureMatchAssessment & EdgeNccAssessment;
+
+type RawFeatureMatch = {
+  matches: number;
+  inliers: number;
+  has_features: boolean;
+  edge_ncc: number | null;
+};
+
+const FEATURE_MATCH_SCRIPT = String.raw`
+import base64
+import json
+import sys
+
+import cv2
+import numpy as np
+
+
+def decode_gray(encoded):
+    payload = np.frombuffer(base64.b64decode(encoded), dtype=np.uint8)
+    image = cv2.imdecode(payload, cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise RuntimeError("could not decode projection PNG")
+    return image
+
+
+def extract_sift(image):
+    # COLMAP defaults to SIFT. A slightly lower contrast threshold keeps useful
+    # points in these small, already-localised proposal views.
+    sift = cv2.SIFT_create(nfeatures=2048, contrastThreshold=0.02)
+    return sift.detectAndCompute(image, None)
+
+
+def proposal_region(image):
+    # The proposal occupies half of a 2x-FOV render. Keep a small tolerance for
+    # viewpoint changes while excluding most scene context from the score.
+    height, width = image.shape[:2]
+    half_height = max(1, int(height * 0.30))
+    half_width = max(1, int(width * 0.30))
+    center_y = height // 2
+    center_x = width // 2
+    return image[
+        center_y - half_height:center_y + half_height,
+        center_x - half_width:center_x + half_width,
+    ]
+
+
+def appearance_region(image):
+    # The exact proposal spans half of a 2x-FOV render. Edge NCC uses that region,
+    # while SIFT keeps the slightly wider crop above for geometric tolerance.
+    height, width = image.shape[:2]
+    quarter_height = max(1, height // 4)
+    quarter_width = max(1, width // 4)
+    center_y = height // 2
+    center_x = width // 2
+    return image[
+        center_y - quarter_height:center_y + quarter_height,
+        center_x - quarter_width:center_x + quarter_width,
+    ]
+
+
+def gradient_map(image):
+    image_float = cv2.GaussianBlur(image, (5, 5), 1.0).astype(np.float32)
+    return cv2.magnitude(
+        cv2.Sobel(image_float, cv2.CV_32F, 1, 0, ksize=3),
+        cv2.Sobel(image_float, cv2.CV_32F, 0, 1, ksize=3),
+    )
+
+
+def channel_ncc(left, right):
+    left_centered = left - float(np.mean(left))
+    right_centered = right - float(np.mean(right))
+    left_norm = float(np.linalg.norm(left_centered))
+    right_norm = float(np.linalg.norm(right_centered))
+    if left_norm < 1e-6 or right_norm < 1e-6:
+        return None
+    return float(np.sum(left_centered * right_centered) / (left_norm * right_norm))
+
+
+def gaussian_edge_pyramid(edges):
+    return [
+        (cv2.GaussianBlur(edges, (0, 0), sigma), weight)
+        for sigma, weight in ((0.8, 0.2), (2.0, 0.3), (4.0, 0.5))
+    ]
+
+
+def edge_ncc(
+    source_pyramid,
+    target_pyramid,
+    source_y,
+    source_x,
+    target_y,
+    target_x,
+):
+    weighted = 0.0
+    total_weight = 0.0
+    for (source_edges, weight), (target_edges, _) in zip(
+        source_pyramid,
+        target_pyramid,
+    ):
+        correlation = channel_ncc(
+            source_edges[source_y, source_x],
+            target_edges[target_y, target_x],
+        )
+        if correlation is None:
+            continue
+        weighted += max(0.0, min(1.0, correlation)) * weight
+        total_weight += weight
+    if total_weight <= 0.0:
+        return None
+    return weighted / total_weight
+
+
+def has_structure(edges):
+    return float(np.mean(edges > 12.0)) >= 0.01
+
+
+def aligned_edge_ncc(source, target):
+    # Projection already normalises scale and centre. A small translation search
+    # absorbs residual pose/depth error. Shift cost prevents best-of-N inflation.
+    size = 160
+    source_small = cv2.resize(source, (size, size), interpolation=cv2.INTER_AREA)
+    target_small = cv2.resize(target, (size, size), interpolation=cv2.INTER_AREA)
+    source_edges = gradient_map(source_small)
+    target_edges = gradient_map(target_small)
+    if not has_structure(source_edges) or not has_structure(target_edges):
+        return None
+    source_pyramid = gaussian_edge_pyramid(source_edges)
+    target_pyramid = gaussian_edge_pyramid(target_edges)
+    max_shift = 8
+    best = 0.0
+    for dy in (-max_shift, -max_shift // 2, 0, max_shift // 2, max_shift):
+        for dx in (-max_shift, -max_shift // 2, 0, max_shift // 2, max_shift):
+            source_y = slice(max(0, dy), min(size, size + dy))
+            target_y = slice(max(0, -dy), min(size, size - dy))
+            source_x = slice(max(0, dx), min(size, size + dx))
+            target_x = slice(max(0, -dx), min(size, size - dx))
+            correlation = edge_ncc(
+                source_pyramid,
+                target_pyramid,
+                source_y,
+                source_x,
+                target_y,
+                target_x,
+            )
+            if correlation is None:
+                continue
+            shift_ratio = float(np.hypot(dx, dy)) / (np.sqrt(2.0) * max_shift)
+            best = max(best, correlation - 0.10 * shift_ratio)
+    return max(0.0, min(1.0, best))
+
+
+def proposal_inner_region(image):
+    # appearance_region(full 2x FOV) is 5/6 of proposal_region(full 2x FOV).
+    height, width = image.shape[:2]
+    half_height = max(1, int(height * 5.0 / 12.0))
+    half_width = max(1, int(width * 5.0 / 12.0))
+    center_y = height // 2
+    center_x = width // 2
+    return image[
+        center_y - half_height:center_y + half_height,
+        center_x - half_width:center_x + half_width,
+    ]
+
+
+def match_target(
+    source_keypoints,
+    source_descriptors,
+    source_appearance,
+    target_encoded,
+):
+    target_full = decode_gray(target_encoded)
+    target = proposal_region(target_full)
+    appearance_target = appearance_region(target_full)
+    appearance = aligned_edge_ncc(
+        source_appearance,
+        appearance_target,
+    )
+    target_keypoints, target_descriptors = extract_sift(target)
+    if (
+        source_descriptors is None
+        or target_descriptors is None
+        or len(source_descriptors) < 2
+        or len(target_descriptors) < 2
+    ):
+        return {
+            "matches": 0,
+            "inliers": 0,
+            "has_features": False,
+            "edge_ncc": appearance,
+        }
+
+    # COLMAP's SIFT_BRUTEFORCE matcher uses L2 descriptors and a 0.8 ratio test.
+    pairs = cv2.BFMatcher(cv2.NORM_L2).knnMatch(
+        source_descriptors,
+        target_descriptors,
+        k=2,
+    )
+    matches = [
+        pair[0]
+        for pair in pairs
+        if len(pair) == 2 and pair[0].distance < 0.8 * pair[1].distance
+    ]
+    inliers = 0
+    if len(matches) >= 4:
+        source_points = np.float32(
+            [source_keypoints[item.queryIdx].pt for item in matches]
+        ).reshape(-1, 1, 2)
+        target_points = np.float32(
+            [target_keypoints[item.trainIdx].pt for item in matches]
+        ).reshape(-1, 1, 2)
+        homography, mask = cv2.findHomography(
+            source_points,
+            target_points,
+            cv2.RANSAC,
+            4.0,
+            maxIters=2000,
+            confidence=0.995,
+        )
+        if mask is not None:
+            inliers = int(mask.ravel().sum())
+            inlier_ratio = inliers / len(matches)
+            if homography is not None and inliers >= 6 and inlier_ratio >= 0.4:
+                aligned_target = cv2.warpPerspective(
+                    target,
+                    homography,
+                    (target.shape[1], target.shape[0]),
+                    flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                    borderMode=cv2.BORDER_REFLECT,
+                )
+                appearance = aligned_edge_ncc(
+                    source_appearance,
+                    proposal_inner_region(aligned_target),
+                )
+
+    return {
+        "matches": len(matches),
+        "inliers": inliers,
+        "has_features": True,
+        "edge_ncc": appearance,
+    }
+
+
+def main():
+    request = json.loads(sys.stdin.read())
+    source_full = decode_gray(request["source_png"])
+    source = proposal_region(source_full)
+    source_appearance = appearance_region(source_full)
+    source_keypoints, source_descriptors = extract_sift(source)
+    results = [
+        match_target(
+            source_keypoints,
+            source_descriptors,
+            source_appearance,
+            encoded,
+        )
+        for encoded in request["target_pngs"]
+    ]
+    print(json.dumps(results))
+
+
+if __name__ == "__main__":
+    main()
+`;
 
 const DEPTH_SAMPLE_SCRIPT = String.raw`
 import json
@@ -1371,6 +2286,21 @@ def sample_tiff(depth_path, u, v, radius):
 
 def main():
     req = json.loads(sys.stdin.read())
+    if "samples" in req:
+        results = []
+        for item in req["samples"]:
+            try:
+                result = sample_tiff(
+                    Path(item["depth_path"]),
+                    float(item["u"]),
+                    float(item["v"]),
+                    max(0, int(item.get("radius", 3))),
+                )
+                results.append({"sample": result, "error": None})
+            except Exception as exc:
+                results.append({"sample": None, "error": str(exc)})
+        print(json.dumps(results))
+        return
     depth_path = Path(req["depth_path"])
     u = float(req["u"])
     v = float(req["v"])
@@ -1495,6 +2425,58 @@ async function runDepthSamplePython(
   return JSON.parse(Buffer.concat(stdout).toString("utf8")) as DepthSample;
 }
 
+async function runDepthBatchSamplePython(
+  pythonBin: string,
+  requests: Record<string, unknown>[],
+): Promise<DepthBatchSample[]> {
+  const child = spawn(pythonBin, ["-c", DEPTH_SAMPLE_SCRIPT], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  child.stdin.end(JSON.stringify({ samples: requests }));
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+  if (code !== 0) {
+    throw new Error(Buffer.concat(stderr).toString("utf8").trim() || `python exited with ${code}`);
+  }
+  return JSON.parse(Buffer.concat(stdout).toString("utf8")) as DepthBatchSample[];
+}
+
+async function runFeatureMatchPython(
+  pythonBin: string,
+  sourcePng: Buffer,
+  targetPngs: Buffer[],
+): Promise<ProjectionVisualAssessment[]> {
+  const child = spawn(pythonBin, ["-c", FEATURE_MATCH_SCRIPT], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  child.stdin.end(JSON.stringify({
+    source_png: sourcePng.toString("base64"),
+    target_pngs: targetPngs.map((target) => target.toString("base64")),
+  }));
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+  if (code !== 0) {
+    throw new Error(Buffer.concat(stderr).toString("utf8").trim() || `python exited with ${code}`);
+  }
+  const raw = JSON.parse(Buffer.concat(stdout).toString("utf8")) as RawFeatureMatch[];
+  return raw.map((item) => ({
+    ...featureMatchAssessment(item.matches, item.inliers, item.has_features),
+    ...edgeNccAssessment(item.edge_ncc),
+  }));
+}
+
 async function runDepthPreviewPython(
   pythonBin: string,
   request: Record<string, unknown>,
@@ -1546,6 +2528,141 @@ async function sampleDepthAtEquirectUv(
     500,
     `Could not sample depth map. Install tifffile, or set OBJECT_SEARCH_WORKBENCH_PYTHON. ${errors.join(" | ")}`,
   );
+}
+
+export function projectionOcclusionAssessment(
+  expectedDepthM: number,
+  observedDepthM: number,
+): Pick<
+  ProposalNeighborProjection,
+  "observed_depth_m" | "occlusion_margin_m" | "occlusion_confidence" | "occlusion_status"
+> {
+  // Depth is sqrt-quantised and a small proposal can straddle object/background
+  // pixels, so require a discrepancy greater than 35 cm or 8% before classifying it.
+  const toleranceM = Math.max(0.35, expectedDepthM * 0.08);
+  const marginM = observedDepthM - expectedDepthM;
+  const mismatchExcessM = Math.max(0, Math.abs(marginM) - toleranceM);
+  const confidence = Math.exp(-mismatchExcessM / Math.max(0.5, toleranceM));
+  return {
+    observed_depth_m: observedDepthM,
+    occlusion_margin_m: marginM,
+    occlusion_confidence: confidencePercent(confidence),
+    occlusion_status:
+      mismatchExcessM === 0
+        ? "clear"
+        : marginM < 0
+          ? "occluded"
+          : "depth_mismatch",
+  };
+}
+
+async function scoreProjectionOcclusion(
+  map: MapEntry,
+  projections: ProposalNeighborProjection[],
+): Promise<ProposalNeighborProjection[]> {
+  const depthPaths = await Promise.all(
+    projections.map((projection) => resolveDepthPath(map, projection.keyframe_id)),
+  );
+  const available = projections.flatMap((projection, index) => {
+    const depthPath = depthPaths[index];
+    return depthPath
+      ? [
+          {
+            index,
+            request: {
+              depth_path: depthPath,
+              u: projection.erp_u,
+              v: projection.erp_v,
+              radius: 3,
+            },
+          },
+        ]
+      : [];
+  });
+  if (!available.length) {
+    return projections;
+  }
+
+  let samples: DepthBatchSample[] | null = null;
+  for (const pythonBin of pythonBinaryCandidates()) {
+    try {
+      samples = await runDepthBatchSamplePython(
+        pythonBin,
+        available.map((item) => item.request),
+      );
+      break;
+    } catch {
+      // Occlusion is an optional confidence signal. A missing decoder must not hide
+      // otherwise valid geometric projections.
+    }
+  }
+  if (!samples) {
+    return projections;
+  }
+
+  const assessments = new Map<number, ReturnType<typeof projectionOcclusionAssessment>>();
+  available.forEach((item, sampleIndex) => {
+    const sample = samples?.[sampleIndex]?.sample;
+    if (sample) {
+      assessments.set(
+        item.index,
+        projectionOcclusionAssessment(
+          projections[item.index].distance_to_proposal_m,
+          sample.depth_m,
+        ),
+      );
+    }
+  });
+  return projections.map((projection, index) => ({
+    ...projection,
+    ...(assessments.get(index) ?? {}),
+  }));
+}
+
+async function scoreProjectionFeatures(
+  map: MapEntry,
+  row: MetadataRow,
+  projections: ProposalNeighborProjection[],
+): Promise<ProjectionVisualAssessment[] | null> {
+  let sourcePng: Buffer;
+  let targetPngs: Buffer[];
+  try {
+    [sourcePng, targetPngs] = await Promise.all([
+      rowRenderPng(map, row, { size: 384, fovScale: 2 }),
+      Promise.all(
+        projections.map((projection) =>
+          renderGnomonicPng(
+            map,
+            projection.keyframe_id,
+            {
+              thetaCenter: projection.theta_center,
+              phiCenter: projection.phi_center,
+              angularWidth: projection.angular_width,
+              angularHeight: projection.angular_height,
+            },
+            { size: 384, fovScale: 2 },
+          ),
+        ),
+      ),
+    ]);
+  } catch {
+    return null;
+  }
+
+  for (const pythonBin of pythonBinaryCandidates()) {
+    try {
+      const assessments = await runFeatureMatchPython(
+        pythonBin,
+        sourcePng,
+        targetPngs,
+      );
+      return assessments.length === projections.length ? assessments : null;
+    } catch {
+      // Feature scoring is additive. Missing OpenCV/SIFT must not make geometric
+      // projection, depth visibility, or rendered cards disappear.
+    }
+  }
+  return null;
 }
 
 export async function indexKeyframeDepthPreviewPng(
@@ -1695,6 +2812,7 @@ export async function indexDepthPinPayload(
     point_local: pointLocalEnu,
     point_world: [geo.latitude, geo.longitude, geo.altitude],
     point_world_wds: pointWorldWds,
+    source_identity: await keyframeSourceIdentity(map, keyframeId),
     latitude: geo.latitude,
     longitude: geo.longitude,
     altitude: geo.altitude,

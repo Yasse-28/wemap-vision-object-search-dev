@@ -48,8 +48,25 @@ export function buildAnnotationGeoJSON(
       level: annotation.level,
       accuracy: annotation.accuracyM,
       annotation_type: annotation.annotationType,
+      ...(annotation.groundTruth.objectId
+        ? { object_id: annotation.groundTruth.objectId }
+        : {}),
+      ...(annotation.groundTruth.extentM !== null
+        ? { extent_m: annotation.groundTruth.extentM }
+        : {}),
+      ...(annotation.groundTruth.exhaustiveZone
+        ? { exhaustive_zone: annotation.groundTruth.exhaustiveZone }
+        : {}),
+      is_depiction: annotation.groundTruth.isDepiction,
+      labels: {
+        synonyms: annotation.groundTruth.labels.synonyms,
+        depictions: annotation.groundTruth.labels.depictions,
+        visually_similar: annotation.groundTruth.labels.visuallySimilar,
+        clutter: annotation.groundTruth.labels.clutter,
+      },
       ...(annotation.source
         ? {
+            source: annotation.source,
             source_keyframe_id: annotation.source.keyframeId,
             source_projection: annotation.source.projection,
             ...(annotation.source.rowIndex !== null

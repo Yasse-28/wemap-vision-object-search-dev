@@ -18,6 +18,7 @@ import {
   upsertDetectionGroupLabel,
   upsertDetectionReview,
   upsertWorkspaceClass,
+  updateWorkspaceAnnotation,
 } from "./annotation-store.js";
 import {
   benchmarkRunPayload,
@@ -26,6 +27,12 @@ import {
   startBenchmarkRun,
   type BenchmarkRunParams,
 } from "./benchmark-runner.js";
+import {
+  analysisLayerPayload,
+  analysisRunPayload,
+  analysisStatusPayload,
+  startAnalysisRun,
+} from "./map-analysis-runner.js";
 import { loadMapEntries, type MapEntry } from "./config.js";
 import {
   createDirectoryPayload,
@@ -57,6 +64,9 @@ import {
   objectSearchMetadataMarkersPayload,
   objectSearchMetadataStatusPayload,
   previewFromPathPng,
+  reprojectAnnotationSources,
+  proposalNeighborProjectionRenderPng,
+  proposalNeighborProjectionsPayload,
   rowFilterParamsFromQuery,
   WorkbenchRouteError,
 } from "./workbench-index.js";
@@ -169,6 +179,44 @@ export async function handleWorkbenchUiMapRoute(
       sendJson(response, 202, startBenchmarkRun(options, map, params));
       return true;
     }
+    if (method === "GET" && suffix === "/analysis/status") {
+      sendJson(response, 200, await analysisStatusPayload(map));
+      return true;
+    }
+    if (method === "POST" && suffix === "/analysis/run") {
+      sendJson(response, 202, startAnalysisRun(options, map));
+      return true;
+    }
+    // Matched before the run route below, whose `([^/]+)(\/report)?` would otherwise
+    // reject the extra segments rather than fall through.
+    const analysisLayerMatch = /^\/analysis\/runs\/([^/]+)\/layers\/([^/]+)$/.exec(
+      suffix,
+    );
+    if (method === "GET" && analysisLayerMatch) {
+      sendJson(
+        response,
+        200,
+        await analysisLayerPayload(
+          map,
+          decodeURIComponent(analysisLayerMatch[1]),
+          decodeURIComponent(analysisLayerMatch[2]),
+        ),
+      );
+      return true;
+    }
+    const analysisRunMatch = /^\/analysis\/runs\/([^/]+)(\/report)?$/.exec(suffix);
+    if (method === "GET" && analysisRunMatch) {
+      sendJson(
+        response,
+        200,
+        await analysisRunPayload(
+          map,
+          decodeURIComponent(analysisRunMatch[1]),
+          analysisRunMatch[2] === "/report",
+        ),
+      );
+      return true;
+    }
     if (method === "GET" && suffix === "/export-roi/directories") {
       sendJson(
         response,
@@ -235,7 +283,9 @@ export async function handleWorkbenchUiMapRoute(
       return true;
     }
     if (method === "GET" && suffix === "/annotations") {
-      sendJson(response, 200, listWorkspaceAnnotations(map));
+      const workspace = listWorkspaceAnnotations(map);
+      const annotations = await reprojectAnnotationSources(map, workspace.annotations);
+      sendJson(response, 200, { ...workspace, annotations });
       return true;
     }
     // A whole FeatureCollection in: the file-import path. It merges rather than
@@ -257,6 +307,23 @@ export async function handleWorkbenchUiMapRoute(
         throw new WorkbenchRouteError(400, (error as Error).message);
       }
       sendJson(response, 201, { id: createWorkspaceAnnotation(map, annotation) });
+      return true;
+    }
+    if (method === "PUT" && suffix === "/annotations/annotation") {
+      const body = await requestJson(request);
+      let annotation;
+      try {
+        annotation = parseWorkspaceAnnotation(body);
+      } catch (error) {
+        throw new WorkbenchRouteError(400, (error as Error).message);
+      }
+      if (!annotation.id) {
+        throw new WorkbenchRouteError(400, "An annotation id is required.");
+      }
+      if (!updateWorkspaceAnnotation(map, annotation)) {
+        throw new WorkbenchRouteError(404, `Annotation ${annotation.id} was not found.`);
+      }
+      sendJson(response, 200, { id: annotation.id });
       return true;
     }
     if (method === "DELETE" && suffix === "/annotations/annotation") {
@@ -411,6 +478,40 @@ export async function handleWorkbenchUiMapRoute(
     }
     if (method === "GET" && suffix === "/object-search-metadata/keyframe-graph") {
       sendJson(response, 200, await keyframeGraphPayload(map));
+      return true;
+    }
+    if (
+      method === "GET"
+      && /^\/object-search-metadata\/rows\/\d+\/neighbor-projections$/.test(suffix)
+    ) {
+      sendJson(
+        response,
+        200,
+        await proposalNeighborProjectionsPayload(
+          map,
+          Number(suffix.split("/")[3]),
+          queryNumber(url, "count", 5),
+          url.searchParams.get("diverse") !== "false",
+        ),
+      );
+      return true;
+    }
+    if (
+      method === "GET"
+      && /^\/object-search-metadata\/rows\/\d+\/neighbor-projections\/\d+\.png$/.test(suffix)
+    ) {
+      sendPng(
+        response,
+        await proposalNeighborProjectionRenderPng(
+          map,
+          Number(suffix.split("/")[3]),
+          suffix.split("/")[5].replace(/\.png$/, ""),
+          {
+            size: queryNumber(url, "size", 384),
+            fovScale: queryNumber(url, "fov_scale", 2),
+          },
+        ),
+      );
       return true;
     }
     if (method === "GET" && /^\/object-search-metadata\/rows\/\d+$/.test(suffix)) {

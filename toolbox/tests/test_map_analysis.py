@@ -9,18 +9,24 @@ import numpy as np
 from toolbox.benchmark.map_analysis import (
     Detections,
     GroundTruth,
+    Observability,
     _angular_delta,
+    _azimuth_coverage,
     _conditional_table,
     _horizontal_anisotropy,
     _mutual_information,
     _overlapping_pairs,
     _percentiles,
     _rank_auc,
+    _useful_parallax_share,
     _uv_to_theta_phi,
     attach_to_ground_truth,
+    hubness,
+    keyframe_threshold_curve,
     seen_in_own_keyframe,
 )
 from toolbox.benchmark.map_layers import _colour
+from toolbox.benchmark.object_search_http_benchmark import Annotation
 
 
 def _detections(
@@ -216,3 +222,198 @@ def test_height_is_ignored_because_the_baseline_that_matters_is_on_the_ground() 
     )
 
     assert _horizontal_anisotropy(line) < 1e-6
+
+
+def test_a_capture_that_circled_the_object_leaves_no_gap() -> None:
+    angles = np.linspace(0.0, 2 * math.pi, 24, endpoint=False)
+    ring = np.column_stack([np.cos(angles), np.zeros(24), np.sin(angles)])
+
+    occupied, gap = _azimuth_coverage(ring, np.zeros(3))
+
+    assert occupied == 1.0
+    assert gap < 20.0
+
+
+def test_a_capture_that_stayed_on_one_side_leaves_half_the_ring_empty() -> None:
+    angles = np.linspace(0.0, math.pi / 2.0, 12)
+    arc = np.column_stack([np.cos(angles), np.zeros(12), np.sin(angles)])
+
+    occupied, gap = _azimuth_coverage(arc, np.zeros(3))
+
+    assert occupied < 0.4
+    assert gap > 250.0
+
+
+def test_viewpoints_bunched_together_are_geometrically_redundant() -> None:
+    # Twenty viewpoints spread over 20 cm, ten metres from the object: the widest
+    # pair still sees it under about a degree, so none of them can triangulate.
+    origins = np.column_stack(
+        [np.linspace(0.0, 0.2, 20), np.zeros(20), np.full(20, -10.0)]
+    )
+
+    assert _useful_parallax_share(origins, np.zeros(3)) == 0.0
+
+
+def test_opposite_viewpoints_all_triangulate() -> None:
+    origins = np.array([[-5.0, 0.0, 0.0], [5.0, 0.0, 0.0], [0.0, 0.0, 5.0]])
+
+    assert _useful_parallax_share(origins, np.zeros(3)) == 1.0
+
+
+def test_a_uniform_space_has_no_hubs() -> None:
+    generator = np.random.default_rng(0)
+    vectors = generator.normal(size=(400, 32)).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+    result = hubness(vectors, k=5)
+
+    assert abs(result.skewness) < 1.0
+    assert result.hub_share == 0.0
+
+
+def test_a_cloud_with_a_centre_of_mass_grows_hubs_that_centring_removes() -> None:
+    # The mechanism the report claims: shift a high-dimensional cloud off the origin
+    # and the vectors nearest that shift become everyone's neighbour. Subtracting the
+    # mean is the whole fix, which is why the section prints both columns.
+    generator = np.random.default_rng(0)
+    offset = np.zeros(128)
+    offset[0] = 3.0
+    vectors = (generator.normal(size=(600, 128)) + offset).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+    raw = hubness(vectors, k=5)
+    centred = vectors - vectors.mean(axis=0, keepdims=True)
+    centred /= np.linalg.norm(centred, axis=1, keepdims=True)
+
+    assert raw.skewness > hubness(centred, k=5).skewness
+
+
+def _observability(keyframes: list[int]) -> Observability:
+    """An observability profile carrying only the field the retention curve reads."""
+    count = len(keyframes)
+    zeros = np.zeros(count)
+    return Observability(
+        detections=np.zeros(count, dtype=np.int64),
+        keyframes=np.asarray(keyframes, dtype=np.int64),
+        achieved_parallax_deg=zeros.copy(),
+        available_keyframes=np.zeros(count, dtype=np.int64),
+        available_parallax_deg=zeros.copy(),
+        nearest_keyframe_m=zeros.copy(),
+        trajectory_anisotropy=zeros.copy(),
+        achieved_coverage=zeros.copy(),
+        available_coverage=zeros.copy(),
+        available_gap_deg=zeros.copy(),
+        useful_pair_share=zeros.copy(),
+    )
+
+
+def test_the_retention_curve_prices_the_threshold_against_every_annotation() -> None:
+    # Four annotations seen from 0, 1, 2 and 5 keyframes. The one never attached is
+    # already lost at a threshold of 1, which is what makes the curve start below 100 %.
+    profile = _observability([0, 1, 2, 5])
+    covered = np.array([False, True, True, True])
+    indexed = np.ones(4, dtype=bool)
+
+    curve = keyframe_threshold_curve(profile, covered, indexed, max_keyframes=3)
+
+    assert [row["min_keyframes"] for row in curve] == [1.0, 2.0, 3.0]
+    assert [row["retained"] for row in curve] == [3.0, 2.0, 1.0]
+    assert curve[0]["retained_share"] == 0.75
+
+
+def test_the_covered_share_is_measured_only_on_the_annotations_it_keeps() -> None:
+    # The annotation with a single keyframe is the uncovered one, so raising the
+    # threshold to 2 drops it and the covered share climbs. That is the case where the
+    # threshold selects for quality rather than only losing recall.
+    profile = _observability([1, 2, 3])
+    covered = np.array([False, True, True])
+    indexed = np.ones(3, dtype=bool)
+
+    curve = keyframe_threshold_curve(profile, covered, indexed, max_keyframes=2)
+
+    assert curve[0]["covered_share"] == 2.0 / 3.0
+    assert curve[1]["covered_share"] == 1.0
+
+
+def test_an_annotation_without_an_indexed_panorama_still_counts_as_lost() -> None:
+    # It is not measurable depth-free, so it must stay out of the covered share — but
+    # the threshold does drop it, so it belongs in the retained share.
+    profile = _observability([1, 4])
+    covered = np.array([False, True])
+    indexed = np.array([False, True])
+
+    curve = keyframe_threshold_curve(profile, covered, indexed, max_keyframes=1)
+
+    assert curve[0]["retained"] == 2.0
+    assert curve[0]["measurable"] == 1.0
+    assert curve[0]["covered_share"] == 1.0
+
+
+def test_a_threshold_no_annotation_reaches_reports_nothing_measurable() -> None:
+    profile = _observability([1, 1])
+    covered = np.array([True, True])
+    indexed = np.ones(2, dtype=bool)
+
+    curve = keyframe_threshold_curve(profile, covered, indexed, max_keyframes=2)
+
+    assert curve[1]["retained"] == 0.0
+    assert math.isnan(curve[1]["covered_share"])
+
+
+def _annotation(identifier: str, object_id: str | None) -> Annotation:
+    """Only the fields `GroundTruth.object_key` reads."""
+    return Annotation(
+        id=identifier,
+        class_name="cctv",
+        lat=18.4320456,
+        lng=-69.6765662,
+        accuracy_m=5.0,
+        object_id=object_id,
+    )
+
+
+def test_clicks_sharing_an_object_id_count_as_one_object() -> None:
+    """14 clicks on one camera are one camera — s5's bound is compared against this."""
+    truth = _ground_truth(
+        [(0.0, 0.0, 0.0)] * 3, ["cctv"] * 3, ["kf-1", "kf-2", "kf-3"]
+    )
+    truth.annotations = tuple(
+        _annotation(str(index), "cctv-001") for index in range(3)
+    )
+
+    assert len(truth) == 3
+    assert truth.object_count() == 1
+
+
+def test_an_annotation_with_no_object_id_is_its_own_object() -> None:
+    """A pre-ADR map must not collapse into one object per class."""
+    truth = _ground_truth([(0.0, 0.0, 0.0)] * 3, ["cctv"] * 3, ["a", "b", "c"])
+    truth.annotations = tuple(_annotation(str(index), None) for index in range(3))
+
+    assert truth.object_count() == 3
+
+
+def test_distinct_ids_stay_distinct_objects() -> None:
+    truth = _ground_truth([(0.0, 0.0, 0.0)] * 3, ["cctv"] * 3, ["a", "b", "c"])
+    truth.annotations = (
+        _annotation("1", "cctv-001"),
+        _annotation("2", "cctv-001"),
+        _annotation("3", "cctv-002"),
+    )
+
+    assert truth.object_count() == 2
+
+
+def test_a_mask_counts_only_the_objects_it_selects() -> None:
+    truth = _ground_truth([(0.0, 0.0, 0.0)] * 4, ["cctv"] * 4, ["a", "b", "c", "d"])
+    truth.annotations = (
+        _annotation("1", "cctv-001"),
+        _annotation("2", "cctv-001"),
+        _annotation("3", "cctv-002"),
+        _annotation("4", "cctv-003"),
+    )
+
+    mask = np.array([True, True, True, False])
+
+    assert truth.object_count(mask) == 2
+    assert truth.object_count() == 3

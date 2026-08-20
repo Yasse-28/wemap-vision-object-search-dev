@@ -39,7 +39,7 @@ import contextlib
 import logging
 import time
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 import numpy as np
 import pandas as pd
@@ -261,12 +261,90 @@ def _upsert_geokeyframes(
     logger.info("Upserted %d geokeyframe rows for georef %s.", len(rows), geo_ref_id)
 
 
+def _unit_rows(embeddings: np.ndarray) -> np.ndarray:
+    """L2-normalised float64 copy. The centroid is only meaningful on unit vectors."""
+    unit = np.asarray(embeddings, dtype=np.float64)
+    norms = np.maximum(np.linalg.norm(unit, axis=1, keepdims=True), 1e-6)
+    return np.asarray(unit / norms, dtype=np.float64)
+
+
+def _embedding_centroid(
+    capture_dirs: Sequence[Path], kept_vk_ids: set[int]
+) -> np.ndarray | None:
+    """Mean of every kept unit embedding across all captures, None when there are none.
+
+    A first pass over the parquets, because the centroid has to be the same vector for
+    every row written: computing it per capture would store several different centres in
+    one index and the online service could only subtract one of them.
+    """
+    total = np.zeros(EMBEDDING_DIM, dtype=np.float64)
+    count = 0
+    for capture_dir in capture_dirs:
+        outputs = _read_capture_outputs(capture_dir)
+        if outputs is None:
+            continue
+        metadata, embeddings = outputs
+        keep = metadata["video_keyframe_id"].isin(kept_vk_ids).to_numpy()
+        if not keep.any():
+            continue
+        unit = _unit_rows(embeddings[keep])
+        total += unit.sum(axis=0)
+        count += unit.shape[0]
+    if count == 0:
+        return None
+    return total / count
+
+
+def _center_embeddings(embeddings: np.ndarray, centroid: np.ndarray) -> np.ndarray:
+    """Unit embeddings with the centroid removed, renormalised.
+
+    The same three lines s6 measures its `centré` column with, so what the benchmark
+    scores is what the analysis predicted. Renormalising matters: the HNSW index is
+    `halfvec_l2_ops`, and L2 ranks like cosine only on unit vectors.
+    """
+    centred = _unit_rows(embeddings) - centroid
+    centred /= np.maximum(np.linalg.norm(centred, axis=1, keepdims=True), 1e-6)
+    return np.asarray(centred, dtype=np.float32)
+
+
+def _store_centroid(
+    conn: Connection, geo_ref_id: int, centroid: np.ndarray | None
+) -> None:
+    """Record the centroid this index was built with, or clear a stale one.
+
+    Clearing on an uncentred ingest is the half that keeps the two sides honest: a
+    leftover row would make the online service centre queries against raw vectors,
+    which scores worse than either choice made consistently.
+    """
+    with conn.cursor() as cursor:
+        if centroid is None:
+            cursor.execute(
+                "DELETE FROM object_search_embedding_centroid WHERE geo_ref_id = %s",
+                [geo_ref_id],
+            )
+            return
+        # A text literal cast to halfvec: this module packs the COPY stream by hand
+        # rather than depending on pgvector's python types, and one row does not
+        # justify pulling one in.
+        literal = "[" + ",".join(repr(float(value)) for value in centroid) + "]"
+        cursor.execute(
+            """
+            INSERT INTO object_search_embedding_centroid (geo_ref_id, centroid)
+            VALUES (%s, %s::halfvec)
+            ON CONFLICT (geo_ref_id) DO UPDATE
+              SET centroid = EXCLUDED.centroid, created_at = now()
+            """,
+            [geo_ref_id, literal],
+        )
+
+
 def run_ingest(
     conn: Connection,
     *,
     map_path: Path,
     min_distance: float = DEFAULT_MIN_DISTANCE,
     outputs_dirname: str = DEFAULT_OUTPUTS_DIRNAME,
+    center_embeddings: bool = False,
 ) -> int:
     """Ingest every prepare output under `map_path`. Returns the row count.
 
@@ -320,6 +398,25 @@ def run_ingest(
             "Run `python -m prepare --output-dir ...` first."
         )
 
+    centroid: np.ndarray | None = None
+    if center_embeddings:
+        with _step("Computing the embedding centroid"):
+            centroid = _embedding_centroid(capture_dirs, kept_vk_ids)
+            if centroid is None:
+                raise RuntimeError(
+                    "Centring was asked for but no kept row carries an embedding."
+                )
+            logger.warning(
+                "Centring is ON: centroid norm %.4f will be subtracted from every "
+                "stored vector. The online service does NOT subtract it from queries "
+                "— that half was reverted after it measured 9x worse (mAP 0.325 -> "
+                "0.036 on vinci). This index will be queried with uncentred vectors, "
+                "which is worse than either choice held consistently. Re-ingest "
+                "without --center-embeddings unless you are reproducing that "
+                "experiment and have restored the query side.",
+                float(np.linalg.norm(centroid)),
+            )
+
     with _step(f"Reading prepare outputs + bulk COPY ({len(capture_dirs)} capture(s))"):
         total_inserted = 0
         captures_with_data = 0
@@ -345,6 +442,8 @@ def run_ingest(
                     continue
                 metadata = metadata.loc[keep].reset_index(drop=True)
                 embeddings = embeddings[keep]
+                if centroid is not None:
+                    embeddings = _center_embeddings(embeddings, centroid)
 
                 geokeyframe_ids = np.fromiter(
                     (
@@ -370,6 +469,9 @@ def run_ingest(
                 raise RuntimeError(
                     "No prepare outputs matched a kept keyframe; nothing indexed."
                 )
+            # Same transaction as the rows: an index and its centroid must never be
+            # committed apart, or queries centre against vectors that are not.
+            _store_centroid(conn, geo_ref_id, centroid)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -411,6 +513,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Prepare-outputs directory under the map "
         f"(default: {DEFAULT_OUTPUTS_DIRNAME}).",
     )
+    parser.add_argument(
+        "--center-embeddings",
+        action="store_true",
+        help=(
+            "Subtract the index's own centroid from every stored vector and record it."
+            " REQUIRES a matching query-side change that is NOT in the mirror: it was"
+            " reverted after measurement rejected it (mAP 0.325 -> 0.036 on vinci; see"
+            " AI_CONTEXT/bricks.md). Without it the index is centred and queries are"
+            " not, which scores worse than either choice held consistently. Kept only"
+            " to reproduce the experiment."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -427,6 +541,7 @@ def main(argv: list[str] | None = None) -> int:
             map_path=args.map_path,
             min_distance=args.min_distance,
             outputs_dirname=args.outputs_dirname,
+            center_embeddings=args.center_embeddings,
         )
     return 0
 

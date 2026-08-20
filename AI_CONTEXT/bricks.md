@@ -373,6 +373,185 @@ Neither is free, so unlike mAP this has an **interior optimum**:
 | leader/canopy `eps` 2.0 *(today's default)* | 0.374 | 0.531 | 0.512 | 0.480 | 0.672 | 0.713 |
 | leader/canopy `eps` 1.25 | 0.231 | 0.629 | 0.484 | 0.512 | 0.712 | 0.692 |
 | incremental, sum δ 1.35 | 0.205 | 0.609 | 0.507 | 0.512 | 0.702 | 0.702 |
+
+**`hota` supersedes `pair_f1` for the same job** (added 2026-08-18). Pair counting
+weights an object by the square of its observation count, so one heavily-observed object
+can decide the ranking. HOTA averages the same partition agreement over *detections*
+instead: `ass_a` is the mean Jaccard overlap between a detection's cluster and its
+annotation's detection set, `det_a` is `TP/(TP+FP+FN)` counting detections against
+annotations, and `hota` is their geometric mean over five localisation radii. Splitting
+and merging cost `ass_a` symmetrically and leave `det_a` untouched — on vinci three
+`clustering_eps_m` values share `det_a` = 0.306 exactly while `ass_a` ranks them
+0.492 / 0.474 / 0.313. Every sweep row carries all three.
+
+Alongside them the sweep now reports **score calibration** — `ece`, `mce`,
+`overconfidence`, `accuracy_ceiling` and `threshold_spread_strict`. The last one is the
+p90−p10 of the per-prompt best thresholds, i.e. what a single shared threshold has to
+absorb. The reliability table in the JSON is the informative part: on vinci the score is
+monotone against correctness up to ~0.95 and **inverts** above it, which is why the
+acceptance threshold has never transferred between maps.
+
+**And recall, split three ways** — `r_obj` (what retrieval reached, before association or
+any filter), `recall_at_all` (what survived it) and `recall_at_{1,5,10,20}`. This is the
+most consequential of the added measurements: on vinci `r_obj` 0.759 → returned 0.739 →
+**R@1 0.044**. Retrieval loses 24 points, association 2, and the **ranking 36**. Work on
+association has been optimising the 2. `r_obj` is invariant across association configs by
+construction, so it also doubles as a grid sanity check.
+
+Split and merge are now bounded rates rather than a mean — `fragmentation_rate` /
+`merge_rate` (84 % / 3 % at `eps` 0.5, 15 % / 30 % at 3.0) — alongside `homogeneity`,
+`completeness` and `v_measure`. **Do not fit on `v_measure`**: 0.81–0.91 across
+configurations HOTA separates cleanly, exactly the bias towards more clusters the
+literature reports. `panoptic_quality` and its two factors are also on every row;
+`recognition_quality` is the half with no equivalent elsewhere ("how many objects came
+out whole"), the rest duplicates `hota`. Dropped detections are excluded from the
+panoptic false positives — otherwise filtering an outlier scores worse than keeping it.
+
+### Inverted softmax: helps bbhotel, not vinci
+
+`--inverted-softmax-beta 20` on the benchmark rescores the *retrieved* set with
+QB-Norm's normalisation: `exp(beta * sim(q,d) - log sum_b exp(beta * sim(b,d)))`. The
+log-sum term depends on the candidate and a fixed probe bank, never on the query, so it
+is one precomputed scalar per candidate id — **no mirror change and no re-ingest**,
+which is what makes it cheap where centring was not. Build it first:
+
+```bash
+python -m toolbox.benchmark.build_is_denominators <map_path>   # writes benchmark/is-denominators.npz
+```
+
+The bank is the Vinci asset classes plus the map's own annotated classes, four phrasings
+each: hubness is a property of the gallery *relative to a query distribution*, so a
+generic vocabulary characterises the wrong hubs.
+
+| | mAP | mean best F1 | P | R | F1 |
+|---|---|---|---|---|---|
+| bbhotel baseline | 0.782 | 0.811 | 0.734 | 0.711 | 0.722 |
+| bbhotel + IS | **0.817** | **0.841** | 0.897 | 0.055 | 0.103 |
+| vinci baseline | 0.196 | 0.334 | 0.340 | 0.205 | 0.256 |
+| vinci + IS | 0.186 | 0.312 | 0.333 | 0.016 | 0.030 |
+
+**Read the threshold-free pair, not P/R/F1.** `match_score` is `best_sim / best_of_query`,
+so rescoring changes the ratio distribution and the fixed acceptance threshold admits
+almost nothing — precision rises and recall collapses without either being evidence.
+On the comparable columns: bbhotel gains (+0.035 mAP, +0.030 best F1), vinci loses
+slightly (-0.010, -0.022). The retrieval-level R@1 gain measured beforehand (0.135 ->
+0.293 on bbhotel, 0.049 -> 0.086 on vinci) therefore **survives association only on
+bbhotel**; on vinci the tail loss cancels it.
+
+Two things the wiring had to get right, both of which produced a zero-everywhere run
+first:
+
+- **Scale.** The logit `beta*sim - log_denom` is negative, and `match_score`'s ratio
+  turns a negative best into a constant 1.0. The normalised `exp(...)` form ranks
+  identically and stays in (0, 1].
+- **The floor.** `min_similarity` is a floor *on a cosine*. Applied to a ~0.07 inverted
+  softmax value it discarded every cluster. `rank_localization_clusters` now takes
+  `gate_sim` so the floor reads the raw column while the score reads the boosted one —
+  passed **only** for inverted softmax, because a feedback penalty is on the cosine
+  scale and is meant to be able to drop a cluster under the floor.
+
+### Centring the embeddings: measured, and it does not work
+
+`ingest_cli --center-embeddings` subtracts the index's own centroid from every stored
+vector and records it in `object_search_embedding_centroid`.
+
+**Only the ingest half is in the tree.** The query half — subtracting the same vector in
+`services/object_search_online/app.py` — was written, measured, and then **reverted from
+the mirror and from the backend**, because the measurement rejected it. The flag survives
+only to reproduce the experiment: run it today and the index is centred while queries are
+not, which scores worse than either choice held consistently. `run_ingest` logs a warning
+saying exactly that.
+
+It was rejected because **it makes text retrieval much worse.** Measured on vinci
+(`geo_ref` 30, 212117 rows, 258 annotations, 6 prompts), centring the only variable:
+
+| | mAP | best F1 |
+|---|---|---|
+| uncentred, `min_kf` 1 | **0.325** | **0.427** |
+| uncentred, `min_kf` 2 | 0.196 | 0.334 |
+| centred, `min_kf` 1 | 0.036 | 0.104 |
+| centred, `min_kf` 2 | 0.022 | 0.098 |
+
+The ingest half is provably right: stored vectors stay unit-norm, their centre of mass
+falls 0.7563 -> 0.0469, and their hubness drops exactly as `map_analysis` s6 predicts
+(skew 2.841 -> 1.266, antihubs 5.5% -> 1.1%). The index is less hubby and retrieval is
+9x worse, which is the whole finding: **s6 measures image-to-image neighbour structure,
+and a text query does not live in that cloud.**
+
+The mechanism, replicated offline from the files alone (no service, no database — same
+212117 vectors, same centroid norm 0.7563):
+
+| | value |
+|---|---|
+| cos(image, centroid), mean | **0.7563** |
+| cos(text query, centroid), 6 prompts | **0.188 – 0.228** |
+| `\|\|d - m\|\|` after centring, mean | 0.650 |
+| `\|\|q - m\|\|` after centring, mean | 1.120 |
+| cos between the 6 prompts, raw | min 0.677 / mean 0.735 / max 0.794 |
+| cos between the 6 prompts, centred | min 0.740 / mean **0.789** / max 0.837 |
+| top-1000 overlap, raw vs centred | **5 – 25 / 1000** |
+| dominant label share in top-100 | 75–89% -> 43–50% |
+
+Read the second and fourth rows together: `\|\|m\|\| = 0.7563` is 68% of the centred
+query's length, and it is *the same vector for every query*. So centring makes the
+prompts **more** alike (mean pairwise cosine 0.735 -> 0.789) instead of separating them,
+all of them drifting toward `-m`. The top-1000 then barely intersects the raw one, which
+is what a 9x mAP drop looks like. Centring is an intra-modal hubness fix and the query
+path is cross-modal.
+
+This is a named, documented phenomenon, not a local quirk. The **modality gap** (Liang et
+al., *Mind the Gap*, NeurIPS 2022) is a consequence of the cone effect: each encoder's
+outputs occupy a narrow cone, the two cones start apart at initialisation, and the
+contrastive loss preserves the separation rather than closing it. The 0.7563-vs-0.22 pair
+of numbers above is that gap, measured on our own index.
+
+Two families of post-hoc fix, neither needing retraining, neither implemented here:
+
+- **Per-modality centring.** Subtract the *text* mean from text and the *image* mean from
+  images — two centroids, not one shared. This is what the experiment above got wrong.
+  GR-CLIP reports up to +26 NDCG@10 doing exactly this. For us it would mean storing a
+  text centroid too, and knowing which modality a query came from (`by-text` vs
+  `by-image` already distinguishes them).
+- **Similarity normalisation against a query bank.** **QB-Norm** (Bogolin et al., CVPR
+  2022) re-normalises query-gallery similarities using a fixed bank of probe queries, with
+  a Dynamic Inverted Softmax; it needs no retraining and no access to test queries. Dual
+  Bank Sinkhorn normalisation and NeighborRetr extend the same idea.
+
+Do not restart "reduce hubness by centring" for a text-to-image path with a single
+centroid — that is the experiment above, and it has already been run.
+
+To reproduce: restore the query half in the backend (subtract
+`object_search_embedding_centroid.centroid` for the georef from the query embedding and
+renormalise, guarded by `to_regclass` — production has no migration for that table),
+re-sync the mirror, re-ingest with the flag, then benchmark. The four numbers above came
+from `object_search_http_benchmark --online --num-results 400 --min-similarity 0.15
+--candidate-count 1000`, with annotations exported from the store rather than read from
+`benchmark/annotations.geojson`.
+
+### Typed errors, and the ground truth they need
+
+`toolbox/benchmark/error_decomposition.py` (`--decompose` on the sweep) types every
+returned cluster the way TIDE does and prices each type in **recall, never mAP** — strict
+mAP is paid for fragmentation here, so a delta-mAP on the *duplicate* type would read as
+zero. Two axes: `dR@10` (rank-aware, where the loss is) and `dR` over all clusters. The
+pair is the diagnosis. On vinci's baseline: *missed* 108 clusters at +0.252 on both axes,
+*background* 161 at +0.095/+0.000, *duplicate* 96 at +0.037/+0.000, *localisation* 44 at
++0.029/+0.063. So 13 of the 36 ranking points are junk and duplicates holding top-10
+slots — objects that are returned — and 25 are objects never found.
+
+*classification* and *classification+localisation* are **withheld by measurement**:
+`separability` computes the share of annotations with another class inside their own
+matching radius and refuses above a third, printing the number. With no `extent_m` the
+radius is the flat 5 m and that share is 60.5 % on vinci, so both columns are withheld on
+both maps today. Derived from plausible extents it is 0.8–25 % on vinci and 7–58 % on
+bbhotel, so **`extent_m` is the annotation field to produce first** — see
+[`../docs/adr/0009-ground-truth-annotation-contract.md`](../docs/adr/0009-ground-truth-annotation-contract.md),
+which is the whole contract between the annotation tool and the measurement code.
+
+`toolbox/benchmark/label_set_metrics.py` implements OpenLex3D's top-N frequency and set
+ranking over those label sets, model-free: it consumes a ranked label list per object,
+whoever produced it. `map_analysis` `s7` feeds it the detector labels; the embedding route
+is `gdino_labels.encode_classes` plus `rank_labels`.
 | **multicut `geo_pivot` 1.5** | 0.270 | 0.596 | 0.533 | **0.523** | 0.702 | 0.710 |
 
 Three things follow.
@@ -960,11 +1139,23 @@ we do not. The index restarts at zero in every manifest, so only the composite
 its own directory: the whole `metadata.parquet` re-placed in EUS, the manifest poses,
 the annotations, and `embeddings.npy` (a headerless raw float16 dump — `np.load`
 rejects it, which is why `ingest_cli` reads it with `fromfile`). No database, no ANN
-service, no candidate cache. Six sections (`s0` inventory and what is *missing*, `s1`
+service, no candidate cache. Eight sections (`s0` inventory and what is *missing*, `s1`
 per-detection distributions by detector, `s2` free labels and conditional PDFs, `s3`
-ground truth, `s4` pairwise cues, `s5` co-visible counting), a JSON payload, and
+ground truth **and observability**, `s4` pairwise cues, `s5` co-visible counting, `s6`
+embedding hubness, `s7` labels against the annotated label sets), a JSON payload, and
 GeoJSON layers for the livemap. Details and traps in
 [`../toolbox/benchmark/README.md`](../toolbox/benchmark/README.md).
+
+`map_layers.py` writes **ten** layers, in two geometries that mean different things:
+point layers are one measurement at one place (`ground-truth`, `capture-distance`,
+`keyframes`, `detection-grid`, `embedding-agreement`, `depth-blowups`), cell layers are
+2 m squares of ground carrying an aggregate (`depth-range`, `depth-scatter`,
+`detection-coverage`, `parallax`). The four depth/capture fields exist because these
+quantities are **not uniform over a building** and a distribution hides that: where
+depth degrades, where observations of one object scatter (the fragmentation predictor),
+where the detector misses, and where the capture never offered a baseline at all. A
+viewer's own heat-map style is only correct for `detection-grid` — it weights density,
+so on a mean it would draw a count. The Analysis tab of the toolbox draws them.
 
 Three facts it established that constrain any pipeline work (2026-08-18, both maps):
 
@@ -979,6 +1170,23 @@ Three facts it established that constrain any pipeline work (2026-08-18, both ma
   where `chair` falls to x0.2). Detector score is close to flat against attachment;
 - **the embedding recognises the type, never the instance.** Of the ten nearest cutouts
   of a detection, 13-16 % sit on the same physical object (45-71 % on the same class).
+
+Three more the added measurements established (2026-08-18, vinci):
+
+- **the capture is not the limiting factor on vinci.** Every annotation has the full
+  twelve azimuth sectors available and 98 % of achieved observation pairs exceed 5° of
+  parallax, while achieved coverage sits at 0.67 — the geometry is there and the
+  association is not using it. `s3` reports the achieved/available pair for exactly this
+  reading, and counts annotations under a degenerate baseline as a capture ceiling;
+- **the embedding space is hubbed, and centring is most of the fix.** k-occurrence
+  skewness 3.96, antihubs 8.4 % — 8 % of cutouts are nobody's neighbour and no threshold
+  reaches them. Subtracting the mean embedding takes those to 1.95 and 2.7 %. Hubs are
+  *not* enriched in `gdino_venue` (65 % against a 76.9 % base rate), so this is a
+  geometry problem rather than a labelling one. See `s6`;
+- **detections are sampled on depth discontinuities five times more often than chance**
+  (5.3 % against 1.0 % of pixels; 16.6 % beyond 15 m), with a median in-box depth ratio
+  of 1.68. Flying pixels are rare (0.10 %) and are *not* the mechanism. See
+  `depth_boundary_quality.py`.
 
 ## Where images and depths come from
 

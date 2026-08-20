@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,7 +33,20 @@ import numpy as np
 import pyarrow.parquet as pq
 from scipy.spatial import cKDTree
 
-from toolbox.benchmark.object_search_http_benchmark import Annotation, load_annotations
+from toolbox.benchmark.annotation_store import (
+    read_ground_truth_collection,
+    source_field,
+)
+from toolbox.benchmark.label_set_metrics import (
+    DEFAULT_TOP_N,
+    evaluate_label_sets,
+    has_label_sets,
+)
+from toolbox.benchmark.label_set_metrics import report_lines as label_set_report_lines
+from toolbox.benchmark.object_search_http_benchmark import (
+    Annotation,
+    parse_annotated_features,
+)
 from toolbox.bricks.georef_source import PoseSource
 from toolbox.bricks.ingest_cli import EMBEDDING_DIM
 from toolbox.bricks.vendored.erp import theta_phi_to_opengl_ray_batch
@@ -53,6 +66,26 @@ RANGE_BANDS: tuple[tuple[float, float], ...] = (
 MAX_TRUSTED_RANGE_M = 15.0
 #: Detector score buckets, for the calibration table.
 SCORE_BUCKETS = (0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 1.01)
+#: Azimuth bins the viewpoint coverage around an annotation is counted on. Twelve
+#: bins is 30 degrees each: coarse enough that a handful of keyframes can fill one,
+#: fine enough that a capture which only walked past one side cannot reach half.
+COVERAGE_BINS = 12
+#: Two viewpoints closer together than this, as seen from the object, intersect at
+#: too shallow an angle to resolve their disagreement about its depth. Below it a
+#: second observation adds photometric evidence but no geometric evidence.
+USEFUL_PARALLAX_DEG = 5.0
+#: Highest `min_keyframes_per_cluster` the retention curve is reported at. The online
+#: default is 2, and the curve exists to show what raising it costs: past a handful of
+#: keyframes the surviving share is flat and the extra rows say nothing.
+KEYFRAME_THRESHOLD_MAX = 8
+#: Rows the hubness estimate samples. A k-occurrence count scales with how many rows
+#: could have retrieved it, so the sample is a fixed size rather than a fixed share:
+#: two maps only compare when every row had the same number of chances to be picked.
+HUBNESS_SAMPLE = 20000
+#: Neighbours each sampled row retrieves. The query path asks for far more, but
+#: hubness is a property of the space rather than of the request, and it is sharpest
+#: at small k — a large k averages the asymmetry away.
+HUBNESS_K = 10
 
 
 @dataclass
@@ -104,9 +137,31 @@ class GroundTruth:
     erp_uv: np.ndarray
     depth_m: np.ndarray
     level: np.ndarray
+    #: The annotations these arrays were built from, in the same order. Kept because
+    #: the ADR 0009 label sets are lists, which no aligned array can hold.
+    annotations: tuple[Annotation, ...] = ()
 
     def __len__(self) -> int:
         return int(self.class_name.size)
+
+    @property
+    def object_key(self) -> np.ndarray:
+        """One key per annotation naming the object it belongs to.
+
+        `object_id` when the annotation declares one, otherwise the annotation's own id:
+        two clicks are one object only where the annotator said so. Counting rows
+        instead reads 14 clicks on one camera as 14 cameras, which is what made s5's
+        co-visible bound look like a 14x undercount when it was exact.
+        """
+        return np.array(
+            [item.object_id or f"#{item.id}" for item in self.annotations],
+            dtype=object,
+        )
+
+    def object_count(self, mask: np.ndarray | None = None) -> int:
+        """Distinct objects among the selected annotations."""
+        keys = self.object_key
+        return int(np.unique(keys if mask is None else keys[mask]).size)
 
 
 @dataclass
@@ -213,10 +268,31 @@ def load_detections(map_path: Path, pose_source: PoseSource) -> Detections:
     )
 
 
+def _as_float(value: object) -> float:
+    """A float, or NaN for a property that is absent or unparseable."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _altitude(properties: Mapping[str, object]) -> float:
+    """The click's altitude, 0.0 when it has none — the third coordinate is optional."""
+    value = _as_float(properties.get("altitude"))
+    return 0.0 if math.isnan(value) else value
+
+
 def load_ground_truth(map_path: Path, pose_source: PoseSource) -> GroundTruth:
-    """Annotations in EUS, keeping the panorama and pixel each one was clicked in."""
-    path = map_path / "benchmark" / "annotations.geojson"
-    if not path.is_file():
+    """Annotations in EUS, keeping the panorama and pixel each one was clicked in.
+
+    Read from `object-search-annotations.db` when it exists, not from
+    `benchmark/annotations.geojson`: that export is only rewritten when a benchmark run
+    starts, so s0 counted 9 annotations on vinci-st-domingue-zone-1 where the store held
+    12. See `toolbox.benchmark.annotation_store`.
+    """
+    _, collection = read_ground_truth_collection(map_path)
+    pairs = parse_annotated_features(collection, 5.0)
+    if not pairs:
         # A freshly prepared map has no annotations yet, which is a state to describe
         # rather than an error: s0 still says what the index holds, and every
         # ground-truth section reports that it has nothing to compare against.
@@ -230,24 +306,24 @@ def load_ground_truth(map_path: Path, pose_source: PoseSource) -> GroundTruth:
             depth_m=empty,
             level=np.empty(0, dtype=object),
         )
-    annotations: Sequence[Annotation] = load_annotations(path, 5.0)
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    annotations: Sequence[Annotation] = [item for _, item in pairs]
     wgs84 = []
     keyframes: list[str] = []
     uv = []
     depths = []
-    for feature in raw["features"]:
-        point = feature["geometry"]["coordinates"]
-        properties = feature["properties"]
-        wgs84.append([point[0], point[1], point[2] if len(point) > 2 else 0.0])
-        keyframes.append(str(properties.get("source_keyframe_id") or ""))
+    for properties, annotation in pairs:
+        wgs84.append([annotation.lng, annotation.lat, _altitude(properties)])
+        keyframe_id = source_field(properties, "keyframe_id")
+        # Not `or ""`: the store writes `keyframeId` as an integer and keyframe 0 is a
+        # real keyframe, which a falsiness test would erase.
+        keyframes.append("" if keyframe_id is None else str(keyframe_id))
         uv.append(
             [
-                float(properties.get("source_erp_u", np.nan)),
-                float(properties.get("source_erp_v", np.nan)),
+                _as_float(source_field(properties, "erp_u")),
+                _as_float(source_field(properties, "erp_v")),
             ]
         )
-        depths.append(float(properties.get("depth_m", np.nan)))
+        depths.append(_as_float(source_field(properties, "depth_m")))
     eus = np.asarray(
         pose_source.geo_transform.wgs84_to_local_positions(
             np.asarray(wgs84, dtype=np.float64)
@@ -264,6 +340,7 @@ def load_ground_truth(map_path: Path, pose_source: PoseSource) -> GroundTruth:
         erp_uv=np.asarray(uv, dtype=np.float64),
         depth_m=np.asarray(depths, dtype=np.float64),
         level=np.array([item.level or "" for item in annotations]),
+        annotations=tuple(annotations),
     )
 
 
@@ -399,7 +476,8 @@ def section_inventory(data: MapData, report: Report) -> None:
             missing.append(f"{source} n'a pas de score de détection")
     ground_truth = data.ground_truth
     report.say(
-        f"  vérités terrain            {len(ground_truth)} sur "
+        f"  vérités terrain            {ground_truth.object_count()} objets "
+        f"({len(ground_truth)} clics) sur "
         f"{len(set(ground_truth.class_name.tolist()))} classes ; "
         f"{int((ground_truth.source_keyframe_id != '').sum())} avec keyframe source, "
         f"{int(np.isfinite(ground_truth.erp_uv).all(axis=1).sum())} avec pixel source"
@@ -408,7 +486,7 @@ def section_inventory(data: MapData, report: Report) -> None:
         accuracy = _label_counts(ground_truth.accuracy_m.astype(str))
         report.say(f"    précisions déclarées     {accuracy}")
     else:
-        missing.append("aucune vérité terrain (benchmark/annotations.geojson absent)")
+        missing.append("aucune vérité terrain (magasin d'annotations vide)")
     report.say(
         f"  verdicts humains           {len(data.reviews)} ; "
         f"étiquettes de partition {len(data.group_labels)}"
@@ -799,8 +877,7 @@ def embedding_neighbourhood_purity(
             )
             same_class += float(
                 (
-                    attachment.nearest_class[picked]
-                    == attachment.nearest_class[query]
+                    attachment.nearest_class[picked] == attachment.nearest_class[query]
                 ).mean()
             )
             counted += 1
@@ -876,15 +953,65 @@ def _keyframe_positions(pose_source: PoseSource) -> tuple[np.ndarray, np.ndarray
     return identifiers, positions
 
 
-def _max_parallax_deg(origins: np.ndarray, target: np.ndarray) -> float:
-    """Widest angle under which a set of viewpoints sees one point."""
-    if origins.shape[0] < 2:
-        return 0.0
+def _parallax_cosines(origins: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Cosine of the angle between every pair of viewing rays onto one point."""
     offsets = target - origins
     norms = np.linalg.norm(offsets, axis=1, keepdims=True)
     directions = offsets / np.where(norms == 0.0, 1.0, norms)
     cosines = np.clip(directions @ directions.T, -1.0, 1.0)
-    return float(np.degrees(np.arccos(cosines.min())))
+    left, right = np.triu_indices(origins.shape[0], k=1)
+    return cosines[left, right]
+
+
+def _max_parallax_deg(origins: np.ndarray, target: np.ndarray) -> float:
+    """Widest angle under which a set of viewpoints sees one point."""
+    if origins.shape[0] < 2:
+        return 0.0
+    return float(np.degrees(np.arccos(_parallax_cosines(origins, target).min())))
+
+
+def _useful_parallax_share(
+    origins: np.ndarray, target: np.ndarray, minimum_deg: float = USEFUL_PARALLAX_DEG
+) -> float:
+    """Share of viewpoint pairs whose parallax is wide enough to triangulate on.
+
+    The maximum parallax is set by the two extreme viewpoints and says nothing about
+    the rest. Twenty observations from one standstill and two from opposite ends of a
+    room report the same maximum; this separates them, because only the second gives
+    an association more than one geometric opinion to average.
+    """
+    if origins.shape[0] < 2:
+        return float("nan")
+    angles = np.degrees(np.arccos(_parallax_cosines(origins, target)))
+    return float((angles >= minimum_deg).mean())
+
+
+def _azimuth_coverage(
+    origins: np.ndarray, target: np.ndarray, bins: int = COVERAGE_BINS
+) -> tuple[float, float]:
+    """How much of the ring around a point the viewpoints occupy, and its widest hole.
+
+    Only positional coverage is measured, not rotational: every keyframe is an
+    equirectangular panorama and therefore already looks in every direction, so
+    "where was the camera pointing" carries no information here.
+
+    Returns:
+        Occupied share of the azimuth bins, and the widest empty angular gap in
+        degrees. A capture that walked straight past an object occupies two opposite
+        bins and leaves a gap near 180; one that circled it leaves a small gap.
+    """
+    if origins.shape[0] == 0:
+        return float("nan"), float("nan")
+    offsets = origins - target
+    azimuth = np.arctan2(offsets[:, 0], -offsets[:, 2])
+    occupied = np.unique(np.floor((azimuth + math.pi) / (2 * math.pi) * bins) % bins)
+    ordered = np.sort(azimuth)
+    if ordered.size == 1:
+        return 1.0 / bins, 360.0
+    gaps = np.diff(ordered)
+    wrap = 2 * math.pi - (ordered[-1] - ordered[0])
+    widest = max(float(gaps.max()), float(wrap))
+    return float(occupied.size / bins), float(np.degrees(widest))
 
 
 def _horizontal_anisotropy(positions: np.ndarray) -> float:
@@ -918,6 +1045,14 @@ class Observability:
     #: the capture walked a straight line past the object and no baseline exists
     #: across the corridor; near 1 it circled it.
     trajectory_anisotropy: np.ndarray
+    #: Share of the azimuth bins around the object occupied by the viewpoints that
+    #: actually produced attached detections, and by every viewpoint in range.
+    achieved_coverage: np.ndarray
+    available_coverage: np.ndarray
+    #: Widest azimuth sector around the object that no in-range viewpoint occupies.
+    available_gap_deg: np.ndarray
+    #: Share of achieved observation pairs wide enough to triangulate on.
+    useful_pair_share: np.ndarray
 
 
 def observability(
@@ -942,6 +1077,10 @@ def observability(
         available_parallax_deg=np.zeros(count),
         nearest_keyframe_m=np.full(count, np.inf),
         trajectory_anisotropy=np.full(count, np.nan),
+        achieved_coverage=np.full(count, np.nan),
+        available_coverage=np.full(count, np.nan),
+        available_gap_deg=np.full(count, np.nan),
+        useful_pair_share=np.full(count, np.nan),
     )
     attached = detections.placed & attachment.attached(radius_m)
     for index in range(count):
@@ -953,6 +1092,9 @@ def observability(
             result.achieved_parallax_deg[index] = _max_parallax_deg(
                 detections.origin_eus[rows], target
             )
+            seen_from = np.unique(detections.origin_eus[rows], axis=0)
+            result.achieved_coverage[index] = _azimuth_coverage(seen_from, target)[0]
+            result.useful_pair_share[index] = _useful_parallax_share(seen_from, target)
         near = tree.query_ball_point(target, MAX_TRUSTED_RANGE_M)
         result.available_keyframes[index] = len(near)
         if near:
@@ -962,9 +1104,66 @@ def observability(
             result.trajectory_anisotropy[index] = _horizontal_anisotropy(
                 keyframe_positions[near]
             )
+            coverage, gap = _azimuth_coverage(keyframe_positions[near], target)
+            result.available_coverage[index] = coverage
+            result.available_gap_deg[index] = gap
         distance, _ = tree.query(target, k=1)
         result.nearest_keyframe_m[index] = float(distance)
     return result
+
+
+def keyframe_threshold_curve(
+    profile: Observability,
+    covered: np.ndarray,
+    indexed: np.ndarray,
+    max_keyframes: int = KEYFRAME_THRESHOLD_MAX,
+) -> list[dict[str, float]]:
+    """What `min_keyframes_per_cluster` costs, read against the ground truth.
+
+    The online path drops any cluster observed from fewer than
+    `min_keyframes_per_cluster` distinct keyframes (default 2). That threshold buys
+    precision by discarding evidence, and this curve prices it: at each candidate
+    value, how many annotations still have enough observing keyframes to survive, and
+    — among those — what share the depth-free measurement finds covered.
+
+    The two series answer different questions. `retained_share` is a ceiling the
+    threshold imposes before any ranking runs. `covered_share` says whether the
+    annotations it keeps are the ones the detector actually found: a threshold that
+    raises it is selecting for quality, one that leaves it flat is only losing recall.
+
+    Args:
+        profile: per-annotation observability; `keyframes` is the distinct-keyframe
+            count of the detections attached to each annotation.
+        covered: the depth-free result per annotation, from `seen_in_own_keyframe`.
+        indexed: whether each annotation's source panorama is in the index at all —
+            annotations without one are not measurable by `covered` and are excluded
+            from `covered_share`, though they still count in `retained_share`.
+        max_keyframes: highest threshold reported.
+
+    Returns:
+        One row per threshold from 1 upwards, ordered.
+    """
+    total = int(profile.keyframes.size)
+    rows: list[dict[str, float]] = []
+    for threshold in range(1, max_keyframes + 1):
+        survives = profile.keyframes >= threshold
+        measurable = survives & indexed
+        rows.append(
+            {
+                "min_keyframes": float(threshold),
+                "retained": float(survives.sum()),
+                "retained_share": (
+                    float(survives.sum() / total) if total else float("nan")
+                ),
+                "covered_share": (
+                    float(covered[measurable].mean())
+                    if measurable.any()
+                    else float("nan")
+                ),
+                "measurable": float(measurable.sum()),
+            }
+        )
+    return rows
 
 
 def section_ground_truth(
@@ -1005,22 +1204,26 @@ def section_ground_truth(
         if not rows.any():
             continue
         report.say(
-            f"    {name[:26]:26s} mesurables {int(rows.sum()):4d}  "
+            f"    {name[:26]:26s} mesurables {int(rows.sum()):4d} clics"
+            f" sur {ground_truth.object_count(rows):3d} objets  "
             f"couvertes {covered[rows].mean():6.1%}"
         )
 
     attachment = attach_to_ground_truth(detections, ground_truth)
     report.say()
-    report.say(
-        "  --- rattachement 3D par rayon (secondaire : dépend de la profondeur)"
-    )
+    report.say("  --- rattachement 3D par rayon (secondaire : dépend de la profondeur)")
     for radius in radii:
         attached = detections.placed & attachment.attached(radius)
         reached = np.unique(attachment.nearest[attached])
+        hit = np.zeros(len(ground_truth), dtype=bool)
+        hit[reached] = True
+        objects_reached = ground_truth.object_count(hit)
+        objects_total = ground_truth.object_count()
         report.say(
             f"    {radius:4.1f} m : {int(attached.sum()):7d} détections rattachées, "
-            f"{reached.size:4d}/{len(ground_truth)} annotations atteintes "
-            f"({reached.size / len(ground_truth):.1%})"
+            f"{objects_reached:3d}/{objects_total} objets atteints "
+            f"({objects_reached / objects_total:.1%}) — "
+            f"{reached.size}/{len(ground_truth)} clics"
         )
 
     radius = 2.0
@@ -1050,15 +1253,56 @@ def section_ground_truth(
         "  (0 = la capture est passée en ligne droite, aucune base transversale ;"
         " 1 = elle a tourné autour)"
     )
+    report.say()
+    report.say(f"  --- couverture angulaire ({COVERAGE_BINS} secteurs d'azimut)")
+    report.say(_percentile_line("secteurs occupés OBTENUS", profile.achieved_coverage))
+    report.say(
+        _percentile_line("secteurs occupés DISPONIBLES", profile.available_coverage)
+    )
+    report.say(
+        _percentile_line("plus grand secteur vide", profile.available_gap_deg, "deg")
+    )
+    report.say(
+        _percentile_line(
+            f"paires utiles (>={USEFUL_PARALLAX_DEG:g} deg)", profile.useful_pair_share
+        )
+    )
+    report.say(
+        "  (l'écart obtenu/disponible dit si c'est l'association ou la capture qui"
+        " limite ; la part de paires utiles dit si les observations apportent une"
+        " géométrie ou seulement une redondance photométrique)"
+    )
+
+    curve = keyframe_threshold_curve(profile, covered, indexed)
+    report.say()
+    report.say("  --- coût du seuil min_keyframes_per_cluster (défaut en ligne : 2)")
+    for row in curve:
+        report.say(
+            f"    >={int(row['min_keyframes']):2d} keyframes : "
+            f"{int(row['retained']):4d}/{len(ground_truth)} annotations retenues "
+            f"({row['retained_share']:6.1%})  couvertes {row['covered_share']:6.1%}"
+        )
+    report.say(
+        "  (la part retenue est un plafond que le seuil impose avant tout classement ;"
+        " si la part couverte ne monte pas avec lui, il ne trie rien,"
+        " il perd du rappel)"
+    )
+
+    degenerate = (profile.available_keyframes > 0) & (
+        profile.available_parallax_deg < USEFUL_PARALLAX_DEG
+    )
+    report.say(
+        f"  annotations vues sous une base dégénérée (<{USEFUL_PARALLAX_DEG:g} deg"
+        f" disponibles) : {int(degenerate.sum())}/{len(ground_truth)}"
+        " — aucune association ne les placera, c'est un plafond de capture"
+    )
 
     unseen = profile.detections == 0
     never_looked = unseen & (profile.available_keyframes == 0)
     looked_missed = unseen & (profile.available_keyframes > 0)
     not_indexed = unseen & ~indexed
     report.say()
-    report.say(
-        f"  --- annotations sans détection à {radius:g} m : {int(unseen.sum())}"
-    )
+    report.say(f"  --- annotations sans détection à {radius:g} m : {int(unseen.sum())}")
     report.say(
         f"    jamais regardées (aucun keyframe à {MAX_TRUSTED_RANGE_M:g} m) : "
         f"{int(never_looked.sum())}"
@@ -1096,7 +1340,13 @@ def section_ground_truth(
             "available_parallax_deg": _percentiles(profile.available_parallax_deg),
             "nearest_keyframe_m": _percentiles(profile.nearest_keyframe_m),
             "trajectory_anisotropy": _percentiles(profile.trajectory_anisotropy),
+            "achieved_coverage": _percentiles(profile.achieved_coverage),
+            "available_coverage": _percentiles(profile.available_coverage),
+            "available_gap_deg": _percentiles(profile.available_gap_deg),
+            "useful_pair_share": _percentiles(profile.useful_pair_share),
         },
+        "keyframe_threshold": curve,
+        "degenerate_baseline": int(degenerate.sum()),
         "unseen": {
             "total": int(unseen.sum()),
             "never_looked": int(never_looked.sum()),
@@ -1180,9 +1430,7 @@ def section_counting(
         f"({cross_source / max(overlapping, 1):.1%})"
     )
     if cosines:
-        report.say(
-            _percentile_line("cosinus des recouvrantes", np.asarray(cosines))
-        )
+        report.say(_percentile_line("cosinus des recouvrantes", np.asarray(cosines)))
         report.say(
             "  (proche de 1 = la même chose proposée deux fois ; c'est ce qui doit"
             " être retiré avant de compter)"
@@ -1198,11 +1446,13 @@ def section_counting(
         report.say()
         report.say("  --- borne inférieure contre le nombre réel d'objets")
         report.say(
-            "    par classe : max sur les vues du nombre de boîtes disjointes,"
-            " contre le nombre d'annotations de la classe"
+            "    par classe : max sur les vues du nombre de boîtes disjointes, contre"
+            " le nombre d'OBJETS de la classe (object_id distincts, pas de clics)"
         )
         for name in sorted(set(data.ground_truth.class_name.tolist())):
-            truth = int((data.ground_truth.class_name == name).sum())
+            in_class = data.ground_truth.class_name == name
+            objects = data.ground_truth.object_count(in_class)
+            clicks = int(in_class.sum())
             near = detections.placed & attachment.attached(2.0)
             rows = near & (attachment.nearest_class == name)
             if not rows.any():
@@ -1213,7 +1463,8 @@ def section_counting(
                 left, _ = _overlapping_pairs(detections, view)
                 best = max(best, view.size - left.size)
             report.say(
-                f"    {name[:26]:26s} borne {best:4d}   annotations {truth:4d}"
+                f"    {name[:26]:26s} borne {best:4d}   objets {objects:4d}"
+                f"   ({clicks} clics)"
             )
     report.data["s5"] = {
         "sampled_keyframes": int(chosen.size),
@@ -1275,12 +1526,12 @@ def _stratified_pairs(
     mixed_left = generator.choice(holders, third) if holders.size else empty
     mixed_right = generator.choice(free, third) if free.size else empty
     size = min(mixed_left.size, mixed_right.size)
-    left = np.concatenate(
-        [*same_left, different_left, mixed_left[:size]]
-    ).astype(np.int64)
-    right = np.concatenate(
-        [*same_right, different_right, mixed_right[:size]]
-    ).astype(np.int64)
+    left = np.concatenate([*same_left, different_left, mixed_left[:size]]).astype(
+        np.int64
+    )
+    right = np.concatenate([*same_right, different_right, mixed_right[:size]]).astype(
+        np.int64
+    )
     return left, right
 
 
@@ -1307,8 +1558,7 @@ def _pair_cues(
             np.float64
         ),
         "range_ratio": (
-            detections.range_m[left]
-            / np.maximum(detections.range_m[right], 1e-6)
+            detections.range_m[left] / np.maximum(detections.range_m[right], 1e-6)
         ),
     }
     if embeddings is not None:
@@ -1427,6 +1677,221 @@ def section_pairs(
     }
 
 
+@dataclass
+class Hubness:
+    """How unevenly a set of embeddings shares out the role of nearest neighbour."""
+
+    #: How many of the sampled rows retrieved this row in their top `k`.
+    k_occurrences: np.ndarray
+    #: Skewness of that count. Zero means every row is someone's neighbour as often
+    #: as any other; above 1 a minority is absorbing the retrievals.
+    skewness: float
+    #: Share of rows retrieved at least five times as often as chance would give.
+    hub_share: float
+    #: Share of all retrievals absorbed by the busiest 1 % of rows.
+    hub_mass: float
+    #: Share of rows no sampled query ever retrieved. Nothing will ever find them.
+    antihub_share: float
+
+
+def _k_occurrences(unit: np.ndarray, k: int, block: int = 2048) -> np.ndarray:
+    """Count, per row, how many other rows hold it in their `k` nearest neighbours."""
+    count = unit.shape[0]
+    occurrences = np.zeros(count, dtype=np.int64)
+    for start in range(0, count, block):
+        stop = min(start + block, count)
+        cosines = unit[start:stop] @ unit.T
+        cosines[np.arange(stop - start), np.arange(start, stop)] = -2.0
+        top = np.argpartition(-cosines, k, axis=1)[:, :k]
+        np.add.at(occurrences, top.ravel(), 1)
+    return occurrences
+
+
+def hubness(unit: np.ndarray, k: int = HUBNESS_K) -> Hubness:
+    """Measure the hub/antihub asymmetry of an already L2-normalised sample.
+
+    In a high-dimensional space the nearest-neighbour relation stops being symmetric:
+    a few vectors sit close to the centre of mass and are therefore close to almost
+    everything, so they surface for queries that have nothing to do with them, while
+    others are never anyone's neighbour. Both halves cost the pipeline something — a
+    hub is a false positive that recurs across unrelated prompts, an antihub is a
+    detection retrieval can never reach, whatever the threshold.
+
+    Args:
+        unit: Row-normalised embeddings, one sample per row.
+        k: Neighbours each row retrieves.
+
+    Returns:
+        The k-occurrence counts and the four summaries read off them.
+    """
+    occurrences = _k_occurrences(unit, k)
+    values = occurrences.astype(np.float64)
+    deviation = values - values.mean()
+    spread = float(np.sqrt((deviation**2).mean()))
+    skewness = float((deviation**3).mean() / spread**3) if spread > 0 else 0.0
+    ordered = np.sort(values)[::-1]
+    top = max(1, int(round(0.01 * values.size)))
+    total = float(values.sum())
+    return Hubness(
+        k_occurrences=occurrences,
+        skewness=skewness,
+        hub_share=float((values >= 5 * k).mean()),
+        hub_mass=float(ordered[:top].sum() / total) if total > 0 else float("nan"),
+        antihub_share=float((values == 0).mean()),
+    )
+
+
+def section_hubness(
+    data: MapData, report: Report, sample: int = HUBNESS_SAMPLE, k: int = HUBNESS_K
+) -> None:
+    """S6 — the embedding space's own geometry, with no ground truth involved.
+
+    The only section that needs neither annotations nor poses. It asks whether the
+    index is a space retrieval can work in at all: if a handful of cutouts are the
+    nearest neighbour of everything, every prompt inherits the same false positives,
+    and no threshold, association or rescoring downstream can undo it.
+
+    The centred column says what removing the cloud's centre of mass would do to
+    **image-to-image** neighbour structure, and nothing more. It is *not* a prediction
+    about text queries, and it was read that way once: an index ingested with
+    `--center-embeddings` on vinci did drop exactly as measured here (skew 2.841 ->
+    1.266, antihubs 5.5% -> 1.1%) and text retrieval collapsed 9x anyway, mAP 0.325 ->
+    0.036. A text embedding does not sit inside this cloud — MetaCLIP's modality gap —
+    so the centre subtracted here is not its centre, and removing it moves the query
+    somewhere unrelated. Hubness among the cutouts is real; it is not what limits
+    text-to-image retrieval.
+    """
+    report.head("S6 — hubness de l'espace d'embedding")
+    embeddings = data.embeddings
+    if embeddings is None:
+        report.say("  aucun embedding lisible")
+        return
+    detections = data.detections
+    total = embeddings.shape[0]
+    generator = np.random.default_rng(0)
+    rows = (
+        np.sort(generator.choice(total, size=sample, replace=False))
+        if total > sample
+        else np.arange(total)
+    )
+    unit = _unit_rows(embeddings, rows)
+    report.say(f"  {rows.size} lignes échantillonnées sur {total}, k={k}")
+
+    raw = hubness(unit, k)
+    centred = unit - unit.mean(axis=0, keepdims=True)
+    centred /= np.maximum(np.linalg.norm(centred, axis=1, keepdims=True), 1e-6)
+    after = hubness(centred, k)
+    report.say(f"  {'':22s} {'brut':>10s} {'centré':>10s}")
+    for name, left, right in (
+        ("asymétrie de N_k", raw.skewness, after.skewness),
+        (f"part de hubs (>={5 * k})", raw.hub_share, after.hub_share),
+        ("masse du 1 % le plus vu", raw.hub_mass, after.hub_mass),
+        ("part d'antihubs (N_k=0)", raw.antihub_share, after.antihub_share),
+    ):
+        report.say(f"  {name:22s} {left:10.3f} {right:10.3f}")
+    report.say(
+        "  (asymétrie > 1 = une minorité absorbe les retrouvailles ; la colonne"
+        " centrée est ce qu'un simple recentrage des embeddings rendrait)"
+    )
+
+    top = 20
+    order = np.argsort(raw.k_occurrences)[::-1][:top]
+    sample_labels = detections.label[rows]
+    report.say()
+    report.say(f"  --- ce que sont les {top} plus gros hubs (taux de base en regard)")
+    for label, count in _label_counts(sample_labels[order])[:6]:
+        base = float((sample_labels == label).mean())
+        report.say(
+            f"    {label[:30]:30s} {count:3d}/{top} ({count / top:5.1%})"
+            f"  base {base:5.1%}  x{count / top / max(base, 1e-9):4.1f}"
+        )
+    report.say(
+        _percentile_line("portée des hubs", detections.range_m[rows[order]], "m")
+    )
+    report.say(
+        _percentile_line("portée de l'échantillon", detections.range_m[rows], "m")
+    )
+    report.data["s6"] = {
+        "sampled": int(rows.size),
+        "k": k,
+        "raw": {
+            "skewness": raw.skewness,
+            "hub_share": raw.hub_share,
+            "hub_mass": raw.hub_mass,
+            "antihub_share": raw.antihub_share,
+        },
+        "centred": {
+            "skewness": after.skewness,
+            "hub_share": after.hub_share,
+            "hub_mass": after.hub_mass,
+            "antihub_share": after.antihub_share,
+        },
+        "hub_labels": {
+            label: {
+                "count": count,
+                "base_rate": float((sample_labels == label).mean()),
+            }
+            for label, count in _label_counts(sample_labels[order])[:6]
+        },
+    }
+
+
+def section_label_sets(
+    data: MapData, report: Report, radius_m: float = 2.0, top_n: int = DEFAULT_TOP_N
+) -> None:
+    """S7 — the free labels against the annotation's *set* of acceptable ones.
+
+    The proposals are the map's own detector labels, ordered by detector score, not a
+    text-embedding ranking: this tool loads no model, and keeping that property is worth
+    more than the sharper ranking a MetaCLIP pass would give. `gdino_labels.py` is where
+    the embedding route lives when it is wanted, and `label_set_metrics.rank_labels`
+    consumes its vectors.
+
+    Until the annotations carry label sets this section reports that they do not, rather
+    than a table of zeros — the same rule `s0` applies to everything else.
+    """
+    report.head("S7 — labels contre les ensembles annotés (ADR 0009)")
+    ground_truth = data.ground_truth
+    annotations = list(ground_truth.annotations)
+    if not annotations:
+        report.say("  aucune vérité terrain")
+        return
+    scored = [item for item in annotations if has_label_sets(item)]
+    if not scored:
+        report.say(
+            f"  0/{len(annotations)} annotations portent des ensembles de labels —"
+            " rien à mesurer (voir ADR 0009)"
+        )
+        report.data["s7"] = {"coverage": 0.0, "annotations": len(annotations)}
+        return
+
+    detections = data.detections
+    attachment = attach_to_ground_truth(detections, ground_truth)
+    attached = detections.placed & attachment.attached(radius_m)
+    proposals: dict[str, list[str]] = {}
+    for index, annotation in enumerate(annotations):
+        rows = np.flatnonzero(attached & (attachment.nearest == index))
+        if rows.size == 0:
+            continue
+        order = rows[np.argsort(-detections.score[rows])]
+        seen: dict[str, None] = {}
+        for label in detections.label[order].tolist():
+            seen.setdefault(str(label), None)
+        proposals[annotation.id] = list(seen)[:top_n]
+
+    result = evaluate_label_sets(proposals, annotations, top_n)
+    for line in label_set_report_lines(result):
+        report.say(line)
+    report.data["s7"] = {
+        "coverage": result.coverage,
+        "scored": result.scored,
+        "annotations": result.annotations,
+        "unproposed": result.unproposed,
+        "top_n": result.top_n,
+        "mean_set_ranking": result.mean_set_ranking,
+    }
+
+
 #: Every section, in the order the report prints them.
 SECTIONS = {
     "s0": section_inventory,
@@ -1435,6 +1900,8 @@ SECTIONS = {
     "s3": section_ground_truth,
     "s4": section_pairs,
     "s5": section_counting,
+    "s6": section_hubness,
+    "s7": section_label_sets,
 }
 
 

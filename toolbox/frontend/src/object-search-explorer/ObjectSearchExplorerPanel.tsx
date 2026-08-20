@@ -1,8 +1,8 @@
 import {
-  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type CSSProperties,
+  type ReactElement,
   lazy,
   Suspense,
   useCallback,
@@ -14,11 +14,13 @@ import {
 
 import type { MapSummary } from "../api";
 import CollapsibleSection from "../annotations/CollapsibleSection";
+import { useExplorerAnnotationWorkspace } from "../annotations/ExplorerAnnotationWorkspace";
 import {
-  ExplorerAnnotationControls,
-  ExplorerAnnotationList,
-  useExplorerAnnotationWorkspace,
-} from "../annotations/ExplorerAnnotationWorkspace";
+  readHandoff,
+  withPanoramaPoint,
+  withProposal,
+  writeHandoff,
+} from "../annotation/handoff";
 import LivemapAnnotation, { type LivemapCone } from "../annotations/LivemapAnnotation";
 import type { LivemapMarker, LivemapPolygon, LivemapSegment } from "../annotations/types";
 import DismissibleAlert from "../DismissibleAlert";
@@ -32,12 +34,13 @@ import {
   fetchKeyframeGraph,
   fetchMetadataKeyframes,
   fetchMetadataMarkers,
-  fetchMetadataRow,
   fetchMetadataRows,
   fetchMetadataStatus,
+  fetchProposalNeighborProjections,
   indexKeyframeDepthPreviewUrl,
   indexKeyframeEquirectPreviewUrl,
   projectWorldPoint,
+  proposalNeighborProjectionRenderUrl,
   resolveDepthPin,
   rowRenderUrl,
   rowThumbnailUrl,
@@ -48,10 +51,11 @@ import type {
   KeyframeMarker,
   KeyframeSummary,
   MetadataKeyframesResponse,
-  MetadataRowDetail,
   MetadataRowRecord,
   MetadataStatusResponse,
   MetadataSummary,
+  ProposalNeighborProjection,
+  ProposalNeighborProjectionsResponse,
 } from "../index-explorer/types";
 import {
   KEYFRAME_GRAPH_COLOR,
@@ -68,7 +72,13 @@ import {
   VIEW_CONE_HALF_ANGLE_DEG,
 } from "../theme";
 import BboxPostProcessControls from "./BboxPostProcessControls";
-import { bboxArea, bboxPolygonRatios, postProcessDetections } from "./bboxPostProcess";
+import {
+  bboxArea,
+  bboxPolygonRatios,
+  DEFAULT_BBOX_POST_PROCESS,
+  detectorSourceFamily,
+  postProcessDetections,
+} from "./bboxPostProcess";
 import { useBboxPostProcessParams } from "./useBboxPostProcessParams";
 import { buildKeyframeTrack } from "./keyframeTrack";
 import { useEquirectFrameHeight } from "./useEquirectFrameHeight";
@@ -78,6 +88,8 @@ type Props = {
   map: MapSummary | null;
   mapId: string;
   isMapKnown: boolean;
+  /** Hands the current proposal to the Annotation tab and switches to it. */
+  onOpenAnnotation?: () => void;
 };
 
 /** How a keyframe stands with respect to the live pgvector index. */
@@ -85,6 +97,15 @@ type KeyframeIndexState = "indexed" | "pruned" | "not-prepared" | "unknown";
 
 type SortMode = "keyframe" | "objects-desc" | "objects-asc";
 type PanoramaViewMode = "image" | "depth";
+type ProposalDisplayState = "kept" | "discarded";
+type DisplayedProposal = {
+  row: MetadataRowRecord;
+  state: ProposalDisplayState;
+};
+type ImageCursorRatio = {
+  xRatio: number;
+  yRatio: number;
+};
 type DepthImagePin = {
   requestId: string;
   source: "erp" | "cutout";
@@ -110,10 +131,10 @@ type PhotosphereNavigationCandidate = {
   localZ: number;
 };
 
-// Keyframes per page, not proposals: one ERP carries 70-270 proposals, so the old
-// [6, 12, 24, 48] would have put well over a thousand thumbnails in one grid.
-const PAGE_SIZE_OPTIONS = [1, 2, 4, 8];
-const COLUMN_OPTIONS = [1, 2, 3, 4, 5];
+// One ERP and all its proposals form one page. Mixing keyframes made the grid hard
+// to scan and could put well over a thousand thumbnails in the same workspace.
+const KEYFRAMES_PER_PAGE = 1;
+const COLUMN_OPTIONS = [3, 4, 5, 6];
 const EquirectPhotoSphereViewer = lazy(() => import("./EquirectPhotoSphereViewer"));
 const DEPTH_PIN_MIN_DEPTH_M = 0.25;
 const VISUAL_SPLIT_MIN_PERCENT = 25;
@@ -131,6 +152,14 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
   }
 }
 
+function formatProposalShare(count: number, total: number): string {
+  if (total <= 0) {
+    return "0%";
+  }
+  const percentage = (count / total) * 100;
+  return `${percentage.toFixed(1).replace(/\.0$/, "")}%`;
+}
+
 /**
  * Tri-state per keyframe, because "has a pose", "has proposals" and "is in the live
  * index" are three different things and conflating them is what this panel exists to
@@ -144,6 +173,138 @@ function keyframeIndexState(summary: KeyframeSummary | undefined): KeyframeIndex
     return "unknown";
   }
   return summary.ingested > 0 ? "indexed" : "pruned";
+}
+
+function confidenceBand(score: number): { label: string; tone: "high" | "medium" | "low" } {
+  if (score >= 75) {
+    return { label: "High", tone: "high" };
+  }
+  if (score >= 45) {
+    return { label: "Medium", tone: "medium" };
+  }
+  return { label: "Low", tone: "low" };
+}
+
+function ProjectionConfidence(props: {
+  projection: ProposalNeighborProjection;
+}): ReactElement {
+  const featureScore = typeof props.projection.feature_match_score === "number"
+    ? props.projection.feature_match_score
+    : null;
+  const featureStatus = props.projection.feature_match_status ?? "unavailable";
+  const edgeNccScore = typeof props.projection.edge_ncc_score === "number"
+    ? props.projection.edge_ncc_score
+    : null;
+  const edgeNccStatus = props.projection.edge_ncc_status ?? "unavailable";
+  const geometry = confidenceBand(props.projection.geometric_confidence);
+  const visibility = props.projection.occlusion_confidence === null
+    ? null
+    : confidenceBand(props.projection.occlusion_confidence);
+  const features = featureScore === null
+    ? null
+    : confidenceBand(featureScore);
+  const appearance = edgeNccScore === null ? null : confidenceBand(edgeNccScore);
+  const geometryTitle = [
+    `Source distance ${props.projection.distance_score}%`,
+    `view angle ${props.projection.view_angle_score}% (${props.projection.viewpoint_angle_deg.toFixed(1)}°)`,
+    `apparent size ${props.projection.apparent_size_score}%`,
+  ].join(" · ");
+  const visibilityTitle = props.projection.observed_depth_m === null
+    ? "No target depth sample is available."
+    : `Expected ${props.projection.distance_to_proposal_m.toFixed(2)} m · observed ${props.projection.observed_depth_m.toFixed(2)} m`;
+  const featureTitle = featureScore === null
+    ? "SIFT matching is unavailable."
+    : `${props.projection.feature_inliers} geometric inliers from ${props.projection.feature_matches} ratio-test matches`;
+  const appearanceTitle = edgeNccStatus === "uninformative"
+    ? "The proposal region does not contain enough edge structure for NCC."
+    : edgeNccScore === null
+      ? "Edge NCC comparison is unavailable."
+      : "Gaussian multi-scale gradient correlation over the proposal region; low scores can still result from viewpoint changes.";
+
+  return (
+    <span className="object-search-projection-confidence">
+      <span
+        className={`object-search-confidence-score is-${geometry.tone}`}
+        title={geometryTitle}
+      >
+        <span className="object-search-confidence-heading">
+          <span>Geometry</span>
+          <strong>{geometry.label} · {props.projection.geometric_confidence}%</strong>
+        </span>
+        <span className="object-search-confidence-meter" aria-hidden="true">
+          <span style={{ width: `${props.projection.geometric_confidence}%` }} />
+        </span>
+      </span>
+      <span
+        className={`object-search-confidence-score is-${visibility?.tone ?? "unknown"}`}
+        title={visibilityTitle}
+      >
+        <span className="object-search-confidence-heading">
+          <span>Visibility</span>
+          <strong>
+            {visibility
+              ? `${
+                  props.projection.occlusion_status === "occluded"
+                    ? "Blocked"
+                    : props.projection.occlusion_status === "depth_mismatch"
+                      ? "Mismatch"
+                      : visibility.label
+                } · ${props.projection.occlusion_confidence}%`
+              : "No depth"}
+          </strong>
+        </span>
+        <span className="object-search-confidence-meter" aria-hidden="true">
+          {props.projection.occlusion_confidence !== null ? (
+            <span style={{ width: `${props.projection.occlusion_confidence}%` }} />
+          ) : null}
+        </span>
+      </span>
+      <span
+        className={`object-search-confidence-score is-${
+          featureStatus === "no_features"
+            ? "unknown"
+            : features?.tone ?? "unknown"
+        }`}
+        title={featureTitle}
+      >
+        <span className="object-search-confidence-heading">
+          <span>Features</span>
+          <strong>
+            {featureStatus === "unavailable"
+              ? "Unavailable"
+              : featureStatus === "no_features"
+                ? "No features"
+                : `${featureStatus === "weak" ? "Weak" : features?.label} · ${featureScore}%`}
+          </strong>
+        </span>
+        <span className="object-search-confidence-meter" aria-hidden="true">
+          {featureScore !== null ? (
+            <span style={{ width: `${featureScore}%` }} />
+          ) : null}
+        </span>
+      </span>
+      <span
+        className={`object-search-confidence-score is-${appearance?.tone ?? "unknown"}`}
+        title={appearanceTitle}
+      >
+        <span className="object-search-confidence-heading">
+          <span>Edge NCC</span>
+          <strong>
+            {edgeNccStatus === "uninformative"
+              ? "Uninformative"
+              : appearance
+                ? `${appearance.label} · ${edgeNccScore}%`
+                : "Unavailable"}
+          </strong>
+        </span>
+        <span className="object-search-confidence-meter" aria-hidden="true">
+          {edgeNccScore !== null ? (
+            <span style={{ width: `${edgeNccScore}%` }} />
+          ) : null}
+        </span>
+      </span>
+    </span>
+  );
 }
 
 
@@ -170,15 +331,20 @@ function ObjectSearchExplorerPanel(props: Props) {
     readStoredBoolean(KEYFRAME_GRAPH_STORAGE_KEY, true),
   );
   const [sortMode, setSortMode] = useState<SortMode>("keyframe");
-  const [pageSize, setPageSize] = useState(1);
-  const [columns, setColumns] = useState(3);
+  const [columns, setColumns] = useState(5);
+  const [showKeptProposals, setShowKeptProposals] = useState(true);
+  const [showDiscardedProposals, setShowDiscardedProposals] = useState(false);
   const [page, setPage] = useState(1);
   const [visualSplitPercent, setVisualSplitPercent] = useState(45);
   const [isResizingVisualSplit, setIsResizingVisualSplit] = useState(false);
 
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
-  const [rowDetail, setRowDetail] = useState<MetadataRowDetail | null>(null);
-  const [isLoadingRow, setIsLoadingRow] = useState(false);
+  const [neighborProjectionCount, setNeighborProjectionCount] = useState(5);
+  const [ignoreNeighborMinDistance, setIgnoreNeighborMinDistance] = useState(false);
+  const [neighborProjections, setNeighborProjections] =
+    useState<ProposalNeighborProjectionsResponse | null>(null);
+  const [neighborProjectionLoading, setNeighborProjectionLoading] = useState(false);
+  const [neighborProjectionError, setNeighborProjectionError] = useState<string | null>(null);
   const [equirectPreviewError, setEquirectPreviewError] = useState<string | null>(null);
   const [equirectPreviewSrc, setEquirectPreviewSrc] = useState<string | null>(null);
   const [equirectPreviewKeyframeId, setEquirectPreviewKeyframeId] = useState<string | null>(null);
@@ -186,12 +352,14 @@ function ObjectSearchExplorerPanel(props: Props) {
   const [photosphereViewKeyframeId, setPhotosphereViewKeyframeId] = useState<string | null>(null);
   const [depthPin, setDepthPin] = useState<DepthImagePin | null>(null);
   const [depthPinPopoverOpen, setDepthPinPopoverOpen] = useState(false);
+  const [selectedPreviewCursor, setSelectedPreviewCursor] =
+    useState<ImageCursorRatio | null>(null);
+  const [isDepthModifierPressed, setIsDepthModifierPressed] = useState(false);
   const [annotationMenu, setAnnotationMenu] = useState<{
     annotationId: string;
     x: number;
     y: number;
   } | null>(null);
-  const [photosphereClassMenuOpen, setPhotosphereClassMenuOpen] = useState(false);
   const [keyframeLink, setKeyframeLink] = useState<{
     annotationId: string;
     keyframeId: string;
@@ -207,12 +375,42 @@ function ObjectSearchExplorerPanel(props: Props) {
     promise: Promise<KeyframeMarker[]>;
   } | null>(null);
   const visualSplitRef = useRef<HTMLDivElement | null>(null);
-  const detectionRowRefs = useRef(new Map<number, HTMLTableRowElement>());
-  const shouldFocusSelectedDetectionRef = useRef(false);
-  const { params: bboxPostProcess, setParams: setBboxPostProcess, resetParams: resetBboxPostProcess } =
+  const inspectorRef = useRef<HTMLElement | null>(null);
+  const neighborProjectionRequestRef = useRef(0);
+  const { params: bboxPostProcess, setParams: setBboxPostProcess } =
     useBboxPostProcessParams();
   const [metadataRows, setMetadataRows] = useState<MetadataRowRecord[]>([]);
   const annotation = useExplorerAnnotationWorkspace(props.mapId);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Control") {
+        setIsDepthModifierPressed(true);
+      }
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Control") {
+        setIsDepthModifierPressed(false);
+      }
+    };
+    const clearDepthModifier = () => setIsDepthModifierPressed(false);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", clearDepthModifier);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", clearDepthModifier);
+    };
+  }, []);
+
+  useEffect(() => {
+    setSelectedPreviewCursor(null);
+    neighborProjectionRequestRef.current += 1;
+    setNeighborProjections(null);
+    setNeighborProjectionError(null);
+    setNeighborProjectionLoading(false);
+  }, [selectedRowIndex]);
 
   const summary: MetadataSummary | null = status?.summary ?? null;
   const keyframeSummaries = keyframePage?.keyframes ?? [];
@@ -249,7 +447,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     setPhotosphereYawRad(null);
     setPhotosphereViewKeyframeId(null);
     setAnnotationMenu(null);
-    setPhotosphereClassMenuOpen(false);
     setKeyframeLink(null);
     setPhotosphereOrient(null);
     preservedCompassBearingDegRef.current = null;
@@ -298,26 +495,6 @@ function ObjectSearchExplorerPanel(props: Props) {
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [annotationMenu]);
-
-  useEffect(() => {
-    if (!photosphereClassMenuOpen) {
-      return;
-    }
-    const close = () => setPhotosphereClassMenuOpen(false);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setPhotosphereClassMenuOpen(false);
-      }
-    };
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("resize", close);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", close);
-    };
-  }, [photosphereClassMenuOpen]);
 
   useEffect(() => {
     try {
@@ -384,6 +561,16 @@ function ObjectSearchExplorerPanel(props: Props) {
     return out;
   }, [metadataRows, bboxPostProcess]);
 
+  const keptRowIndexes = useMemo(
+    () =>
+      new Set(
+        [...filteredRowsByKeyframe.values()]
+          .flat()
+          .map((row) => row.row_index),
+      ),
+    [filteredRowsByKeyframe],
+  );
+
   const emmid = props.map?.emmid ?? null;
 
   // The ROI tool draws one polygon; what it selects is the choice here. Counting
@@ -407,7 +594,10 @@ function ObjectSearchExplorerPanel(props: Props) {
   // Pagination is keyframe-major: one ERP and its proposals is how the panel is
   // actually used, and it keeps the row fetch to one request per page.
   const totalKeyframes = keyframePage?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(totalKeyframes / pageSize));
+  const totalPages = Math.max(
+    1,
+    Math.ceil(totalKeyframes / KEYFRAMES_PER_PAGE),
+  );
   const currentPage = Math.min(page, totalPages);
   const pageKeyframes = keyframeSummaries;
   const pageKeyframeIds = pageKeyframes.map((item) => item.id);
@@ -420,8 +610,8 @@ function ObjectSearchExplorerPanel(props: Props) {
     }
     let cancelled = false;
     fetchMetadataKeyframes(props.mapId, {
-      offset: (currentPage - 1) * pageSize,
-      limit: pageSize,
+      offset: (currentPage - 1) * KEYFRAMES_PER_PAGE,
+      limit: KEYFRAMES_PER_PAGE,
       sort: sortMode === "keyframe" ? "parquet" : sortMode,
       includeEmpty,
       keyframeId: keyframeFilter === "all" ? null : keyframeFilter,
@@ -443,14 +633,44 @@ function ObjectSearchExplorerPanel(props: Props) {
     props.isMapKnown,
     status?.available,
     currentPage,
-    pageSize,
     sortMode,
     includeEmpty,
     keyframeFilter,
   ]);
-  const pageRows = pageKeyframeIds.flatMap(
-    (keyframeId) => filteredRowsByKeyframe.get(keyframeId) ?? [],
-  );
+  const displayedProposals: DisplayedProposal[] = metadataRows.flatMap((row) => {
+    const state: ProposalDisplayState = keptRowIndexes.has(row.row_index)
+      ? "kept"
+      : "discarded";
+    const isVisible =
+      (state === "kept" && showKeptProposals) ||
+      (state === "discarded" && showDiscardedProposals);
+    return isVisible ? [{ row, state }] : [];
+  });
+  const pageRows = displayedProposals.map((proposal) => proposal.row);
+  const pageKeptCount = keptRowIndexes.size;
+  const pageDiscardedCount = Math.max(0, metadataRows.length - pageKeptCount);
+  const detectorBreakdown = useMemo(() => {
+    let yoloCount = 0;
+    let gdinoCount = 0;
+    for (const [source, count] of Object.entries(
+      summary?.detector_source_counts ?? {},
+    )) {
+      const family = detectorSourceFamily(source);
+      if (family === "yolo") {
+        yoloCount += count;
+      } else if (family === "gdino") {
+        gdinoCount += count;
+      }
+    }
+    const total = summary?.row_count ?? 0;
+    return {
+      total,
+      yoloCount,
+      gdinoCount,
+      yoloShare: formatProposalShare(yoloCount, total),
+      gdinoShare: formatProposalShare(gdinoCount, total),
+    };
+  }, [summary]);
   const pageRowIndexKey = pageRows.map((row) => row.row_index).join("|");
   const selectedPageRow =
     pageRows.find((row) => row.row_index === selectedRowIndex) ?? null;
@@ -1085,14 +1305,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     };
   }, [activeKeyframeId, keyframePreviewUrl, panoramaViewMode]);
 
-  useEffect(() => {
-    if (!shouldFocusSelectedDetectionRef.current || selectedRowIndex === null) {
-      return;
-    }
-    shouldFocusSelectedDetectionRef.current = false;
-    detectionRowRefs.current.get(selectedRowIndex)?.focus();
-  }, [selectedRowIndex]);
-
   const livemapFocus = useMemo(() => {
     if (annotation.focusTarget) {
       return annotation.focusTarget;
@@ -1113,7 +1325,7 @@ function ObjectSearchExplorerPanel(props: Props) {
 
   useEffect(() => {
     setPage(1);
-  }, [includeEmpty, keyframeFilter, pageSize, sortMode]);
+  }, [includeEmpty, keyframeFilter, sortMode]);
 
   useEffect(() => {
     if (currentPage !== page) {
@@ -1133,35 +1345,6 @@ function ObjectSearchExplorerPanel(props: Props) {
         : pageRows[0].row_index,
     );
   }, [pageRowIndexKey]);
-
-  useEffect(() => {
-    if (selectedRowIndex === null || !status?.available) {
-      setRowDetail(null);
-      return;
-    }
-    let cancelled = false;
-    setIsLoadingRow(true);
-    fetchMetadataRow(props.mapId, selectedRowIndex)
-      .then((payload) => {
-        if (!cancelled) {
-          setRowDetail(payload);
-        }
-      })
-      .catch((err: Error) => {
-        if (!cancelled) {
-          setError(err.message);
-          setRowDetail(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setIsLoadingRow(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.mapId, selectedRowIndex, status?.available]);
 
   if (!props.isMapKnown) {
     return (
@@ -1208,7 +1391,7 @@ function ObjectSearchExplorerPanel(props: Props) {
 
   const totalRows = summary?.row_count ?? 0;
   const selectedDetection =
-    pageRows.find((row) => row.row_index === selectedRowIndex) ?? rowDetail?.row ?? null;
+    pageRows.find((row) => row.row_index === selectedRowIndex) ?? null;
   const activeKeyframeIndex = activeKeyframeId
     ? navigableKeyframeIds.indexOf(activeKeyframeId)
     : -1;
@@ -1307,40 +1490,64 @@ function ObjectSearchExplorerPanel(props: Props) {
     selectKeyframe(nextKeyframeId);
   };
 
-  const selectAdjacentDetection = (direction: -1 | 1) => {
-    if (!filteredDetections.length) {
-      return;
-    }
-    const currentIndex =
-      selectedRowIndex !== null
-        ? filteredDetections.findIndex((item) => item.row_index === selectedRowIndex)
-        : -1;
-    const nextIndex =
-      currentIndex === -1
-        ? direction > 0
-          ? 0
-          : filteredDetections.length - 1
-        : Math.min(
-            filteredDetections.length - 1,
-            Math.max(0, currentIndex + direction),
-          );
-    const nextDetection = filteredDetections[nextIndex];
-    if (nextDetection.row_index !== selectedRowIndex) {
-      shouldFocusSelectedDetectionRef.current = true;
-    }
-    setSelectedRowIndex(nextDetection.row_index);
+  const selectProposalAndRevealPreview = (rowIndex: number): void => {
+    setSelectedRowIndex(rowIndex);
+    const prefersReducedMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    inspectorRef.current?.scrollTo({
+      top: 0,
+      behavior: prefersReducedMotion ? "auto" : "smooth",
+    });
   };
 
-  const handleDetectionRowKeyDown = (
-    event: ReactKeyboardEvent<HTMLTableRowElement>,
-  ) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      selectAdjacentDetection(1);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      selectAdjacentDetection(-1);
+  const loadNeighborProjections = async (): Promise<void> => {
+    if (!selectedDetection || selectedDetection.depth === null) {
+      return;
     }
+    const requestId = neighborProjectionRequestRef.current + 1;
+    neighborProjectionRequestRef.current = requestId;
+    setNeighborProjectionLoading(true);
+    setNeighborProjectionError(null);
+    try {
+      const payload = await fetchProposalNeighborProjections(
+        props.mapId,
+        selectedDetection.row_index,
+        neighborProjectionCount,
+        !ignoreNeighborMinDistance,
+      );
+      if (neighborProjectionRequestRef.current === requestId) {
+        setNeighborProjections(payload);
+      }
+    } catch (projectionError) {
+      if (neighborProjectionRequestRef.current === requestId) {
+        setNeighborProjections(null);
+        setNeighborProjectionError(
+          projectionError instanceof Error
+            ? projectionError.message
+            : String(projectionError),
+        );
+      }
+    } finally {
+      if (neighborProjectionRequestRef.current === requestId) {
+        setNeighborProjectionLoading(false);
+      }
+    }
+  };
+
+  const openNeighborProjection = (projection: ProposalNeighborProjection): void => {
+    setPhotosphereOrient((previous) => ({
+      yawRad: projection.theta_center,
+      token: (previous?.token ?? 0) + 1,
+    }));
+    selectKeyframe(projection.keyframe_id);
+    const prefersReducedMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    document.getElementById("explorer-spatial")?.scrollIntoView({
+      behavior: prefersReducedMotion ? "auto" : "smooth",
+      block: "start",
+    });
   };
 
   const updateResolvedDepthPin = (
@@ -1396,15 +1603,6 @@ function ObjectSearchExplorerPanel(props: Props) {
     rowIndex: number | null = null,
   ) => {
     const requestId = `${Date.now()}-${Math.random()}`;
-    if (annotation.enabled) {
-      annotation.beginDraft(requestId, {
-        keyframeId,
-        projection: source,
-        rowIndex,
-        xRatio,
-        yRatio,
-      });
-    }
     setDepthPin({
       requestId,
       source,
@@ -1431,18 +1629,45 @@ function ObjectSearchExplorerPanel(props: Props) {
       sample_radius: 3,
       min_depth_m: DEPTH_PIN_MIN_DEPTH_M,
     })
-      .then((payload) => {
-        updateResolvedDepthPin(requestId, payload);
-        if (annotation.enabled) {
-          annotation.resolveDraft(requestId, payload);
-        }
-      })
-      .catch((err: Error) => {
-        updateRejectedDepthPin(requestId, err.message);
-        if (annotation.enabled) {
-          annotation.rejectDraft(requestId, err.message);
-        }
-      });
+      .then((payload) => updateResolvedDepthPin(requestId, payload))
+      .catch((err: Error) => updateRejectedDepthPin(requestId, err.message));
+  };
+
+  /**
+   * Hand the current selection to the Annotation tab.
+   *
+   * Only the click and the ids travel: the tab re-resolves the depth point against
+   * the newest manifest rather than trusting a copy that a re-ingest could have made
+   * wrong. `App.tsx` mounts one panel at a time, so this goes through `localStorage`
+   * (see `annotation/handoff.ts`).
+   */
+  const annotateProposal = (row: { keyframe_id: string; row_index: number }) => {
+    const pin =
+      depthPin?.status === "resolved" &&
+      depthPin.source === "cutout" &&
+      depthPin.rowIndex === row.row_index
+        ? { projection: "cutout" as const, xRatio: depthPin.xRatio, yRatio: depthPin.yRatio }
+        : null;
+    writeHandoff(
+      props.mapId,
+      withProposal(readHandoff(props.mapId), {
+        keyframeId: row.keyframe_id,
+        rowIndex: row.row_index,
+        pin,
+      }),
+    );
+    props.onOpenAnnotation?.();
+  };
+
+  const annotatePanoramaPoint = (keyframeId: string, xRatio: number, yRatio: number) => {
+    writeHandoff(
+      props.mapId,
+      withPanoramaPoint(readHandoff(props.mapId), {
+        keyframeId,
+        pin: { projection: "erp", xRatio, yRatio },
+      }),
+    );
+    props.onOpenAnnotation?.();
   };
 
   const placePhotosphereDepthPin = (xRatio: number, yRatio: number) => {
@@ -1480,9 +1705,16 @@ function ObjectSearchExplorerPanel(props: Props) {
       <div className="object-search-explorer-header">
         <div>
           <p className="eyebrow">Object Search Explorer</p>
-          <h2>Proposals and reconstructed boxes</h2>
+          <h2>Inspect proposals in spatial context</h2>
+          <p className="object-search-explorer-intro">
+            Choose a keyframe, compare its map and panorama, then inspect or annotate
+            the detections that matter.
+          </p>
         </div>
-        <p className="path-text">{summary?.metadata_path ?? status?.map_path ?? ""}</p>
+        <details className="object-search-explorer-source">
+          <summary>Data source</summary>
+          <p className="path-text">{summary?.metadata_path ?? status?.map_path ?? ""}</p>
+        </details>
       </div>
 
       {error ? (
@@ -1531,26 +1763,103 @@ function ObjectSearchExplorerPanel(props: Props) {
         numbers, and a third — how many made it into pgvector — differs again.
         Reporting them separately is the whole point of this row.
       */}
-      <div className="metrics-row">
-        <span>Keyframes with a pose {status?.manifest_keyframe_count ?? 0}</span>
-        <span>Matching keyframes {totalKeyframes}</span>
-        <span>Proposals {totalRows}</span>
-        <span>With depth {summary?.with_depth_count ?? 0}</span>
+      <dl className="explorer-health-strip" aria-label="Map processing coverage">
+        <div title="Keyframes with a valid pose in the map manifest.">
+          <dt>Posed</dt>
+          <dd>{status?.manifest_keyframe_count ?? 0}</dd>
+        </div>
+        <div title="Keyframes matching the current Explorer filters. This is not an ML similarity score.">
+          <dt>Matching</dt>
+          <dd>{totalKeyframes}</dd>
+        </div>
+        <div
+          className="explorer-health-proposals"
+          title="Object-detection proposals stored in the map metadata."
+        >
+          <dt>Proposals</dt>
+          <dd>{totalRows}</dd>
+          <dd
+            className="explorer-health-proposal-breakdown"
+            aria-label="Detector share of proposals across this map"
+          >
+            <span
+              title={`${detectorBreakdown.yoloCount} of ${detectorBreakdown.total} proposals across this map.`}
+            >
+              YOLO-W <strong>{detectorBreakdown.yoloShare}</strong>
+            </span>
+            <span
+              title={`${detectorBreakdown.gdinoCount} of ${detectorBreakdown.total} proposals across this map.`}
+            >
+              G-DINO <strong>{detectorBreakdown.gdinoShare}</strong>
+            </span>
+          </dd>
+        </div>
+        <div title="Proposals with a resolved depth value available for 3D positioning.">
+          <dt>With depth</dt>
+          <dd>{summary?.with_depth_count ?? 0}</dd>
+        </div>
         {summary?.coverage ? (
-          <span>
-            Ingested {summary.coverage.ingested_total}
-            {summary.coverage.no_position_total
-              ? ` (${summary.coverage.no_position_total} without a 3D position)`
-              : ""}
-          </span>
+          <div
+            title={
+              summary.coverage.no_position_total
+                ? `Proposals stored in the search index. ${summary.coverage.no_position_total} have no 3D position.`
+                : "Proposals stored in the search index."
+            }
+          >
+            <dt>Ingested</dt>
+            <dd>{summary.coverage.ingested_total}</dd>
+          </div>
         ) : summary ? (
-          <span title="The bricks service did not answer; keyframes show as unknown.">
-            Ingested unknown
-          </span>
+          <div title="The bricks service did not answer; keyframes show as unknown.">
+            <dt>Ingested</dt>
+            <dd>Unknown</dd>
+          </div>
         ) : null}
-      </div>
+      </dl>
 
-      <ExplorerAnnotationControls workspace={annotation} />
+      <div className="explorer-context-rail" aria-label="Explorer workflow">
+        <div className="explorer-context-keyframe">
+          <span className="explorer-context-label">Current keyframe</span>
+          <select
+            aria-label="Current keyframe"
+            value={keyframeFilter}
+            onChange={(event) => setKeyframeFilter(event.target.value)}
+          >
+            <option value="all">Automatic (page selection)</option>
+            {navigableKeyframeIds.map((keyframeId) => {
+              const keyframe = keyframeSummaryById.get(keyframeId);
+              return (
+                <option key={keyframeId} value={keyframeId}>
+                  {keyframeId}
+                  {keyframe ? ` · ${keyframe.row_count} proposals` : ""}
+                  {keyframe?.ingested === 0 ? " · pruned" : ""}
+                </option>
+              );
+            })}
+          </select>
+          {renderKeyframeStepper("keyframe-stepper keyframe-stepper--compact")}
+        </div>
+        <nav
+          className="explorer-workflow-links"
+          aria-label="Jump to Explorer section"
+        >
+          <a href="#explorer-spatial">1 · Locate</a>
+          <a href="#explorer-proposals">2 · Inspect</a>
+          <button
+            type="button"
+            className="explorer-workflow-link-button"
+            onClick={() => {
+              if (selectedDetection) {
+                annotateProposal(selectedDetection);
+              } else {
+                props.onOpenAnnotation?.();
+              }
+            }}
+          >
+            3 · Annotate
+          </button>
+        </nav>
+      </div>
 
       {roiTarget === "keyframes" ? (
         <ExportRoiPanel
@@ -1575,6 +1884,7 @@ function ObjectSearchExplorerPanel(props: Props) {
       ) : null}
 
       <div
+        id="explorer-spatial"
         ref={visualSplitRef}
         className="object-search-visual-split"
         style={{ "--visual-map-width": `${visualSplitPercent}%` } as CSSProperties}
@@ -1582,66 +1892,84 @@ function ObjectSearchExplorerPanel(props: Props) {
         <div className="object-search-visual-pane">
           <section className="object-search-explorer-livemap">
             <div className="object-search-explorer-livemap-header">
-              <h3>Keyframe map</h3>
-              <div className="object-search-explorer-livemap-toggles">
-                {keyframeGraph?.available ? (
+              <div>
+                <h3>Spatial view</h3>
+                <span className="object-search-section-kicker">
+                  Locate the active capture
+                </span>
+              </div>
+              <details className="explorer-map-options">
+                <summary>Map tools</summary>
+                <div className="object-search-explorer-livemap-toggles">
+                  {keyframeGraph?.available ? (
+                    <label className="inline-check">
+                      <input
+                        type="checkbox"
+                        checked={showKeyframeGraph}
+                        onChange={(event) =>
+                          setShowKeyframeGraph(event.target.checked)
+                        }
+                      />
+                      Show graph ({keyframeGraph.edges.length} edges)
+                    </label>
+                  ) : null}
                   <label className="inline-check">
                     <input
                       type="checkbox"
-                      checked={showKeyframeGraph}
-                      onChange={(event) => setShowKeyframeGraph(event.target.checked)}
+                      checked={showKeyframeTrack}
+                      onChange={(event) =>
+                        setShowKeyframeTrack(event.target.checked)
+                      }
                     />
-                    Show graph ({keyframeGraph.edges.length} edges)
+                    Show track ({keyframeTrackSegments.length} segments)
                   </label>
-                ) : null}
-                <label className="inline-check">
-                  <input
-                    type="checkbox"
-                    checked={showKeyframeTrack}
-                    onChange={(event) => setShowKeyframeTrack(event.target.checked)}
-                  />
-                  Show track ({keyframeTrackSegments.length} segments)
-                </label>
-                <div className="object-search-livemap-roi-toolbar">
-                  <span>ROI</span>
-                  <select
-                    value={roiTarget}
-                    aria-label="What the drawn region selects"
-                    onChange={(event) => {
-                      annotation.clearRoi();
-                      setRoiTarget(event.target.value as "annotations" | "keyframes");
-                    }}
-                  >
-                    <option value="annotations">Count annotations</option>
-                    <option value="keyframes">Select keyframes</option>
-                  </select>
-                  <button
-                    type="button"
-                    className={`secondary-button${
-                      annotation.roiActive ? " is-active" : ""
-                    }`}
-                    aria-pressed={annotation.roiActive}
-                    onClick={annotation.toggleRoi}
-                  >
-                    {annotation.roiActive ? "Drawing..." : "Draw"}
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={!annotation.roiActive && !annotation.roiPolygon}
-                    onClick={annotation.clearRoi}
-                  >
-                    Clear
-                  </button>
-                  <span className="object-search-livemap-roi-summary">
-                    {roiTarget === "keyframes"
-                      ? `${exportSelection.total} keyframes`
-                      : annotation.roiCounts
-                        ? `Total ${annotation.roiCounts.total}`
-                        : `Level ${annotation.currentLevel === null ? "-" : annotation.currentLevel}`}
-                  </span>
+                  <div className="object-search-livemap-roi-toolbar">
+                    <span>ROI</span>
+                    <select
+                      value={roiTarget}
+                      aria-label="What the drawn region selects"
+                      onChange={(event) => {
+                        annotation.clearRoi();
+                        setRoiTarget(
+                          event.target.value as "annotations" | "keyframes",
+                        );
+                      }}
+                    >
+                      <option value="annotations">Count annotations</option>
+                      <option value="keyframes">Select keyframes</option>
+                    </select>
+                    <button
+                      type="button"
+                      className={`secondary-button${
+                        annotation.roiActive ? " is-active" : ""
+                      }`}
+                      aria-pressed={annotation.roiActive}
+                      onClick={annotation.toggleRoi}
+                    >
+                      {annotation.roiActive ? "Drawing..." : "Draw"}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={!annotation.roiActive && !annotation.roiPolygon}
+                      onClick={annotation.clearRoi}
+                    >
+                      Clear
+                    </button>
+                    <span className="object-search-livemap-roi-summary">
+                      {roiTarget === "keyframes"
+                        ? `${exportSelection.total} keyframes`
+                        : annotation.roiCounts
+                          ? `Total ${annotation.roiCounts.total}`
+                          : `Level ${
+                              annotation.currentLevel === null
+                                ? "-"
+                                : annotation.currentLevel
+                            }`}
+                    </span>
+                  </div>
                 </div>
-              </div>
+              </details>
             </div>
             {keyframeGraph?.error ? (
               <p className="map-caption">Keyframe graph unavailable: {keyframeGraph.error}</p>
@@ -1728,7 +2056,6 @@ function ObjectSearchExplorerPanel(props: Props) {
                                   onClick={() => {
                                     setDepthPin(null);
                                     setDepthPinPopoverOpen(false);
-                                    annotation.discardDraft();
                                   }}
                                 >
                                   Remove
@@ -1797,10 +2124,13 @@ function ObjectSearchExplorerPanel(props: Props) {
           {keyframePreviewUrl ? (
             <section className="object-search-keyframe-equirect">
               <div className="object-search-keyframe-equirect-header">
-                <h3>Image</h3>
-                <span className="muted">
-                  Keyframe {activeKeyframeId}
-                </span>
+                <div className="object-search-keyframe-heading">
+                  <h3>Panorama</h3>
+                  <span className="object-search-section-kicker">
+                    Keyframe {activeKeyframeId} · {activeKeyframeDetections.length} of{" "}
+                    {activeKeyframeRawDetectionCount} proposals kept
+                  </span>
+                </div>
                 <label className="object-search-panorama-view-selector">
                   View
                   <select
@@ -1813,10 +2143,6 @@ function ObjectSearchExplorerPanel(props: Props) {
                     <option value="depth">Depth</option>
                   </select>
                 </label>
-                <span className="muted">
-                  Proposals {activeKeyframeRawDetectionCount} | Kept{" "}
-                  {activeKeyframeDetections.length}
-                </span>
                 <label className="inline-check">
                   <input
                     type="checkbox"
@@ -1866,7 +2192,7 @@ function ObjectSearchExplorerPanel(props: Props) {
                       }
                       polygonForDetection={polygonForPhotosphereDetection}
                       onDepthPin={placePhotosphereDepthPin}
-                      allowDepthPinOnMarker={annotation.enabled}
+                      allowDepthPinOnMarker
                       navigationCandidates={photosphereNavigationCandidates}
                       onNavigate={selectKeyframe}
                       onViewChange={handlePhotosphereViewChange}
@@ -1891,72 +2217,22 @@ function ObjectSearchExplorerPanel(props: Props) {
                     : ""}
                 </p>
               ) : null}
-              {annotation.enabled ? (
+              {depthPin?.status === "resolved" &&
+              depthPin.source === "erp" &&
+              depthPin.keyframeId === activeKeyframeId ? (
                 <div className="object-search-photosphere-annotation-actions">
-                  <div
-                    className="object-search-photosphere-class-picker"
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    <button
-                      type="button"
-                      className="object-search-photosphere-annotation-class"
-                      aria-haspopup="listbox"
-                      aria-expanded={photosphereClassMenuOpen}
-                      onClick={() => setPhotosphereClassMenuOpen((open) => !open)}
-                    >
-                      {annotation.activeClass?.name ?? "No class selected"}
-                    </button>
-                    {photosphereClassMenuOpen ? (
-                      <ul
-                        className="object-search-photosphere-class-menu"
-                        role="listbox"
-                        aria-label="Annotation classes"
-                      >
-                        {annotation.pointClasses.length ? (
-                          annotation.pointClasses.map((item) => (
-                            <li key={`${item.name}::${item.annotationType}`}>
-                              <button
-                                type="button"
-                                className={`object-search-photosphere-class-option${
-                                  annotation.activeClassKey === `${item.name}::${item.annotationType}`
-                                    ? " is-active"
-                                    : ""
-                                }`}
-                                role="option"
-                                aria-selected={
-                                  annotation.activeClassKey === `${item.name}::${item.annotationType}`
-                                }
-                                onClick={() => {
-                                  annotation.setActiveClassKey(`${item.name}::${item.annotationType}`);
-                                  setPhotosphereClassMenuOpen(false);
-                                }}
-                              >
-                                <span
-                                  className="color-swatch"
-                                  style={{ background: item.color }}
-                                />
-                                <span>{item.name}</span>
-                              </button>
-                            </li>
-                          ))
-                        ) : (
-                          <li className="object-search-photosphere-class-empty">
-                            No point classes
-                          </li>
-                        )}
-                      </ul>
-                    ) : null}
-                  </div>
                   <button
-                    className="primary-button"
+                    className="primary-button is-annotation"
                     type="button"
-                    disabled={
-                      annotation.draft?.status !== "resolved" ||
-                      !annotation.activeClass
+                    onClick={() =>
+                      annotatePanoramaPoint(
+                        depthPin.keyframeId,
+                        depthPin.xRatio,
+                        depthPin.yRatio,
+                      )
                     }
-                    onClick={annotation.saveDraft}
                   >
-                    Save annotation
+                    Annotate this point
                   </button>
                 </div>
               ) : null}
@@ -1981,98 +2257,137 @@ function ObjectSearchExplorerPanel(props: Props) {
         </div>
       </div>
 
-      <ExplorerAnnotationList workspace={annotation} />
-
-      <CollapsibleSection
-        title="Proposal explorer"
-        summary={`${pageRows.length} shown | ${totalKeyframes} keyframes`}
-        sectionClassName="object-search-explorer-browser"
-        defaultOpen
-      >
-        <div className="object-search-explorer-layout">
-          <div className="object-search-explorer-main">
-            <div className="keyframe-sticky-bar">
-              <div className="keyframe-filter-control">
-                <div className="keyframe-filter-header">
-                  <span>Keyframe</span>
-                  {renderKeyframeStepper("keyframe-stepper keyframe-stepper--compact")}
-                </div>
-                <select
-                  value={keyframeFilter}
-                  onChange={(event) => setKeyframeFilter(event.target.value)}
-                >
-                  <option value="all">All keyframes</option>
-                  {/*
-                    Every keyframe with a pose, not only the prepared ones: this select
-                    also drives which panorama is shown, and a keyframe with no
-                    proposals is still worth looking at.
-                  */}
-                  {navigableKeyframeIds.map((keyframeId) => {
-                    const keyframe = keyframeSummaryById.get(keyframeId);
-                    return (
-                      <option key={keyframeId} value={keyframeId}>
-                        {keyframeId} |{" "}
-                        {keyframe ? `${keyframe.row_count} proposals` : "summary not loaded"}
-                        {keyframe?.ingested === 0 ? " | pruned" : ""}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-            </div>
-
-            <div className="object-search-explorer-controls">
-              <label>
-                Sort
-                <select
-                  value={sortMode}
-                  onChange={(event) => setSortMode(event.target.value as SortMode)}
-                >
-                  <option value="keyframe">Keyframe order</option>
-                  <option value="objects-desc">Most proposals first</option>
-                  <option value="objects-asc">Fewest proposals first</option>
-                </select>
-              </label>
-
-            <label>
-              Keyframes per page
-              <select
-                value={String(pageSize)}
-                onChange={(event) => setPageSize(Number(event.target.value))}
-              >
-                {PAGE_SIZE_OPTIONS.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Columns
-              <select
-                value={String(columns)}
-                onChange={(event) => setColumns(Number(event.target.value))}
-              >
-                {COLUMN_OPTIONS.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="checkbox-row">
+      <div id="explorer-proposals" className="explorer-proposals-anchor">
+        <CollapsibleSection
+          title="Proposal explorer"
+          summary={`${displayedProposals.length} shown · 1 keyframe`}
+          sectionClassName="object-search-explorer-browser"
+          defaultOpen
+        >
+          <div className="object-search-proposal-toolbar">
+            <fieldset className="object-search-proposal-visibility">
+              <legend>Show proposals</legend>
               <label>
                 <input
                   type="checkbox"
-                  checked={includeEmpty}
-                  onChange={(event) => setIncludeEmpty(event.target.checked)}
+                  checked={showKeptProposals}
+                  onChange={(event) => setShowKeptProposals(event.target.checked)}
                 />
-                Include keyframes with no proposals
+                Kept <strong>{pageKeptCount}</strong>
               </label>
-            </div>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={showDiscardedProposals}
+                  onChange={(event) =>
+                    setShowDiscardedProposals(event.target.checked)
+                  }
+                />
+                Discarded <strong>{pageDiscardedCount}</strong>
+              </label>
+            </fieldset>
+
+            <fieldset className="object-search-proposal-visibility">
+              <legend>Detectors</legend>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={bboxPostProcess.showYolo}
+                  onChange={(event) =>
+                    setBboxPostProcess({
+                      ...bboxPostProcess,
+                      showYolo: event.target.checked,
+                    })
+                  }
+                />
+                YOLO-W
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={bboxPostProcess.showGdino}
+                  onChange={(event) =>
+                    setBboxPostProcess({
+                      ...bboxPostProcess,
+                      showGdino: event.target.checked,
+                    })
+                  }
+                />
+                G-DINO
+              </label>
+            </fieldset>
+
+            <BboxPostProcessControls
+              params={bboxPostProcess}
+              areaSliderMax={bboxAreaSliderMax}
+              rawCount={metadataRows.length}
+              filteredCount={pageKeptCount}
+              onChange={setBboxPostProcess}
+              onReset={() => {
+                const { showYolo, showGdino } = bboxPostProcess;
+                setBboxPostProcess({
+                  ...DEFAULT_BBOX_POST_PROCESS,
+                  showYolo,
+                  showGdino,
+                });
+              }}
+            />
           </div>
+
+          <div className="object-search-explorer-layout">
+            <div className="object-search-explorer-main">
+              <details className="explorer-display-options">
+                <summary>
+                  Display and paging
+                  <span>
+                    1 keyframe · {columns} columns
+                  </span>
+                </summary>
+                <div className="object-search-explorer-controls">
+                  <label>
+                    Sort
+                    <select
+                      value={sortMode}
+                      onChange={(event) =>
+                        setSortMode(event.target.value as SortMode)
+                      }
+                    >
+                      <option value="keyframe">Keyframe order</option>
+                      <option value="objects-desc">Most proposals first</option>
+                      <option value="objects-asc">Fewest proposals first</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    Columns
+                    <select
+                      value={String(columns)}
+                      onChange={(event) =>
+                        setColumns(Number(event.target.value))
+                      }
+                    >
+                      {COLUMN_OPTIONS.map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="checkbox-row">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={includeEmpty}
+                        onChange={(event) =>
+                          setIncludeEmpty(event.target.checked)
+                        }
+                      />
+                      Include keyframes with no proposals
+                    </label>
+                  </div>
+                </div>
+              </details>
 
           <div className="object-search-explorer-pagination">
             <button
@@ -2094,91 +2409,108 @@ function ObjectSearchExplorerPanel(props: Props) {
             </button>
           </div>
 
-          {!pageRows.length ? (
+          {!showKeptProposals && !showDiscardedProposals ? (
+            <p className="muted">Select Kept or Discarded to show proposals.</p>
+          ) : !pageRows.length ? (
             <p className="muted">
               {summary
                 ? "No proposals match the current filters."
                 : "No proposals: this map has no object-search metadata."}
             </p>
           ) : (
-            <div
-              className="object-search-cutout-grid"
-              style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
-            >
-              {pageRows.map((row) => {
+            <section className="object-search-keyframe-proposals">
+              <header>
+                <div>
+                  <p className="eyebrow">Current page</p>
+                  <h4>Keyframe {pageKeyframeIds[0] ?? "-"}</h4>
+                </div>
+                <span>
+                  {pageKeptCount} kept · {pageDiscardedCount} discarded
+                </span>
+              </header>
+              <div
+                className="object-search-cutout-grid"
+                style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+              >
+              {displayedProposals.map(({ row, state }) => {
                 // The stored thumbnail is the default: it is the only image certain to
                 // be what MetaCLIP2 embedded. A re-render is the fallback for maps
                 // prepared without crops.
                 const previewUrl = row.thumbnail_key
                   ? rowThumbnailUrl(props.mapId, row.thumbnail_key)
                   : rowRenderUrl(props.mapId, row.row_index, { size: 336 });
+                const label = row.label || "Unlabelled proposal";
+                const technicalSummary = [
+                  `Row ${row.row_index}`,
+                  row.detector_source || "unknown source",
+                  row.detection_score === null
+                    ? "unknown score"
+                    : `score ${row.detection_score.toFixed(3)}`,
+                  row.depth === null ? "no depth" : `${row.depth.toFixed(2)} m depth`,
+                ].join(" · ");
                 return (
                   <button
                     className={`object-search-cutout-card${
                       row.row_index === selectedRowIndex ? " is-selected" : ""
-                    }`}
+                    }${state === "discarded" ? " is-discarded" : ""}`}
                     type="button"
                     key={row.row_index}
-                    onClick={() => setSelectedRowIndex(row.row_index)}
+                    aria-label={`${label}, ${state}. ${technicalSummary}`}
+                    title={technicalSummary}
+                    onClick={() => selectProposalAndRevealPreview(row.row_index)}
                   >
                     <span className="object-search-cutout-image-wrap">
+                      <span className="object-search-proposal-row-badge">
+                        #{row.row_index}
+                      </span>
+                      {state === "discarded" ? (
+                        <span className="object-search-proposal-state-badge">
+                          Discarded
+                        </span>
+                      ) : null}
                       <img
                         src={previewUrl}
-                        alt={`Proposal ${row.row_index}${row.label ? ` (${row.label})` : ""}`}
-                        title="Click to place a depth pin"
+                        alt={`Proposal ${row.row_index} (${label})`}
                         loading="lazy"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setSelectedRowIndex(row.row_index);
-                          const { xRatio, yRatio } = readClickRatio(event);
-                          placeDepthPin(
-                            "cutout",
-                            row.keyframe_id,
-                            xRatio,
-                            yRatio,
-                            row.row_index,
-                          );
-                        }}
                       />
-                      {depthPin?.source === "cutout" && depthPin.rowIndex === row.row_index ? (
-                        <span
-                          className={`object-search-depth-pin is-${depthPin.status}`}
-                          style={{
-                            left: `${depthPin.xRatio * 100}%`,
-                            top: `${depthPin.yRatio * 100}%`,
-                          }}
-                        />
-                      ) : null}
                     </span>
-                    <span className="object-search-cutout-card-meta">
-                      <strong>
-                        {row.row_index} {row.label ? `| ${row.label}` : ""}
-                      </strong>
-                      <small>
-                        keyframe {row.keyframe_id} | {row.detector_source || "?"}
-                        {row.detection_score !== null
-                          ? ` ${row.detection_score.toFixed(2)}`
-                          : ""}
-                        {" | "}
-                        {row.depth !== null ? `${row.depth.toFixed(1)} m` : "no depth"}
-                      </small>
+                    <span className="object-search-cutout-card-label" title={label}>
+                      {label}
                     </span>
                   </button>
                 );
               })}
-            </div>
+              </div>
+            </section>
           )}
         </div>
 
-        <aside className="object-search-explorer-inspector">
+        <aside ref={inspectorRef} className="object-search-explorer-inspector">
           <h3>Selected proposal</h3>
           {selectedDetection ? (
             <>
-              <div className="metrics-row">
-                <span>Keyframe {selectedDetection.keyframe_id}</span>
+              <div className="object-search-selected-heading">
+                <strong>{selectedDetection.label || "Unlabelled proposal"}</strong>
                 <span>Row {selectedDetection.row_index}</span>
+              </div>
+              <button
+                type="button"
+                className="primary-button is-annotation object-search-annotate-action"
+                title="Open the Annotation tab on this proposal, keeping the keyframe, the depth point and the spatial context"
+                onClick={() => annotateProposal(selectedDetection)}
+              >
+                Annotate this proposal
+              </button>
+              <div className="object-search-selected-facts">
+                <span>Keyframe {selectedDetection.keyframe_id}</span>
+                <span>{selectedDetection.detector_source || "Unknown source"}</span>
                 <span>
-                  {filteredDetections.length} / {rawDetections.length} proposals kept
+                  Score {selectedDetection.detection_score?.toFixed(3) ?? "unknown"}
+                </span>
+                <span>
+                  {selectedDetection.depth === null
+                    ? "No depth"
+                    : `${selectedDetection.depth.toFixed(2)} m depth`}
                 </span>
                 {activeKeyframeSummary ? (
                   <span
@@ -2194,30 +2526,28 @@ function ObjectSearchExplorerPanel(props: Props) {
               </div>
 
               {/*
-                The stored thumbnail (left) is what MetaCLIP2 saw, masked to a square by
-                build_padding_mask. The re-render (right) is the proposal's true angular
-                extent at a widened FOV — the same four numbers, two different views.
+                The grid already shows what MetaCLIP2 saw. The inspector leads with the
+                useful delta: the proposal's true angular extent at a widened FOV.
               */}
-              <div className="object-search-proposal-previews">
-                {selectedDetection.thumbnail_key ? (
-                  <figure>
-                    <img
-                      src={rowThumbnailUrl(props.mapId, selectedDetection.thumbnail_key)}
-                      alt={`Stored thumbnail for proposal ${selectedDetection.row_index}`}
-                      loading="lazy"
-                    />
-                    <figcaption>Stored thumbnail (embedded)</figcaption>
-                  </figure>
-                ) : null}
-                <figure>
+              <figure className="object-search-context-preview">
+                <span className="object-search-depth-pin-stage">
                   <img
                     src={rowRenderUrl(props.mapId, selectedDetection.row_index, {
                       size: 512,
                       fovScale: 2,
                     })}
                     alt={`Context view for proposal ${selectedDetection.row_index}`}
+                    title="Ctrl+click to place a depth pin"
                     loading="lazy"
+                    onMouseMove={(event) => {
+                      setSelectedPreviewCursor(readClickRatio(event));
+                      setIsDepthModifierPressed(event.ctrlKey);
+                    }}
+                    onMouseLeave={() => setSelectedPreviewCursor(null)}
                     onClick={(event) => {
+                      if (!event.ctrlKey) {
+                        return;
+                      }
                       const { xRatio, yRatio } = readClickRatio(event);
                       placeDepthPin(
                         "cutout",
@@ -2228,20 +2558,169 @@ function ObjectSearchExplorerPanel(props: Props) {
                       );
                     }}
                   />
-                  <figcaption>Context re-render, 2x FOV (reconstructed)</figcaption>
-                </figure>
-              </div>
+                  {isDepthModifierPressed && selectedPreviewCursor ? (
+                    <span
+                      className="object-search-depth-projection-cursor"
+                      aria-hidden="true"
+                      style={{
+                        left: `${selectedPreviewCursor.xRatio * 100}%`,
+                        top: `${selectedPreviewCursor.yRatio * 100}%`,
+                      }}
+                    />
+                  ) : null}
+                  {depthPin?.source === "cutout" &&
+                  depthPin.rowIndex === selectedDetection.row_index ? (
+                    <span
+                      className={`object-search-depth-pin is-${depthPin.status}`}
+                      style={{
+                        left: `${depthPin.xRatio * 100}%`,
+                        top: `${depthPin.yRatio * 100}%`,
+                      }}
+                    />
+                  ) : null}
+                </span>
+                <figcaption>Context re-render · 2× FOV · Ctrl+click to place a depth pin</figcaption>
+              </figure>
 
-              <BboxPostProcessControls
-                params={bboxPostProcess}
-                areaSliderMax={bboxAreaSliderMax}
-                rawCount={rawDetections.length}
-                filteredCount={filteredDetections.length}
-                onChange={setBboxPostProcess}
-                onReset={resetBboxPostProcess}
-              />
+              <CollapsibleSection
+                title="Project into nearby keyframes"
+                summary={
+                  selectedDetection.depth === null
+                    ? "Depth required"
+                    : neighborProjections
+                      ? `${neighborProjections.projections.length} views`
+                      : `${neighborProjectionCount} ${
+                          ignoreNeighborMinDistance ? "nearest" : "diverse"
+                        } views`
+                }
+                defaultOpen={false}
+              >
+                <div className="object-search-neighbor-projection-controls">
+                  <label>
+                    Neighbours
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={neighborProjectionCount}
+                      onChange={(event) =>
+                        setNeighborProjectionCount(
+                          Math.max(1, Math.min(12, Number(event.target.value) || 1)),
+                        )
+                      }
+                    />
+                  </label>
+                  <label
+                    className="object-search-neighbor-distance-toggle"
+                    title="Return the closest keyframes even when their camera positions are less than 0.5 m apart."
+                  >
+                    <input
+                      type="checkbox"
+                      checked={ignoreNeighborMinDistance}
+                      onChange={(event) => {
+                        setIgnoreNeighborMinDistance(event.target.checked);
+                        setNeighborProjections(null);
+                      }}
+                    />
+                    <span>
+                      Closest only
+                      <small>No 0.5 m spacing</small>
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={
+                      selectedDetection.depth === null || neighborProjectionLoading
+                    }
+                    onClick={() => void loadNeighborProjections()}
+                  >
+                    {neighborProjectionLoading ? "Projecting..." : "Project"}
+                  </button>
+                </div>
 
-              {isLoadingRow ? <p className="muted">Loading row metadata...</p> : null}
+                {selectedDetection.depth === null ? (
+                  <p className="muted">
+                    This proposal has no depth, so it cannot be lifted into 3D.
+                  </p>
+                ) : null}
+                {neighborProjectionError ? (
+                  <p className="warning-box" role="alert">
+                    {neighborProjectionError}
+                  </p>
+                ) : null}
+                {neighborProjections ? (
+                  <>
+                    <p className="map-caption">{neighborProjections.note}</p>
+                    {neighborProjections.projections.length ? (
+                      <div className="object-search-neighbor-projection-grid">
+                        {neighborProjections.projections.map((projection) => (
+                          <button
+                            key={projection.keyframe_id}
+                            type="button"
+                            className="object-search-neighbor-projection-card"
+                            aria-label={`Open keyframe ${projection.keyframe_id} in the panorama`}
+                            onClick={() => openNeighborProjection(projection)}
+                          >
+                            <span className="object-search-neighbor-projection-stage">
+                              <img
+                                src={proposalNeighborProjectionRenderUrl(
+                                  props.mapId,
+                                  selectedDetection.row_index,
+                                  projection.keyframe_id,
+                                  { size: 384, fovScale: 2 },
+                                )}
+                                alt={`Proposal ${selectedDetection.row_index} projected into keyframe ${projection.keyframe_id}`}
+                                loading="lazy"
+                              />
+                              <span
+                                className="object-search-neighbor-projection-box"
+                                aria-hidden="true"
+                              />
+                              <span
+                                className="object-search-depth-projection-cursor"
+                                aria-hidden="true"
+                                style={{ left: "50%", top: "50%" }}
+                              />
+                            </span>
+                            <span className="object-search-neighbor-projection-caption">
+                              <strong>Keyframe {projection.keyframe_id}</strong>
+                              <span>
+                                {projection.distance_from_source_m.toFixed(1)} m from
+                                source · {projection.distance_to_proposal_m.toFixed(1)} m
+                                to proposal
+                              </span>
+                              <ProjectionConfidence projection={projection} />
+                              <span className="object-search-neighbor-projection-action">
+                                Open in panorama →
+                              </span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="muted">No neighbouring keyframe is available.</p>
+                    )}
+                  </>
+                ) : null}
+              </CollapsibleSection>
+
+              {selectedDetection.thumbnail_key ? (
+                <CollapsibleSection
+                  title="Compare embedded crop"
+                  summary="What MetaCLIP2 saw"
+                  defaultOpen={false}
+                >
+                  <figure className="object-search-embedded-preview">
+                    <img
+                      src={rowThumbnailUrl(props.mapId, selectedDetection.thumbnail_key)}
+                      alt={`Embedded crop for proposal ${selectedDetection.row_index}`}
+                      loading="lazy"
+                    />
+                    <figcaption>Stored thumbnail used for embedding</figcaption>
+                  </figure>
+                </CollapsibleSection>
+              ) : null}
 
               {rawDetections.length && !filteredDetections.length ? (
                 <p className="info-box">
@@ -2249,78 +2728,14 @@ function ObjectSearchExplorerPanel(props: Props) {
                 </p>
               ) : null}
 
-              <CollapsibleSection title="Selected row JSON" defaultOpen={false}>
-                <pre className="debug-json">
-                  {JSON.stringify(selectedDetection, null, 2)}
-                </pre>
-              </CollapsibleSection>
-
-              <CollapsibleSection
-                title="Proposals in this keyframe"
-                summary={`${filteredDetections.length} kept`}
-                defaultOpen
-              >
-                <div className="table-wrap object-search-box-table">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Row</th>
-                        <th>Label</th>
-                        <th>Source</th>
-                        <th>Score</th>
-                        <th>Area (deg²)</th>
-                        <th>Depth</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredDetections.map((item) => (
-                        <tr
-                          key={item.row_index}
-                          ref={(node) => {
-                            if (node) {
-                              detectionRowRefs.current.set(item.row_index, node);
-                            } else {
-                              detectionRowRefs.current.delete(item.row_index);
-                            }
-                          }}
-                          className={item.row_index === selectedRowIndex ? "is-selected" : ""}
-                          tabIndex={0}
-                          aria-selected={item.row_index === selectedRowIndex}
-                          onClick={(event) => {
-                            setSelectedRowIndex(item.row_index);
-                            event.currentTarget.focus();
-                          }}
-                          onKeyDown={handleDetectionRowKeyDown}
-                        >
-                          <td>{item.row_index}</td>
-                          <td>{item.label || "-"}</td>
-                          <td>{item.detector_source || "-"}</td>
-                          <td>
-                            {item.detection_score === null
-                              ? "-"
-                              : item.detection_score.toFixed(3)}
-                          </td>
-                          <td>{bboxArea(item).toFixed(2)}</td>
-                          <td>{item.depth === null ? "-" : `${item.depth.toFixed(2)} m`}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </CollapsibleSection>
-
-              <CollapsibleSection title="Preview debug" defaultOpen={false}>
-                <pre className="debug-json">
-                  {JSON.stringify(rowDetail?.preview_debug ?? {}, null, 2)}
-                </pre>
-              </CollapsibleSection>
             </>
           ) : (
             <p className="muted">Select a proposal to inspect it.</p>
           )}
         </aside>
+        </div>
+        </CollapsibleSection>
       </div>
-      </CollapsibleSection>
       {annotationMenu
         ? (() => {
             const menuAnnotation = annotation.annotations.find(

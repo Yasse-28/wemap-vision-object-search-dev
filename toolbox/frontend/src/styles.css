@@ -696,13 +696,182 @@ tr:last-child td {
   flex-wrap: wrap;
   align-items: start;
   justify-content: space-between;
-  gap: var(--s-3);
+  gap: var(--s-4);
 }
 
-.object-search-explorer-header .path-text {
-  max-width: min(720px, 100%);
-  margin: 0;
+.object-search-explorer-intro {
+  max-width: 720px;
+  margin: 8px 0 0;
+  color: var(--c-text-muted);
+  line-height: 1.45;
+}
+
+.object-search-explorer-source {
+  position: relative;
+  max-width: min(420px, 100%);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.object-search-explorer-source summary,
+.explorer-map-options summary,
+.explorer-display-options summary {
+  cursor: pointer;
+  font-weight: var(--fw-bold);
+}
+
+.object-search-explorer-source summary {
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.object-search-explorer-source .path-text {
+  margin: 8px 0 0;
   text-align: right;
+}
+
+.explorer-health-strip {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-md);
+  background: var(--c-border-subtle);
+}
+
+.explorer-health-strip > div {
+  display: flex;
+  flex: 1 1 120px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-2);
+  min-width: 0;
+  padding: 8px 12px;
+  background: var(--c-surface-raised);
+  cursor: help;
+}
+
+.explorer-health-strip dt {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.explorer-health-strip dd {
+  margin: 0;
+  color: var(--c-text);
+  font-weight: var(--fw-bold);
+}
+
+.explorer-health-strip > .explorer-health-proposals {
+  display: grid;
+  flex: 1.8 1 260px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: 5px;
+}
+
+.explorer-health-proposal-breakdown {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 5px;
+  border-top: 1px solid var(--c-border-subtle);
+  color: var(--c-text-muted) !important;
+  font-size: 10px;
+  font-weight: var(--fw-bold) !important;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.explorer-health-proposal-breakdown span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.explorer-health-proposal-breakdown strong {
+  color: var(--c-text);
+  font-size: var(--fs-xs);
+}
+
+/* The context rail is the Explorer's signature element: one persistent place to
+   switch capture and jump through the locate → inspect → annotate workflow. */
+.explorer-context-rail {
+  position: sticky;
+  top: 0;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+  min-width: 0;
+  padding: 10px 12px 10px 15px;
+  border: 1px solid var(--c-border-strong);
+  border-left: 4px solid var(--c-accent-strong);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-surface) 96%, transparent);
+  box-shadow: 0 4px 14px rgba(36, 38, 41, 0.1);
+  backdrop-filter: blur(8px);
+}
+
+.explorer-context-keyframe {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 260px;
+}
+
+.explorer-context-label {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.explorer-context-keyframe select {
+  width: min(330px, 34vw);
+  min-height: 44px;
+  padding-block: 6px;
+}
+
+.explorer-workflow-links {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.explorer-workflow-links a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
+  text-decoration: none;
+}
+
+.explorer-workflow-links a:hover {
+  background: var(--c-accent-soft);
+  color: var(--c-accent-text);
+}
+
+#explorer-spatial,
+#explorer-proposals {
+  scroll-margin-top: 72px;
 }
 
 .object-search-visual-split {
@@ -756,6 +925,87 @@ tr:last-child td {
   font-size: 0.72rem;
 }
 
+.annotation-contract-panel {
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--c-accent) 24%, var(--c-border));
+  border-left: 4px solid var(--c-accent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-accent-soft) 32%, var(--c-surface));
+}
+
+.annotation-contract-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.annotation-contract-heading p {
+  margin: 3px 0 0;
+}
+
+.annotation-contract-status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+}
+
+.annotation-contract-status.is-ready {
+  border-color: color-mix(in srgb, var(--c-ok) 44%, var(--c-border));
+  background: color-mix(in srgb, var(--c-ok) 10%, var(--c-surface));
+  color: var(--c-ok);
+}
+
+.annotation-contract-core,
+.annotation-contract-label-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.annotation-contract-core label,
+.annotation-contract-field,
+.annotation-contract-label-grid label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--c-text-secondary);
+  font-weight: var(--fw-bold);
+}
+
+.annotation-contract-core small,
+.annotation-contract-field small,
+.annotation-contract-label-grid small {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.annotation-contract-details {
+  border-color: color-mix(in srgb, var(--c-accent) 18%, var(--c-border));
+  background: var(--c-surface);
+}
+
+.annotation-contract-details > .collapsible-body {
+  gap: 10px;
+}
+
+.annotation-contract-field-wide {
+  grid-column: 1 / -1;
+}
+
+.annotation-depiction-check {
+  align-items: flex-start;
+  padding-top: 3px;
+  line-height: 1.35;
+}
+
 .explorer-annotation-secondary-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(180px, 1fr));
@@ -776,6 +1026,15 @@ tr:last-child td {
   .explorer-annotation-primary-grid,
   .explorer-annotation-secondary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .annotation-contract-core,
+  .annotation-contract-label-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .annotation-contract-field-wide {
+    grid-column: auto;
   }
 }
 
@@ -924,6 +1183,47 @@ body.explorer-visual-split-dragging {
   gap: 8px 12px;
 }
 
+.object-search-section-kicker {
+  display: block;
+  margin-top: 2px;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+.explorer-map-options {
+  position: relative;
+}
+
+.explorer-map-options > summary {
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  list-style-position: inside;
+}
+
+.explorer-map-options[open] > summary {
+  border-color: var(--c-accent);
+  background: var(--c-accent-soft);
+  color: var(--c-accent-text);
+}
+
+.explorer-map-options > .object-search-explorer-livemap-toggles {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  width: min(520px, 82vw);
+  padding: 12px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-2);
+}
+
 .object-search-explorer-livemap-toggles {
   display: flex;
   flex-wrap: wrap;
@@ -941,7 +1241,7 @@ body.explorer-visual-split-dragging {
 }
 
 .object-search-livemap-roi-toolbar .secondary-button {
-  min-height: 30px;
+  min-height: 44px;
   padding: 0 10px;
 }
 
@@ -1045,6 +1345,122 @@ body.explorer-equirect-dragging {
   }
 }
 
+@media (max-width: 1080px) {
+  #explorer-spatial,
+  #explorer-proposals {
+    scroll-margin-top: 160px;
+  }
+
+  .explorer-context-rail {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .explorer-context-keyframe select {
+    width: 100%;
+  }
+
+  .explorer-workflow-links {
+    border-top: 1px solid var(--c-border-subtle);
+    padding-top: var(--s-2);
+  }
+}
+
+@media (max-width: 680px) {
+  .object-search-explorer-panel {
+    padding-inline: 12px;
+  }
+
+  .object-search-explorer-header {
+    display: grid;
+  }
+
+  .object-search-explorer-source {
+    width: 100%;
+    max-width: none;
+  }
+
+  .object-search-explorer-source .path-text {
+    text-align: left;
+  }
+
+  .explorer-health-strip {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .explorer-health-strip > .explorer-health-proposals {
+    grid-column: 1 / -1;
+  }
+
+  .explorer-context-rail {
+    position: static;
+  }
+
+  #explorer-spatial,
+  #explorer-proposals {
+    scroll-margin-top: 12px;
+  }
+
+  .explorer-context-keyframe {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    min-width: 0;
+  }
+
+  .explorer-context-label {
+    grid-column: 1 / -1;
+  }
+
+  .explorer-workflow-links {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .explorer-workflow-links a {
+    justify-content: center;
+    padding-inline: 4px;
+    font-size: var(--fs-xs);
+  }
+
+  .explorer-map-options {
+    width: 100%;
+  }
+
+  .explorer-map-options > summary {
+    width: 100%;
+  }
+
+  .explorer-map-options > .object-search-explorer-livemap-toggles {
+    position: static;
+    width: 100%;
+    margin-top: 6px;
+    box-shadow: none;
+  }
+
+  .object-search-livemap-roi-toolbar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .object-search-livemap-roi-toolbar > span:first-child,
+  .object-search-livemap-roi-toolbar select,
+  .object-search-livemap-roi-summary {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .object-search-explorer-panel *,
+  .object-search-explorer-panel *::before,
+  .object-search-explorer-panel *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
 .object-search-keyframe-equirect {
   display: flex;
   flex-direction: column;
@@ -1065,6 +1481,10 @@ body.explorer-equirect-dragging {
 .object-search-keyframe-equirect-header h3 {
   margin: 0;
   font-size: 0.95rem;
+}
+
+.object-search-keyframe-heading {
+  margin-right: auto;
 }
 
 .object-search-panorama-view-selector {
@@ -1101,8 +1521,8 @@ body.explorer-equirect-dragging {
 }
 
 .keyframe-stepper button {
-  width: 30px;
-  height: 30px;
+  width: 44px;
+  height: 44px;
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-md);
   background: var(--c-surface);
@@ -1122,8 +1542,8 @@ body.explorer-equirect-dragging {
 }
 
 .keyframe-stepper--compact button {
-  width: 26px;
-  height: 26px;
+  width: 44px;
+  height: 44px;
   font-size: 0.9rem;
 }
 
@@ -1377,6 +1797,62 @@ body.explorer-equirect-dragging {
   align-items: start;
 }
 
+.object-search-proposal-toolbar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 0.55fr)) minmax(280px, 1.2fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.object-search-proposal-toolbar > .annotation-block {
+  padding: 11px 12px;
+  background: var(--c-surface-raised);
+}
+
+.object-search-proposal-visibility {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface-raised);
+}
+
+.object-search-proposal-visibility legend {
+  width: 100%;
+  margin-bottom: 2px;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.object-search-proposal-visibility label {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-secondary);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
+}
+
+.object-search-proposal-visibility input {
+  margin: 0;
+}
+
+.object-search-proposal-visibility strong {
+  color: var(--c-text);
+}
+
 .object-search-explorer-browser,
 .annotation-list-section,
 .explorer-annotation-toolbar {
@@ -1415,9 +1891,48 @@ body.explorer-equirect-dragging {
 .object-search-explorer-controls {
   display: grid;
   grid-template-columns:
-    minmax(160px, 0.85fr) minmax(130px, 0.65fr) minmax(110px, 0.55fr) auto;
+    minmax(160px, 0.85fr) minmax(110px, 0.55fr) auto;
   gap: var(--s-3);
   align-items: end;
+}
+
+.explorer-display-options {
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-md);
+  background: var(--c-surface-raised);
+}
+
+.explorer-display-options > summary {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: 9px 12px;
+  color: var(--c-text-secondary);
+}
+
+.explorer-display-options > summary span {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.explorer-display-options[open] > summary {
+  border-bottom: 1px solid var(--c-border-subtle);
+}
+
+.explorer-display-options .object-search-explorer-controls {
+  padding: 12px;
+}
+
+.explorer-proposals-anchor {
+  min-width: 0;
+}
+
+.object-search-explorer-panel :where(button, a, input, select, summary, [tabindex]):focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--c-accent) 42%, transparent);
+  outline-offset: 2px;
 }
 
 .object-search-explorer-controls .checkbox-row {
@@ -1472,20 +1987,52 @@ body.explorer-equirect-dragging {
 
 .object-search-cutout-grid {
   display: grid;
+  gap: 8px;
+}
+
+.object-search-keyframe-proposals {
+  display: grid;
+  gap: 10px;
+}
+
+.object-search-keyframe-proposals > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
   gap: var(--s-3);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--c-border-subtle);
+}
+
+.object-search-keyframe-proposals > header .eyebrow,
+.object-search-keyframe-proposals > header h4 {
+  margin: 0;
+}
+
+.object-search-keyframe-proposals > header h4 {
+  margin-top: 2px;
+  font-size: 0.98rem;
+}
+
+.object-search-keyframe-proposals > header > span {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
 }
 
 .object-search-cutout-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: var(--s-2);
+  gap: 6px;
   min-width: 0;
-  padding: 8px;
+  padding: 6px;
   border: 1px solid var(--c-border);
   border-radius: var(--r-md);
   background: var(--c-surface);
   color: var(--c-text);
   text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
 }
 
 .object-search-cutout-card:hover,
@@ -1493,6 +2040,21 @@ body.explorer-equirect-dragging {
   border-color: var(--c-accent);
   /* One-off selection tint for image cards. */
   background: #f4faf4;
+}
+
+.object-search-cutout-card.is-discarded {
+  border-style: dashed;
+  opacity: 0.58;
+}
+
+.object-search-cutout-card.is-discarded:hover,
+.object-search-cutout-card.is-discarded.is-selected,
+.object-search-cutout-card.is-discarded:focus-visible {
+  opacity: 1;
+}
+
+.object-search-cutout-card.is-discarded img {
+  filter: saturate(0.55);
 }
 
 .object-search-cutout-card img {
@@ -1509,23 +2071,41 @@ body.explorer-equirect-dragging {
   width: 100%;
 }
 
-.object-search-cutout-card-meta {
-  display: grid;
-  gap: 2px;
-  min-height: 46px;
+.object-search-proposal-row-badge,
+.object-search-proposal-state-badge {
+  position: absolute;
+  top: 5px;
+  z-index: 3;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(24, 31, 27, 0.82);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1.2;
+  pointer-events: none;
 }
 
-.object-search-cutout-card-meta strong,
-.object-search-cutout-card-meta small {
+.object-search-proposal-row-badge {
+  left: 5px;
+}
+
+.object-search-proposal-state-badge {
+  right: 5px;
+  background: rgba(123, 67, 31, 0.88);
+}
+
+.object-search-cutout-card-label {
+  display: -webkit-box;
+  min-height: 2.5em;
+  overflow: hidden;
+  color: var(--c-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  line-height: 1.25;
   overflow-wrap: anywhere;
-}
-
-.object-search-box-table tbody tr {
-  cursor: pointer;
-}
-
-.object-search-box-table tbody tr.is-selected {
-  background: var(--c-accent-soft);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .debug-json {
@@ -1585,9 +2165,22 @@ body.explorer-equirect-dragging {
     padding-top: 14px;
   }
 
-  .object-search-explorer-controls,
-  .object-search-cutout-grid {
+  .object-search-explorer-controls {
     grid-template-columns: 1fr !important;
+  }
+
+  .object-search-proposal-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .object-search-cutout-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 520px) {
+  .object-search-cutout-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   }
 }
 
@@ -1613,29 +2206,374 @@ body.explorer-equirect-dragging {
   margin: 0 0 4px;
 }
 
-/* Stored thumbnail beside the widened re-render: same four numbers, two views. */
-.object-search-proposal-previews {
+.object-search-selected-heading {
   display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-3);
 }
 
-.object-search-proposal-previews figure {
+.object-search-selected-heading strong {
+  color: var(--c-text);
+  font-size: 1.05rem;
+}
+
+.object-search-selected-heading span {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+}
+
+.object-search-selected-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.object-search-selected-facts span {
+  padding: 4px 7px;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-raised);
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.object-search-context-preview,
+.object-search-embedded-preview {
   margin: 0;
   display: grid;
   gap: var(--s-1);
-  max-width: 240px;
 }
 
-.object-search-proposal-previews img {
+.object-search-context-preview img,
+.object-search-embedded-preview img {
   width: 100%;
   border-radius: var(--r-sm);
   background: #111;
 }
 
-.object-search-proposal-previews figcaption {
+.object-search-context-preview .object-search-depth-pin-stage {
+  display: block;
+  width: 100%;
+}
+
+.object-search-context-preview figcaption,
+.object-search-embedded-preview figcaption {
   font-size: 11px;
   color: #566;
+}
+
+.object-search-embedded-preview {
+  max-width: 240px;
+}
+
+.object-search-neighbor-projection-controls {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--s-3);
+}
+
+.object-search-neighbor-projection-controls label {
+  display: grid;
+  gap: var(--s-1);
+  color: var(--c-text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+}
+
+.object-search-neighbor-projection-controls input {
+  width: 84px;
+}
+
+.object-search-neighbor-projection-controls .object-search-neighbor-distance-toggle {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: var(--s-2);
+  min-width: 0;
+  cursor: pointer;
+}
+
+.object-search-neighbor-distance-toggle input {
+  flex: 0 0 auto;
+  width: auto;
+}
+
+.object-search-neighbor-distance-toggle span {
+  display: grid;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.object-search-neighbor-distance-toggle small {
+  color: var(--c-text-muted);
+  font-size: 10px;
+  font-weight: var(--fw-regular);
+}
+
+.object-search-neighbor-projection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-2);
+}
+
+.object-search-neighbor-projection-card {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-raised);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.object-search-neighbor-projection-card:hover {
+  border-color: var(--c-accent);
+  box-shadow: 0 5px 14px rgba(17, 24, 39, 0.12);
+  transform: translateY(-1px);
+}
+
+.object-search-neighbor-projection-card:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--c-accent) 35%, transparent);
+  outline-offset: 2px;
+}
+
+.object-search-neighbor-projection-stage {
+  position: relative;
+  display: block;
+  min-height: 96px;
+  overflow: hidden;
+  background: var(--c-contrast);
+}
+
+.object-search-neighbor-projection-stage img {
+  display: block;
+  width: 100%;
+  min-height: 96px;
+  object-fit: cover;
+}
+
+.object-search-neighbor-projection-box {
+  position: absolute;
+  inset: 25%;
+  border: 2px solid #11b5ae;
+  box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.45);
+  pointer-events: none;
+}
+
+.object-search-neighbor-projection-caption {
+  display: grid;
+  gap: 2px;
+  padding: 7px 8px 8px;
+  color: var(--c-text-muted);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.object-search-neighbor-projection-caption strong {
+  color: var(--c-text);
+  font-size: var(--fs-xs);
+}
+
+.object-search-projection-confidence {
+  display: grid;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.object-search-confidence-score {
+  --confidence-color: var(--c-disabled);
+  display: grid;
+  gap: 3px;
+}
+
+.object-search-confidence-score.is-high {
+  --confidence-color: var(--c-ok);
+}
+
+.object-search-confidence-score.is-medium {
+  --confidence-color: var(--c-warn);
+}
+
+.object-search-confidence-score.is-low {
+  --confidence-color: var(--c-danger-border);
+}
+
+.object-search-confidence-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--c-text-muted);
+  font-size: 9px;
+}
+
+.object-search-confidence-heading strong {
+  color: var(--confidence-color);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.object-search-confidence-meter {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--c-border-subtle);
+}
+
+.object-search-confidence-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--confidence-color);
+}
+
+.object-search-neighbor-projection-action {
+  margin-top: 3px;
+  color: var(--c-accent-text);
+  font-weight: var(--fw-bold);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .object-search-neighbor-projection-card {
+    transition: none;
+  }
+
+  .object-search-neighbor-projection-card:hover {
+    transform: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .object-search-neighbor-projection-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.annotation-suggestion-strip {
+  display: flex;
+  gap: var(--s-2);
+  overflow-x: auto;
+  padding-bottom: var(--s-1);
+}
+
+.annotation-suggestion-thumb {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  width: 120px;
+  padding: 0;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: var(--r-sm);
+  background: var(--c-surface-raised);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+
+.annotation-suggestion-thumb:hover {
+  border-color: var(--c-accent);
+}
+
+.annotation-suggestion-thumb.is-active {
+  border-color: var(--c-accent);
+}
+
+.annotation-suggestion-thumb-stage {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background: var(--c-contrast);
+}
+
+.annotation-suggestion-thumb-stage img {
+  display: block;
+  width: 100%;
+  height: 80px;
+  object-fit: cover;
+}
+
+.annotation-suggestion-thumb-caption {
+  padding: 4px 6px;
+  color: var(--c-text-secondary);
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .annotation-suggestion-thumb {
+    transition: none;
+  }
+}
+
+.annotation-capsule-main.is-suggestion-review {
+  position: fixed;
+  inset: var(--s-4, 16px);
+  z-index: 60;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: 0 20px 50px rgba(17, 24, 39, 0.35);
+}
+
+.annotation-capsule-viewer.is-suggestion-review-viewer {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+.annotation-suggestion-review-controls {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--s-2);
+  max-height: 40%;
+  padding: var(--s-2) var(--s-3);
+  overflow-y: auto;
+  border-top: 1px solid var(--c-border-subtle);
+}
+
+.annotation-suggestion-review-controls .annotation-action-bar {
+  position: static;
+}
+
+.annotation-suggestion-close {
+  position: absolute;
+  top: var(--s-3);
+  right: var(--s-3);
+  z-index: 61;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 999px;
+  background: var(--c-surface-raised);
+  color: var(--c-text);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.annotation-suggestion-close:hover {
+  border-color: var(--c-accent);
 }
 
 .dismissible-alert {
@@ -1754,11 +2692,19 @@ body.explorer-equirect-dragging {
   font-size: 0.9rem;
 }
 
-.collapsible-header {
+.collapsible-header-row {
   display: flex;
   align-items: center;
   gap: var(--s-2);
   width: 100%;
+}
+
+.collapsible-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex: 1;
+  min-width: 0;
   padding: 0;
   border: 0;
   background: transparent;
@@ -1766,6 +2712,28 @@ body.explorer-equirect-dragging {
   text-align: left;
   color: inherit;
   font: inherit;
+}
+
+.collapsible-dismiss {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 999px;
+  background: var(--c-surface-raised);
+  color: var(--c-text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.collapsible-dismiss:hover {
+  border-color: var(--c-accent);
+  color: var(--c-text);
 }
 
 .collapsible-header h3 {
@@ -2351,21 +3319,6 @@ body.explorer-equirect-dragging {
   opacity: 0.5;
 }
 
-.bbox-postprocess-source-toggles {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 16px;
-  color: var(--c-text-secondary);
-  font-size: 0.9rem;
-  font-weight: 650;
-}
-
-.bbox-postprocess-source-toggles label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
 .bbox-postprocess-slider {
   display: flex;
   flex-direction: column;
@@ -2589,4 +3542,1223 @@ body.explorer-equirect-dragging {
 
 .benchmark-table tr.is-error td {
   color: var(--c-danger-strong);
+}
+
+/* ---------------- annotation tab ---------------- */
+
+/*
+  The Annotation tab is "describe and validate", the Explorer stays "find and
+  verify". Blue is not a new colour: `.secondary-button.is-active` already reserves
+  it for annotation tools, so promoting it to the tab is a continuation, not an
+  invention.
+*/
+:root {
+  --c-annotation: #2563eb;
+  --c-annotation-strong: #1d4ed8;
+  --c-annotation-soft: #eef3ff;
+}
+
+.annotation-panel-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-width: 0;
+  padding: 18px 20px;
+  overflow-y: auto;
+}
+
+.eyebrow.is-annotation {
+  color: var(--c-annotation-strong);
+}
+
+.feature-button.is-annotation.is-active {
+  border-color: var(--c-annotation);
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+}
+
+.primary-button.is-annotation {
+  border-color: var(--c-annotation-strong);
+  background: var(--c-annotation);
+}
+
+.object-search-annotate-action {
+  justify-self: stretch;
+  width: 100%;
+  text-align: center;
+}
+
+.explorer-workflow-link-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
+}
+
+.explorer-workflow-link-button:hover {
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+}
+
+.annotation-tab-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.annotation-tab-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.annotation-mode-switch {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.annotation-mode-tab {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-soft);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.annotation-mode-tab.is-active {
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+  font-weight: var(--fw-bold);
+}
+
+.annotation-io-menu {
+  position: relative;
+}
+
+.annotation-io-menu summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--c-control-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.annotation-io-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.annotation-io-menu-body {
+  position: absolute;
+  right: 0;
+  z-index: 30;
+  width: min(420px, 80vw);
+  margin-top: var(--s-1);
+  padding: var(--s-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-2);
+}
+
+/*
+  The capsule is what makes the split bearable: the proposal, the whole 360° turn it
+  sits on and the livemap, in one fixed band, so nothing sends you back to Explorer
+  just to check you are on the right object.
+*/
+.annotation-capsule {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--c-border-strong);
+  border-left: 4px solid var(--c-annotation);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.annotation-capsule-main {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  min-width: 0;
+}
+
+.annotation-capsule-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--c-border-subtle);
+}
+
+.annotation-capsule-id {
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-capsule-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--c-border-subtle);
+}
+
+.annotation-capsule-angles {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--c-surface-muted);
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-capsule-queue {
+  margin-left: auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-return-button {
+  flex-shrink: 0;
+}
+
+/*
+  The map is open by default and big enough to navigate: picking the next keyframe is
+  a normal move here, not a reason to go back to the Explorer.
+*/
+.annotation-capsule-side {
+  display: flex;
+  flex-direction: column;
+  width: 380px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--c-border-subtle);
+}
+
+.annotation-capsule.is-map-collapsed .annotation-capsule-side {
+  width: auto;
+}
+
+.annotation-capsule-side-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--c-border-subtle);
+  font-size: var(--fs-xs);
+}
+
+.annotation-capsule-side-header .annotation-map-toggle {
+  margin-left: auto;
+}
+
+.annotation-capsule-livemap {
+  flex-grow: 1;
+  min-height: 300px;
+}
+
+.annotation-map-toggle {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  line-height: 1;
+}
+
+.annotation-map-toggle:hover {
+  border-color: var(--c-annotation);
+  color: var(--c-annotation-strong);
+}
+
+.annotation-capsule-map-hint {
+  margin: 0;
+  padding: 5px var(--s-3);
+  border-top: 1px solid var(--c-border-faint);
+  color: var(--c-text-muted);
+  font-size: 10px;
+}
+
+.annotation-capsule-empty {
+  margin: 0;
+  padding: var(--s-4) var(--s-3);
+  color: var(--c-text-muted);
+  line-height: 1.5;
+}
+
+.annotation-capsule-cutout {
+  width: 100%;
+  height: 74px;
+  border-top: 1px solid var(--c-border-subtle);
+  object-fit: cover;
+}
+
+/* The keyframe's whole turn as an axis, under the viewer. */
+.annotation-ribbon {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/*
+  The panorama is a viewer, not a flattened band: an equirectangular image squashed
+  into a strip this short is unreadable, which is exactly how the first version of
+  this capsule failed. The ruler below keeps the whole turn visible instead.
+*/
+.annotation-capsule-viewer {
+  position: relative;
+  background: var(--c-surface-muted);
+}
+
+/* The shared handle sits on the seam between the panorama and the ruler here, so
+   its Explorer margins are cancelled rather than pushing the ruler down. */
+.annotation-capsule-main > .object-search-explorer-equirect-resizer {
+  margin: -7px 0;
+}
+
+/* Clicking a box selects it; a look-around must not, so the cursor only changes
+   while a box is actually under the pointer. */
+.annotation-capsule-viewer.is-over-detection {
+  cursor: pointer;
+}
+
+.annotation-ribbon-ruler {
+  position: relative;
+  height: 46px;
+  border-top: 1px solid var(--c-border-subtle);
+  background: var(--c-surface-raised);
+}
+
+.annotation-ribbon-tick {
+  position: absolute;
+  top: 22px;
+  transform: translateX(-50%);
+  color: var(--c-text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-ribbon-notch {
+  position: absolute;
+  top: 0;
+  width: 3px;
+  height: 15px;
+  margin-left: -1.5px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 0 2px 2px;
+  background: var(--c-disabled);
+  cursor: pointer;
+}
+
+.annotation-ribbon-notch.is-done {
+  background: var(--c-ok);
+}
+
+.annotation-ribbon-notch.is-queued {
+  background: var(--c-warn);
+}
+
+.annotation-ribbon-notch.is-current {
+  width: 4px;
+  height: 22px;
+  background: var(--c-annotation);
+}
+
+.annotation-ribbon-legend {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: 5px var(--s-3);
+  border-top: 1px solid var(--c-border-faint);
+  color: var(--c-text-muted);
+  font-size: 10px;
+}
+
+.annotation-ribbon-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.annotation-ribbon-key::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--c-disabled);
+}
+
+.annotation-ribbon-key.is-done::before {
+  background: var(--c-ok);
+}
+
+.annotation-ribbon-key.is-current::before {
+  background: var(--c-annotation);
+}
+
+.annotation-ribbon-coverage {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-mode-body {
+  min-width: 0;
+}
+
+.explorer-annotation-toolbar.is-bare {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+}
+
+.annotation-action-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-surface) 96%, transparent);
+  box-shadow: 0 -4px 14px rgba(36, 38, 41, 0.08);
+  backdrop-filter: blur(8px);
+}
+
+.annotation-action-hint {
+  margin-left: auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+@media (max-width: 1100px) {
+  .annotation-capsule {
+    flex-direction: column;
+  }
+
+  .annotation-capsule-side {
+    width: auto;
+    border-left: 0;
+    border-top: 1px solid var(--c-border-subtle);
+  }
+}
+
+/*
+  The Annotation tab's form is dense on purpose: the panorama and the map are what
+  the annotator reads, the form is what they fill. Scoped to `.is-bare`, which only
+  the tab renders, so the shared components keep their normal scale everywhere else.
+*/
+.explorer-annotation-toolbar.is-bare {
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  font-size: 0.78rem;
+}
+
+.explorer-annotation-toolbar.is-bare h3,
+.explorer-annotation-toolbar.is-bare h4 {
+  font-size: 0.72rem;
+}
+
+.explorer-annotation-toolbar.is-bare label,
+.explorer-annotation-toolbar.is-bare .collapsible-section > summary {
+  font-size: 0.72rem;
+}
+
+.explorer-annotation-toolbar.is-bare small,
+.explorer-annotation-toolbar.is-bare .muted {
+  font-size: 0.66rem;
+  line-height: 1.3;
+}
+
+.explorer-annotation-toolbar.is-bare input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+.explorer-annotation-toolbar.is-bare select {
+  min-height: 32px;
+  padding: 5px 8px;
+  font-size: 0.78rem;
+}
+
+.explorer-annotation-toolbar.is-bare input[type="color"] {
+  min-height: 32px;
+}
+
+.explorer-annotation-toolbar.is-bare .primary-button,
+.explorer-annotation-toolbar.is-bare .secondary-button,
+.explorer-annotation-toolbar.is-bare .danger-button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.78rem;
+}
+
+.explorer-annotation-toolbar.is-bare .explorer-annotation-mode-row,
+.explorer-annotation-toolbar.is-bare .explorer-annotation-primary-grid,
+.explorer-annotation-toolbar.is-bare .explorer-annotation-secondary-grid {
+  gap: var(--s-2);
+}
+
+.explorer-annotation-toolbar.is-bare .annotation-contract-panel {
+  padding: var(--s-2);
+}
+
+.explorer-annotation-toolbar.is-bare .annotation-contract-core,
+.explorer-annotation-toolbar.is-bare .annotation-contract-label-grid {
+  gap: var(--s-2);
+}
+
+.explorer-annotation-toolbar.is-bare .annotation-contract-status {
+  padding: 2px 7px;
+  font-size: 0.66rem;
+}
+
+.explorer-annotation-toolbar.is-bare .class-select {
+  padding: 5px 8px;
+}
+
+.explorer-annotation-toolbar.is-bare .class-type {
+  font-size: 0.6rem;
+}
+
+/* The action bar goes with it: it is a footer, not a headline. */
+.annotation-action-bar {
+  padding: 6px var(--s-3);
+}
+
+.annotation-action-bar .primary-button {
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: 0.82rem;
+}
+
+.annotation-action-bar .secondary-button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.78rem;
+}
+
+.annotation-action-hint {
+  font-size: 0.66rem;
+}
+
+.annotation-region-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.annotation-region-hint {
+  color: var(--c-annotation-strong);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-region-controls .primary-button,
+.annotation-region-controls .secondary-button {
+  min-height: 30px;
+  padding: 0 11px;
+  font-size: 0.78rem;
+}
+
+/* While an outline is being traced the panorama is a drawing surface, so the
+   box-hover cursor must not claim it. */
+.annotation-capsule-viewer.is-drawing-region,
+.annotation-capsule-viewer.is-drawing-region.is-over-detection {
+  cursor: crosshair;
+}
+
+/*
+  An offered extent, not a filled-in one. It reads as a suggestion because it is one:
+  the width is the detector's box and the depth is a single sample, so a value that
+  looked measured would be the worst of both.
+*/
+.annotation-extent-suggestion {
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  padding: 5px 8px;
+  border: 1px dashed color-mix(in srgb, var(--c-annotation) 45%, var(--c-border));
+  border-radius: var(--r-sm);
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+  font-size: 0.72rem;
+  font-weight: var(--fw-bold);
+  text-align: left;
+}
+
+.annotation-extent-suggestion:hover {
+  border-style: solid;
+}
+
+.annotation-extent-suggestion span {
+  color: var(--c-text-muted);
+  font-size: 0.66rem;
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+/*
+  Reusing an object id is what makes two points one physical object, so the ids in use
+  are one click away rather than behind a `<datalist>` that only shows what already
+  matches what is typed.
+*/
+.object-id-combobox {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.object-id-combobox input {
+  padding-right: 30px;
+}
+
+.object-id-combobox-toggle {
+  position: absolute;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-muted);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.object-id-combobox-toggle:hover:not(:disabled) {
+  background: var(--c-surface-muted);
+  color: var(--c-text);
+}
+
+.object-id-combobox-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.object-id-combobox-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  max-height: 240px;
+  margin: 0;
+  padding: 3px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-2);
+}
+
+.object-id-combobox-option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text);
+  text-align: left;
+  font-weight: 400;
+}
+
+.object-id-combobox-option:hover,
+.object-id-combobox-option.is-active {
+  background: var(--c-annotation-soft);
+  color: var(--c-annotation-strong);
+}
+
+.object-id-combobox-id {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--fw-medium);
+}
+
+.object-id-combobox-class {
+  flex-shrink: 0;
+  color: var(--c-text-muted);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.object-id-combobox-count {
+  flex-shrink: 0;
+  color: var(--c-text-muted);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.object-id-combobox-empty {
+  padding: 7px 8px;
+  color: var(--c-text-muted);
+  font-size: 0.7rem;
+}
+
+/* The detector's guess, marked as a guess. */
+.annotation-predicted-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px dashed var(--c-border-strong);
+  border-radius: 999px;
+  background: var(--c-surface-raised);
+  color: var(--c-text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.annotation-predicted-label:hover {
+  border-color: var(--c-annotation);
+  color: var(--c-annotation-strong);
+}
+
+.annotation-predicted-label-kicker {
+  color: var(--c-text-muted);
+  font-size: 0.6rem;
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.annotation-predicted-label-score {
+  color: var(--c-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The stepper sits in the capsule bar, so it matches the buttons beside it rather
+   than the Explorer's 44px controls. */
+.annotation-capsule-bar .keyframe-stepper button {
+  width: 30px;
+  height: 30px;
+  font-size: var(--fs-sm);
+}
+
+/* ---------------------------------------------------------------------------
+   Analysis panel — the map-analysis synthesis, its verdict badges and the
+   hover overlay that explains each metric.
+   --------------------------------------------------------------------------- */
+
+.analysis-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  overflow-y: auto;
+}
+
+.analysis-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.analysis-toolbar-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s-1);
+}
+
+.analysis-progress {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-muted);
+  font-size: var(--fs-sm);
+  color: var(--c-text-soft);
+}
+
+.analysis-trace {
+  white-space: pre-wrap;
+  font-size: var(--fs-xs);
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.analysis-missing {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  border-left: 3px solid var(--c-warn);
+  background: var(--c-surface-muted);
+  font-size: var(--fs-sm);
+  color: var(--c-text-secondary);
+}
+
+/* --- the score card ------------------------------------------------------- */
+
+.analysis-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: var(--s-2);
+}
+
+.analysis-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-border-subtle);
+  border-left-width: 3px;
+  border-left-color: var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  cursor: help;
+}
+
+.analysis-tile.is-good {
+  border-left-color: var(--c-ok);
+}
+
+.analysis-tile.is-warn {
+  border-left-color: var(--c-warn);
+}
+
+.analysis-tile.is-bad {
+  border-left-color: var(--c-danger-border);
+}
+
+.analysis-tile-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-muted);
+}
+
+.analysis-tile-value {
+  font-size: 1.15rem;
+  font-weight: var(--fw-medium);
+  color: var(--c-contrast);
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-tile-detail {
+  font-size: var(--fs-xs);
+  color: var(--c-text-faint);
+}
+
+.analysis-tile-mark {
+  display: inline-block;
+  margin-left: var(--s-1);
+  width: 0.95em;
+  height: 0.95em;
+  line-height: 0.95em;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--c-surface-muted);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: 0.65rem;
+}
+
+/* --- collapsible sections ------------------------------------------------ */
+
+.analysis-section {
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+}
+
+.analysis-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.analysis-section-head:hover {
+  background: var(--c-surface-raised);
+}
+
+.analysis-section-id {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  color: var(--c-accent-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-section-title {
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.analysis-section-subtitle {
+  flex: 1;
+  font-size: var(--fs-sm);
+  color: var(--c-text-faint);
+}
+
+.analysis-section-chevron {
+  color: var(--c-text-muted);
+}
+
+.analysis-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: 0 var(--s-3) var(--s-3);
+  border-top: 1px solid var(--c-border-faint);
+}
+
+.analysis-subheading {
+  margin: var(--s-2) 0 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text-soft);
+}
+
+.analysis-inert {
+  margin: var(--s-2) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+  font-style: italic;
+}
+
+/* --- rows, tables, chips ------------------------------------------------- */
+
+.analysis-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: 3px 0;
+  border-bottom: 1px solid var(--c-border-faint);
+  font-size: var(--fs-sm);
+}
+
+.analysis-row-label {
+  color: var(--c-text-soft);
+}
+
+.analysis-row-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--c-contrast);
+}
+
+.analysis-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+
+.analysis-table th,
+.analysis-table td {
+  padding: 3px var(--s-2);
+  text-align: right;
+  border-bottom: 1px solid var(--c-border-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-table th:first-child,
+.analysis-table td:first-child {
+  text-align: left;
+  font-variant-numeric: normal;
+}
+
+.analysis-table th {
+  font-weight: var(--fw-medium);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.analysis-table td.is-good {
+  color: var(--c-ok);
+}
+
+.analysis-table td.is-warn {
+  color: var(--c-warn);
+}
+
+.analysis-table td.is-bad {
+  color: var(--c-danger);
+}
+
+.analysis-table td.is-muted {
+  color: var(--c-text-faint);
+}
+
+.analysis-inline-rows {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+
+.analysis-chip {
+  padding: 1px var(--s-2);
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 999px;
+  background: var(--c-surface-muted);
+  font-size: var(--fs-xs);
+  color: var(--c-text-secondary);
+}
+
+.analysis-chip.is-good {
+  border-color: var(--c-ok);
+  color: var(--c-ok);
+}
+
+.analysis-chip.is-warn {
+  border-color: var(--c-warn);
+  color: var(--c-warn);
+}
+
+.analysis-chip.is-bad {
+  border-color: var(--c-danger-border);
+  color: var(--c-danger);
+}
+
+/* --- the min_keyframes curve -------------------------------------------- */
+
+.analysis-chart {
+  width: 100%;
+  max-width: 34rem;
+  height: auto;
+}
+
+.analysis-chart-grid {
+  stroke: var(--c-border-faint);
+  stroke-width: 1;
+}
+
+.analysis-chart-marker {
+  stroke: var(--c-border-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.analysis-chart-marker-label,
+.analysis-chart-tick,
+.analysis-chart-axis {
+  fill: var(--c-text-faint);
+  font-size: 9px;
+}
+
+.analysis-chart-tick {
+  text-anchor: end;
+}
+
+.analysis-chart-line {
+  fill: none;
+  stroke: var(--c-accent);
+  stroke-width: 2;
+}
+
+.analysis-chart-line.is-secondary {
+  stroke: var(--c-text-muted);
+  stroke-dasharray: 4 3;
+}
+
+.analysis-chart-dot {
+  fill: var(--c-accent);
+}
+
+.analysis-chart-dot.is-secondary {
+  fill: var(--c-text-muted);
+}
+
+.analysis-legend {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-faint);
+}
+
+.analysis-legend-key {
+  display: inline-block;
+  width: 14px;
+  height: 2px;
+  background: var(--c-accent);
+}
+
+.analysis-legend-key.is-secondary {
+  margin-left: var(--s-3);
+  background: var(--c-text-muted);
+}
+
+/* --- the hover overlay --------------------------------------------------- */
+
+.metric-hint {
+  position: relative;
+  cursor: help;
+}
+
+.metric-hint:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+.metric-hint-card {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  width: 340px;
+  padding: var(--s-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-2);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  color: var(--c-text-secondary);
+  text-transform: none;
+  letter-spacing: normal;
+  pointer-events: none;
+}
+
+.metric-hint-title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-contrast);
+}
+
+.metric-hint-bands {
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-muted);
+  color: var(--c-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-hint-why em {
+  color: var(--c-text-muted);
+  font-style: normal;
+  font-weight: var(--fw-medium);
+}
+
+.metric-hint-note {
+  padding-top: var(--s-1);
+  border-top: 1px solid var(--c-border-faint);
+  color: var(--c-text-faint);
+}
+
+/* --- the analysis layers on the livemap ---------------------------------- */
+
+.analysis-map {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.analysis-layer-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+
+.analysis-layer-button {
+  padding: 2px var(--s-2);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  background: var(--c-surface);
+  color: var(--c-text-soft);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.analysis-layer-button:hover {
+  border-color: var(--c-border-strong);
+  background: var(--c-surface-raised);
+}
+
+.analysis-layer-button.is-active {
+  border-color: var(--c-accent);
+  background: var(--c-accent-soft);
+  color: var(--c-accent-text);
+  font-weight: var(--fw-medium);
+}
+
+.analysis-legend-text {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-faint);
+}
+
+/* The layers' own scale, so the legend cannot drift from map_layers.COLOUR_SCALE. */
+.analysis-legend-ramp {
+  display: inline-block;
+  width: 72px;
+  height: 8px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    #1a9850,
+    #91cf60,
+    #d9ef8b,
+    #fee08b,
+    #fc8d59,
+    #d73027
+  );
+}
+
+.analysis-map-canvas {
+  /* At least `.livemap-container`'s own min-height (560px): under it the livemap
+     overflows this box, `overflow: hidden` clips the map element to nothing, and
+     mapbox never loads a tile. */
+  height: 36rem;
+  min-height: 560px;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.analysis-map-note {
+  margin: 0;
+  font-size: var(--fs-xs);
+}
+
+.analysis-section-head.is-static {
+  cursor: default;
+}
+
+.analysis-section-head.is-static:hover {
+  background: none;
 }

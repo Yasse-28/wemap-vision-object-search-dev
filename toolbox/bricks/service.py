@@ -63,6 +63,7 @@ from toolbox.bricks.candidates import (
 )
 from toolbox.bricks.feedback import load_review_feedback
 from toolbox.bricks.georef_source import load_pose_source
+from toolbox.bricks.inverted_softmax import apply_inverted_softmax, load_denominators
 from toolbox.bricks.localize import LocalizationParams, build_localize_response
 from toolbox.bricks.matching import PARTITION_METHODS, build_matching_response
 from toolbox.bricks.triangulate import DEFAULT_INLIER_THRESHOLD_DEG
@@ -306,6 +307,11 @@ class LocalizeParams(BaseModel):
 
     num_results: int = Field(default=100, gt=0, le=5000)
     min_similarity: float = 0.2
+    # Inverted-softmax rescoring of the retrieved set (dev-only, see
+    # `toolbox.bricks.inverted_softmax`). None = off, which is production behaviour.
+    # Requires the map's precomputed denominators; without them the request fails
+    # rather than silently ranking on raw similarity.
+    inverted_softmax_beta: float | None = Field(default=None, gt=0.0)
     candidate_count: int = Field(default=K_INTERNAL, gt=0, le=5000)
     clustering_eps_m: float = 2.0
     min_keyframes_per_cluster: int = 2
@@ -381,6 +387,7 @@ class LocalizeParams(BaseModel):
             candidate_count=self.candidate_count,
             num_results=self.num_results,
             min_similarity=self.min_similarity,
+            inverted_softmax_beta=self.inverted_softmax_beta,
             max_observations_per_cluster=self.max_observations_per_cluster,
             clustering_eps_m=self.clustering_eps_m,
             min_keyframes_per_cluster=self.min_keyframes_per_cluster,
@@ -627,6 +634,33 @@ def create_app() -> FastAPI:
                         and params.multicut_sem_weight != 0.0
                     )
                 ),
+            )
+        if params.inverted_softmax_beta is not None:
+            if params.feedback_alpha or params.feedback_beta:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "inverted_softmax_beta and the review-feedback gains both write"
+                        " similarity_boosted; run one or the other, not both."
+                    ),
+                )
+            denominators = load_denominators(entry.path)
+            if denominators is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "No inverted-softmax denominators for this map. Build them:"
+                        " python -m toolbox.benchmark.build_is_denominators <map_path>"
+                    ),
+                )
+            candidates, rescored = apply_inverted_softmax(
+                candidates, denominators, params.inverted_softmax_beta
+            )
+            logger.info(
+                "inverted softmax: %d/%d candidats rescores (beta %g, denominateurs "
+                "construits a beta %g)",
+                rescored, len(candidates), params.inverted_softmax_beta,
+                denominators.beta,
             )
         response = build_localize_response(
             candidates,

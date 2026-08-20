@@ -5,14 +5,21 @@ import path from "node:path";
 import test from "node:test";
 
 import type { MapEntry } from "./config.js";
+import { parseManifest } from "./map-manifest.js";
+import type { MetadataRow } from "./object-search-metadata.js";
 import {
   columnarKeyframeMarkers,
+  edgeNccAssessment,
+  featureMatchAssessment,
   indexProjectWorldPointPayload,
   keyframeHeadingDegreesFromPose,
   metadataKeyframesPayload,
   objectSearchMetadataMarkersPayload,
   objectSearchMetadataStatusPayload,
   previewFromPathPng,
+  projectionOcclusionAssessment,
+  projectProposalIntoNearestKeyframes,
+  reprojectAnnotationSources,
   WorkbenchRouteError,
 } from "./workbench-index.js";
 
@@ -93,6 +100,104 @@ async function createMap(
   };
 }
 
+test("reprojects an image annotation when the manifest renumbers its keyframe", async () => {
+  const fixture = await createMap([0, 0, 0]);
+  try {
+    const annotation: {
+      coordinates: number[];
+      altitude: number | null;
+      level: string | null;
+      source: Record<string, unknown>;
+    } = {
+      coordinates: [6, 45],
+      altitude: 100,
+      level: "0",
+      source: {
+        keyframeId: "2",
+        imageFilename: "2.jpg",
+        erpU: 0.5,
+        erpV: 0.5,
+        depthM: 2,
+      },
+    };
+    const first = (await reprojectAnnotationSources(fixture.map, [annotation]))[0];
+    assert.equal(first.source?.resolutionStatus, "resolved");
+    assert.equal(first.source?.keyframeId, "2");
+
+    const movedManifest = {
+      local_origin: [6.0, 45.0, 100.0],
+      map: { name: "test", uuid: "u", venue_type: "rail" },
+      geo_levels: [
+        { value: 0, min_altitude: -10, max_altitude: 10, geo_ref: 2 },
+      ],
+      geo_keyframes: [
+        {
+          x: 5,
+          y: 0,
+          z: 0,
+          orientation: [0, 0, 1, 0],
+          image_url: "https://e/images/2.jpg",
+          depth_url: "https://e/depths/2.tif",
+        },
+      ],
+    };
+    await writeFile(
+      path.join(fixture.map.path, "test_2_20260102_000000.json"),
+      JSON.stringify(movedManifest),
+      "utf8",
+    );
+    const second = (await reprojectAnnotationSources(fixture.map, [first]))[0];
+    assert.equal(second.source?.keyframeId, "0");
+    assert.equal(second.source?.geoRefId, 2);
+    assert.equal(second.source?.geoRefVersion, 2);
+    assert.notDeepEqual(second.coordinates, first.coordinates);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("does not silently rebind an annotation from an unresolved identity", async () => {
+  const fixture = await createMap([0, 0, 0]);
+  try {
+    const base = {
+      coordinates: [6, 45] as number[],
+      altitude: 100,
+      level: "0",
+    };
+    const annotations: Array<{
+      coordinates: number[];
+      altitude: number | null;
+      level: string | null;
+      source: Record<string, unknown>;
+    }> = [
+      {
+        ...base,
+        source: { keyframeId: "2", erpU: 0.5, erpV: 0.5, depthM: 2 },
+      },
+      {
+        ...base,
+        source: {
+          keyframeId: "2",
+          videoKeyframeUuid: "99ec6c90-61f5-4ae4-aedd-3f1a83898a4c",
+          erpU: 0.5,
+          erpV: 0.5,
+          depthM: 2,
+        },
+      },
+    ];
+    const [legacy, missingUuid] = await reprojectAnnotationSources(
+      fixture.map,
+      annotations,
+    );
+    assert.equal(legacy.source?.resolutionStatus, "legacy-unverified");
+    assert.deepEqual(legacy.coordinates, base.coordinates);
+    assert.equal(missingUuid.source?.resolutionStatus, "orphaned");
+    assert.deepEqual(missingUuid.coordinates, base.coordinates);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 async function createMetadataMap(): Promise<{
   map: MapEntry;
   cleanup: () => Promise<void>;
@@ -111,6 +216,139 @@ function asRecord(value: unknown): Record<string, unknown> {
   assert.ok(value && typeof value === "object" && !Array.isArray(value));
   return value as Record<string, unknown>;
 }
+
+function proposalProjectionFixture(): {
+  manifest: ReturnType<typeof parseManifest>;
+  row: MetadataRow;
+} {
+  const keyframe = (x: number, image: string) => ({
+    x,
+    y: 0,
+    z: 0,
+    orientation: [0, 0, 1, 0],
+    image_url: `https://e/images/${image}`,
+    depth_url: `https://e/depths/${image.replace(/\.jpg$/, ".tif")}`,
+  });
+  const manifest = parseManifest(
+    "/tmp/projection_1_20260101_000000.json",
+    JSON.stringify({
+      local_origin: [6, 45, 100],
+      map: { name: "projection", uuid: "projection", venue_type: "rail" },
+      geo_levels: [
+        { value: 0, min_altitude: -10, max_altitude: 10, geo_ref: 1 },
+      ],
+      geo_keyframes: [
+        keyframe(0, "0.jpg"),
+        keyframe(1, "1.jpg"),
+        keyframe(1.1, "2.jpg"),
+        keyframe(3, "3.jpg"),
+        keyframe(0.1, "4.jpg"),
+      ],
+    }),
+  );
+  return {
+    manifest,
+    row: {
+      rowIndex: 7,
+      videoKeyframeId: 0,
+      thetaCenter: 0,
+      phiCenter: 0,
+      angularWidth: 0.4,
+      angularHeight: 0.2,
+      detectorSource: "yolo",
+      label: "lamp",
+      detectionScore: 0.8,
+      thumbnailKey: null,
+      depth: 5,
+    },
+  };
+}
+
+test("projects a proposal into the nearest camera before farther poses", () => {
+  const { manifest, row } = proposalProjectionFixture();
+  const projections = projectProposalIntoNearestKeyframes(row, manifest, 1);
+  assert.equal(projections.length, 1);
+  assert.equal(projections[0].keyframe_id, "1");
+  assert.equal(projections[0].distance_from_source_m, 1);
+  assert.ok(Math.abs(projections[0].distance_to_proposal_m - Math.sqrt(26)) < 1e-12);
+  assert.ok(projections[0].erp_u > 0.5);
+  assert.equal(projections[0].erp_v, 0.5);
+  assert.ok(projections[0].angular_width < row.angularWidth);
+});
+
+test("prefers spatially distinct neighbours over nearly duplicate poses", () => {
+  const { manifest, row } = proposalProjectionFixture();
+  const projections = projectProposalIntoNearestKeyframes(row, manifest, 2);
+  assert.deepEqual(
+    projections.map((projection) => projection.keyframe_id),
+    ["1", "3"],
+  );
+  assert.ok(projections[0].geometric_confidence > projections[1].geometric_confidence);
+  assert.ok(projections[0].distance_score > projections[1].distance_score);
+  assert.ok(projections[0].viewpoint_angle_deg < projections[1].viewpoint_angle_deg);
+});
+
+test("can return the strictly nearest poses without the diversity baseline", () => {
+  const { manifest, row } = proposalProjectionFixture();
+  const projections = projectProposalIntoNearestKeyframes(row, manifest, 2, false);
+  assert.deepEqual(
+    projections.map((projection) => projection.keyframe_id),
+    ["4", "1"],
+  );
+  assert.ok(projections[0].distance_from_source_m < 0.5);
+});
+
+test("occlusion confidence separates a matching surface from a foreground obstacle", () => {
+  const clear = projectionOcclusionAssessment(5, 4.8);
+  assert.equal(clear.occlusion_status, "clear");
+  assert.equal(clear.occlusion_confidence, 100);
+
+  const blocked = projectionOcclusionAssessment(5, 2);
+  assert.equal(blocked.occlusion_status, "occluded");
+  assert.ok((blocked.occlusion_confidence ?? 100) < 5);
+  assert.equal(blocked.occlusion_margin_m, -3);
+
+  const unsupported = projectionOcclusionAssessment(5, 8);
+  assert.equal(unsupported.occlusion_status, "depth_mismatch");
+  assert.ok((unsupported.occlusion_confidence ?? 100) < 5);
+});
+
+test("feature confidence requires both verified support and a clean inlier ratio", () => {
+  const strong = featureMatchAssessment(24, 18);
+  assert.equal(strong.feature_match_status, "matched");
+  assert.ok((strong.feature_match_score ?? 0) > 80);
+
+  const sparse = featureMatchAssessment(2, 2);
+  assert.equal(sparse.feature_match_status, "weak");
+  assert.ok((sparse.feature_match_score ?? 100) < 35);
+
+  const textureless = featureMatchAssessment(0, 0, false);
+  assert.equal(textureless.feature_match_status, "no_features");
+  assert.equal(textureless.feature_match_score, 0);
+});
+
+test("Edge NCC confidence clamps correlation and rejects uninformative input", () => {
+  assert.deepEqual(edgeNccAssessment(0.824), {
+    edge_ncc_score: 82,
+    edge_ncc_status: "matched",
+  });
+  assert.deepEqual(edgeNccAssessment(-0.4), {
+    edge_ncc_score: 0,
+    edge_ncc_status: "weak",
+  });
+  assert.deepEqual(edgeNccAssessment(null), {
+    edge_ncc_score: null,
+    edge_ncc_status: "uninformative",
+  });
+});
+
+test("refuses neighbour projection when a proposal has no depth", () => {
+  const { manifest, row } = proposalProjectionFixture();
+  assert.throws(
+    () => projectProposalIntoNearestKeyframes({ ...row, depth: null }, manifest, 5),
+    (error: unknown) => error instanceof WorkbenchRouteError && error.status === 422,
+  );
+});
 
 test("status leaves marker and keyframe tables on their own routes", async () => {
   const fixture = await createMetadataMap();
