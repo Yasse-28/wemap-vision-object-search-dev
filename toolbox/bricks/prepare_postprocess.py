@@ -29,6 +29,7 @@ sqrt-quantised uint16 TIFF. The standalone's zarr reader went to `legacy/`.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -117,6 +118,25 @@ def sample_depths(
     return depths
 
 
+def write_parquet_atomically(table: pa.Table, path: Path) -> None:
+    """Replace `path` with `table`, never leaving a half-written parquet behind.
+
+    Writing straight to `path` is destructive: prepare's output is the only copy,
+    and an interrupted write (kill, OOM, an external drive stalling) truncates the
+    file before the footer, which no parquet reader can open. Temp file in the same
+    directory, fsync, then `os.replace` — atomic on the same filesystem.
+    """
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        pq.write_table(table, tmp_path)
+        with open(tmp_path, "rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def postprocess_metadata(
     metadata_path: Path,
     map_path: Path,
@@ -148,7 +168,7 @@ def postprocess_metadata(
         )
 
     metadata["depth"] = sample_depths(metadata, Path(map_path), pose_source)
-    pq.write_table(pa.Table.from_pandas(metadata), metadata_path)
+    write_parquet_atomically(pa.Table.from_pandas(metadata), metadata_path)
 
     n_with_depth = int(metadata["depth"].notna().sum())
     logger.info(

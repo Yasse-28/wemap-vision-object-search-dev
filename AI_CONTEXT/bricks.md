@@ -28,7 +28,9 @@ diverge, production wins. A "small improvement" here is a bug.
 | `feedback.py` | *(dev-only — no production counterpart)* | `ReviewFeedback`, `load_review_feedback`, `normalize_query`, `DB_FILENAME` — reads the toolbox's `object-search-annotations.db` |
 | `localize.py` | `v1_5_logic.py` | `cluster_detections_leader_canopy`, `compute_cluster_statistics`, `rank_localization_clusters`, `_similarity_ratio_scores`, `filter_clusters_by_geometry`, `localize_from_enriched_candidates`, `build_localize_response`, `LocalizationParams`, `angular_gap_ratio` (dev-only, shared with `matching.py`), `UNRESOLVED_LEVEL=-9999`, `PLACEHOLDER_BBOX` |
 | `prepare_runner.py` | `object_search_prepare.py` (its `image_entries` construction) | `collect_image_entries`, `run` |
-| `prepare_postprocess.py` | `object_search_prepare.py::_sample_depths` | `postprocess_metadata`, `sample_depths` |
+| `prepare_postprocess.py` | `object_search_prepare.py::_sample_depths` | `postprocess_metadata`, `sample_depths`, `write_parquet_atomically` |
+| `prod_dump_merge.py` | streams what `benchmarks/lib.py::merge_prepare_outputs` does in RAM | `merge_dump`, `capture_id_by_keyframe`, `MergeResult` — folds a per-capture prod dump into one `metadata.parquet` + `embeddings.npy`, see gotcha 14 |
+| `prod_dump_remap.py` | *(dev-only — no production counterpart)* | `remap_dump`, `remap_capture`, `build_keyframe_id_map`, `KeyframeIdMap`, `find_trajectory`, `is_remapped`, `UNMAPPED_KEYFRAME_ID=-1` — re-keys a prod S3 dump to local ids, see gotcha 13 |
 | `map_manifest.py` | *(no counterpart — replaces the ORM)* | `load_map_manifest`, `find_manifest`, `MapManifest`, `ManifestKeyframe` |
 | `export_roi.py` | *(none — dev-only)* | `select_keyframes`, `export_roi`, `build_manifest_document`, `allocate_geo_ref_id`, `Roi`, `Selection`, `PROVENANCE_FILENAME`. **The only module that writes a map directory.** Keyframes inside the drawn lng/lat rings, matched on the level the manifest's altitude bands give (EUS up, never WGS84 alt) → a new manifest with dense ids restarting at 0, hardlinked `images/`+`depths/` (copy on `EXDEV`), optionally a subset `object-search/` with `video_keyframe_id`, `row_index`, `embeddings.npy` rows and `thumbnail_key` all remapped together, plus `export-provenance.json` carrying the old→new id table. Staged in `.{name}.partial-*` and `os.replace`d, because a half-written directory still satisfies `find_manifest`. `--dry-run` answers the count the UI shows as authoritative. `allocate_geo_ref_id` takes the next free value across every configured manifest and, when the database answers, both tables — see the gotcha below. |
 | `delete_map.py` | *(none — dev-only)* | `plan_deletion`, `delete_map`, `purge_database`, `children_of`, `ConfiguredMap`, `DeletionRefused`. The toolbox's only destructive path, so it is all gates: refuses a map with no `parent_map` (not produced here), one that still has children, and one whose `geo_ref_id` another configured map shares. Database first, then the directory — an orphaned row cannot be traced back to what it described, an orphaned directory can. Skips the `rmtree` when there is no `export-provenance.json`. |
@@ -1206,6 +1208,39 @@ early and by name when either directory is absent.
     became reachable when `export_roi` started writing manifests here: it allocates
     the next free id, and `service.load_map_entries` now refuses a config where two
     maps collide.
+
+13. **A prod S3 dump must be remapped before ingest, and the failure is silent.**
+    `../../dump_object_search.sh` (outside this repo) pulls prepare outputs from prod,
+    which skips the GPU hours — but prod's `video_keyframe_id` is the real `VideoKeyframe.id` while this
+    repo's is the `geo_keyframes` index, and the ranges overlap, so a raw dump
+    attaches roughly a quarter of the candidates to *unrelated* keyframes. Run
+    `python -m toolbox.bricks.prod_dump_remap <map_path>` first, then ingest normally —
+    the dump lands in `object-search/<capture>/`, which is `build-index.sh`'s own layout
+    and what `discover_capture_dirs` reads, so no `--outputs-dirname` is involved. It
+    joins the manifest to the 360-viewer `trajectory.json` — public bucket,
+    `<map_uuid>/versions/<n>/360-viewer/`, the only artifact carrying both — on WGS84
+    position; the dump script downloads it. Rows with no local counterpart get `-1`,
+    which ingest's `kept_vk_ids` filter drops, and a schema-metadata marker makes a
+    second pass a no-op (re-mapping already-local ids would shuffle every candidate
+    onto a different keyframe). Thumbnails are a separate `--thumbnails` /
+    `--thumbnails-only` opt-in **of the dump script**, mirrored under the map dir at the
+    exact `thumbnail_key` path. Re-running the dump script keeps existing parquet unless
+    `--force`, because a fresh download reverts the remap just as silently.
+
+14. **Prod dumps arrive per capture; the toolbox explorer only reads the single-file
+    layout.** Prod's `prepare` runs per `VideoCapture`, so a dump is one pair per
+    capture under `object-search/<vc_id>/`; `build-index.sh` writes one pair for the
+    whole map. `ingest_cli` reads both (`discover_capture_dirs`), the explorer only the
+    second — it keys rows by `row_index` and needs a dense 0-based counter, which
+    restarts at 0 in every capture file. `python -m toolbox.bricks.prod_dump_merge
+    <map_path>` converts, **after** the remap (it refuses otherwise): same row
+    selection as the mirror's `merge_prepare_outputs`, but embeddings streamed to disk
+    because 1M rows do not fit in RAM twice, `row_index` renumbered over the result,
+    `thumbnail_key` untouched (it carries the original per-capture index in its own
+    filename). No thinning: `ingest_cli` still thins at ingest, so the explorer can see
+    the proposals thinning drops. Verified on VINCI v8: 935899 rows merged from 11
+    captures, and ingest yields the same 134293 candidates as from the capture dirs.
+    The per-capture directories are kept, so any merge variant can be regenerated.
 
 ## Cross-refs
 
