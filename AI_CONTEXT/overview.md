@@ -45,6 +45,9 @@ geolocated object instances (lat/lon/alt, level, heading, confidence).
 **Build (offline)** — `scripts/build-index.sh` runs all three steps. A v2 map
 directory ships only its manifest, so fetch the pixels first with the sibling repo
 `../retrieve-map-data` (`retrieve_map_data.py <map_dir>` → `images/` + `depths/`).
+The candidates can be fetched instead of computed: `scripts/dump-object-search.sh`
+pulls prod's prepare outputs for the captures the manifest's `videos[]` lists, then
+`prod_dump_remap` + `prod_dump_merge` make them local — `docs/prod-dump.md`.
 
 ```
 images/*.jpg   (alongside depths/*.tif)

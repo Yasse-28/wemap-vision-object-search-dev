@@ -1,6 +1,7 @@
 """Re-key a **prod** object-search dump to this repo's local keyframe ids.
 
-`dump_object_search.sh` pulls prepare outputs straight from prod S3, which saves
+`scripts/dump-object-search.sh` pulls prepare outputs straight from prod S3, which
+saves
 the GPU hours a local `prepare` run costs. But the two worlds number keyframes
 differently, and nothing downstream notices:
 
@@ -243,6 +244,39 @@ def remap_capture(metadata_path: Path, id_map: KeyframeIdMap) -> tuple[int, int]
     return table.num_rows, mapped
 
 
+def report_out_of_version_captures(
+    manifest: MapManifest, capture_dirs: list[Path]
+) -> list[Path]:
+    """Name the capture dirs this map version does not contain.
+
+    A dump taken before `videos[]` existed holds every capture S3 had for the map,
+    including other versions'. Those have no keyframe in the manifest, so they remap
+    to nothing — visible today only as a 0 % line per capture, which reads like a
+    coordinate-join failure. With the list, the reason is stated instead of inferred.
+    Returns them so a caller can report; nothing is skipped, because a remap of rows
+    that are already unmappable is a no-op either way.
+    """
+    if not manifest.video_capture_ids:
+        return []
+    out_of_version = [
+        path
+        for path in capture_dirs
+        if path.name.isdigit() and int(path.name) not in manifest.video_capture_ids
+    ]
+    if out_of_version:
+        logger.warning(
+            "%d capture(s) are not in map version %d (manifest videos[]): %s — no "
+            "keyframe of theirs is in the manifest, so every row will map to %d and "
+            "ingest will drop them. scripts/dump-object-search.sh no longer fetches "
+            "these; the directories can be deleted.",
+            len(out_of_version),
+            manifest.map_version,
+            ", ".join(path.name for path in out_of_version),
+            UNMAPPED_KEYFRAME_ID,
+        )
+    return out_of_version
+
+
 def remap_dump(
     map_path: Path,
     *,
@@ -264,7 +298,7 @@ def remap_dump(
     if trajectory is None or not trajectory.is_file():
         raise FileNotFoundError(
             f"No {TRAJECTORY_FILENAME} for '{map_path}'. It carries the prod keyframe "
-            "ids; dump_object_search.sh downloads it beside the captures."
+            "ids; scripts/dump-object-search.sh downloads it beside the captures."
         )
 
     manifest = load_map_manifest(map_path)
@@ -276,6 +310,8 @@ def remap_dump(
         raise FileNotFoundError(
             f"No metadata.parquet under '{map_path / outputs_dirname}'."
         )
+
+    report_out_of_version_captures(manifest, capture_dirs)
 
     total_rows = total_mapped = 0
     for capture_dir in capture_dirs:

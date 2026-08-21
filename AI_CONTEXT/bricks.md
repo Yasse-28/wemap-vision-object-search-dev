@@ -30,8 +30,8 @@ diverge, production wins. A "small improvement" here is a bug.
 | `prepare_runner.py` | `object_search_prepare.py` (its `image_entries` construction) | `collect_image_entries`, `run` |
 | `prepare_postprocess.py` | `object_search_prepare.py::_sample_depths` | `postprocess_metadata`, `sample_depths`, `write_parquet_atomically` |
 | `prod_dump_merge.py` | streams what `benchmarks/lib.py::merge_prepare_outputs` does in RAM | `merge_dump`, `capture_id_by_keyframe`, `MergeResult` — folds a per-capture prod dump into one `metadata.parquet` + `embeddings.npy`, see gotcha 14 |
-| `prod_dump_remap.py` | *(dev-only — no production counterpart)* | `remap_dump`, `remap_capture`, `build_keyframe_id_map`, `KeyframeIdMap`, `find_trajectory`, `is_remapped`, `UNMAPPED_KEYFRAME_ID=-1` — re-keys a prod S3 dump to local ids, see gotcha 13 |
-| `map_manifest.py` | *(no counterpart — replaces the ORM)* | `load_map_manifest`, `find_manifest`, `MapManifest`, `ManifestKeyframe` |
+| `prod_dump_remap.py` | *(dev-only — no production counterpart)* | `remap_dump`, `remap_capture`, `build_keyframe_id_map`, `KeyframeIdMap`, `find_trajectory`, `is_remapped`, `report_out_of_version_captures`, `UNMAPPED_KEYFRAME_ID=-1` — re-keys a prod S3 dump to local ids, see gotcha 13 |
+| `map_manifest.py` | *(no counterpart — replaces the ORM)* | `load_map_manifest`, `find_manifest`, `MapManifest`, `ManifestKeyframe`, `_map_version`, `_video_capture_ids` — `map_version` now comes from `map.georef_version` and falls back to the filename stamp (a mismatch warns), and `MapManifest.video_capture_ids` carries the pivot's `videos[]` (empty = the export predates the field, which every reader must treat as *unknown*, never as *none*) |
 | `export_roi.py` | *(none — dev-only)* | `select_keyframes`, `export_roi`, `build_manifest_document`, `allocate_geo_ref_id`, `Roi`, `Selection`, `PROVENANCE_FILENAME`. **The only module that writes a map directory.** Keyframes inside the drawn lng/lat rings, matched on the level the manifest's altitude bands give (EUS up, never WGS84 alt) → a new manifest with dense ids restarting at 0, hardlinked `images/`+`depths/` (copy on `EXDEV`), optionally a subset `object-search/` with `video_keyframe_id`, `row_index`, `embeddings.npy` rows and `thumbnail_key` all remapped together, plus `export-provenance.json` carrying the old→new id table. Staged in `.{name}.partial-*` and `os.replace`d, because a half-written directory still satisfies `find_manifest`. `--dry-run` answers the count the UI shows as authoritative. `allocate_geo_ref_id` takes the next free value across every configured manifest and, when the database answers, both tables — see the gotcha below. |
 | `delete_map.py` | *(none — dev-only)* | `plan_deletion`, `delete_map`, `purge_database`, `children_of`, `ConfiguredMap`, `DeletionRefused`. The toolbox's only destructive path, so it is all gates: refuses a map with no `parent_map` (not produced here), one that still has children, and one whose `geo_ref_id` another configured map shares. Database first, then the directory — an orphaned row cannot be traced back to what it described, an orphaned directory can. Skips the `rmtree` when there is no `export-provenance.json`. |
 | `v1_index_convert.py` | *(dev-only — no production counterpart)* | `convert`, `load_keyframe_map`, `ConversionStats`, `SCHEMA` — re-shapes a `legacy/` SQLite index into `metadata.parquet` + `embeddings.npy` |
@@ -1201,6 +1201,14 @@ indices and `2.tif` would silently match the wrong keyframe. The sibling repo
 same manifest and using the same basename rule. `scripts/build-index.sh` fails
 early and by name when either directory is absent.
 
+The candidates come from somewhere else again: `scripts/dump-object-search.sh` pulls
+prod's prepare outputs instead of recomputing them. It fetches **only the captures
+the manifest's `videos[]` lists** — S3 keeps every capture ever prepared for the map,
+and one from another georef version has no keyframe here, so it can only ever remap
+to `-1`. It also reports the reverse gap by name: a listed capture prod never
+prepared, i.e. a part of the venue with no candidates at all. See
+`docs/prod-dump.md`.
+
 12. **`geo_ref_id` is a column, not a table.** `object_search_candidate` and
     `geokeyframe` hold every map, and `ingest_cli` opens with
     `DELETE ... WHERE geo_ref_id = %s`. Two maps sharing one therefore erase each
@@ -1210,7 +1218,7 @@ early and by name when either directory is absent.
     maps collide.
 
 13. **A prod S3 dump must be remapped before ingest, and the failure is silent.**
-    `../../dump_object_search.sh` (outside this repo) pulls prepare outputs from prod,
+    `scripts/dump-object-search.sh` pulls prepare outputs from prod,
     which skips the GPU hours — but prod's `video_keyframe_id` is the real `VideoKeyframe.id` while this
     repo's is the `geo_keyframes` index, and the ranges overlap, so a raw dump
     attaches roughly a quarter of the candidates to *unrelated* keyframes. Run

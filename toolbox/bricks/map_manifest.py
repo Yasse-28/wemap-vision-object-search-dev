@@ -14,6 +14,8 @@ source than the v1 `georef.db`:
 | `geo_levels[].geo_ref` | the real `geo_ref_id` |
 | `geo_keyframes[]` — `x`/`y`/`z`, `orientation` | `GeoKeyframe.position` + ori. |
 | `map.venue_type` | `Map.venue_type`, which selects the detection prompts |
+| `map.georef_version` | `GeoRef.version` — the version the S3 artefacts sit under |
+| `videos[]` | the `VideoCapture` ids this version was built from |
 
 **The poses need no conversion.** `georef.db` stores them transposed,
 world-to-camera and in WDS/OpenCV, so the v1 path composes three flips to reach
@@ -74,6 +76,10 @@ class MapManifest:
     origin: Coordinates
     levels: tuple[Level, ...]
     keyframes: tuple[ManifestKeyframe, ...]
+    # `videos[]` — the VideoCapture ids this map version was built from. Empty on a
+    # manifest exported before the field existed, which is why every reader treats
+    # empty as "unknown", never as "none".
+    video_capture_ids: tuple[int, ...] = ()
 
     def geo_transform(self) -> GeoTransform:
         """EUS↔WGS84 plus the level bands, built exactly as production does."""
@@ -130,6 +136,49 @@ def _basename(url: str) -> str:
     which writes these files; disagreeing with them is the actual risk.
     """
     return Path(urlparse(str(url)).path).name
+
+
+def _video_capture_ids(data: dict, path: Path) -> tuple[int, ...]:
+    """`videos[]` as sorted ints, or `()` when the manifest predates the field.
+
+    The list is what the map version was built from, so it is the authority on which
+    prod captures can be positioned here — `dump-object-search.sh` fetches only these
+    and `prod_dump_remap` names the others instead of leaving them to surface as a
+    silent 0 % remap.
+    """
+    raw = data.get("videos")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"{path}: 'videos' must be a list of VideoCapture ids.")
+    return tuple(sorted({int(value) for value in raw}))
+
+
+def _map_version(data: dict, path: Path) -> int:
+    """The georef version: `map.georef_version` first, then the filename stamp.
+
+    The field is authoritative — it is the exported value — while the filename is a
+    convention a rename can break. They are compared because a disagreement means the
+    file was renamed or hand-edited, and every S3 path built from the version
+    (trajectory, 360-viewer) would then point at the wrong version's artefacts.
+    """
+    match = MANIFEST_PATTERN.match(path.name)
+    from_name = int(match.group("version")) if match else None
+    raw = (data.get("map") or {}).get("georef_version")
+    from_field = None if raw is None else int(raw)
+
+    if from_field is None:
+        return from_name or 0
+    if from_name is not None and from_name != from_field:
+        logger.warning(
+            "%s: filename says version %d, map.georef_version says %d — trusting the "
+            "field. Rename the export to match, or S3 paths built from the name will "
+            "point at another version.",
+            path.name,
+            from_name,
+            from_field,
+        )
+    return from_field
 
 
 def load_manifest(path: Path) -> MapManifest:
@@ -222,19 +271,23 @@ def load_manifest(path: Path) -> MapManifest:
         map_id=str(
             map_block.get("name") or (match.group("map_id") if match else path.stem)
         ),
-        map_version=int(match.group("version")) if match else 0,
+        map_version=_map_version(data, path),
         map_uuid=str(map_block.get("uuid") or ""),
         venue_type=map_block.get("venue_type") or None,
         geo_ref_id=geo_ref_id,
         origin=origin,
         levels=tuple(levels),
         keyframes=tuple(keyframes),
+        video_capture_ids=_video_capture_ids(data, path),
     )
     logger.info(
-        "Loaded manifest %s: %d keyframes, %d level(s), venue=%s, geo_ref_id=%s",
+        "Loaded manifest %s: version %d, %d keyframes, %d level(s), %s capture(s), "
+        "venue=%s, geo_ref_id=%s",
         path.name,
+        manifest.map_version,
         len(manifest.keyframes),
         len(manifest.levels),
+        len(manifest.video_capture_ids) or "unknown",
         manifest.venue_type,
         manifest.geo_ref_id,
     )

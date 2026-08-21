@@ -21,6 +21,7 @@ from toolbox.bricks.prod_dump_remap import (
     build_keyframe_id_map,
     remap_capture,
     remap_dump,
+    report_out_of_version_captures,
 )
 from toolbox.bricks.vendored.geo_transform import Vector3Batch
 
@@ -35,7 +36,9 @@ POSITIONS: tuple[tuple[float, float, float], ...] = (
 
 
 def _write_manifest(
-    map_path: Path, positions: tuple[tuple[float, float, float], ...] = POSITIONS
+    map_path: Path,
+    positions: tuple[tuple[float, float, float], ...] = POSITIONS,
+    videos: tuple[int, ...] | None = None,
 ) -> None:
     map_path.mkdir(parents=True, exist_ok=True)
     (map_path / "m_8_20260101_000000.json").write_text(
@@ -43,6 +46,7 @@ def _write_manifest(
             {
                 "local_origin": ORIGIN,
                 "map": {"name": "m", "uuid": "u", "venue_type": "rail"},
+                **({} if videos is None else {"videos": list(videos)}),
                 "geo_levels": [
                     {
                         "value": 0,
@@ -219,3 +223,37 @@ def test_missing_trajectory_is_an_error(map_path: Path) -> None:
     _write_capture(map_path / "object-search" / "100", [1])
     with pytest.raises(FileNotFoundError, match="trajectory.json"):
         remap_dump(map_path)
+
+
+def test_captures_outside_the_manifest_videos_are_named(tmp_path: Path) -> None:
+    """A dump taken before `videos[]` existed holds other versions' captures too.
+
+    They remap to nothing, which on its own looks like a coordinate-join failure. The
+    list turns that into a statement: this capture is not in this map version.
+    """
+    map_path = tmp_path / "map"
+    _write_manifest(map_path, videos=(100,))
+    _write_trajectory(map_path)
+    _write_capture(map_path / "object-search" / "100", [70000, 1])
+    _write_capture(map_path / "object-search" / "102", [4242])
+
+    manifest = load_map_manifest(map_path)
+    capture_dirs = sorted((map_path / "object-search").iterdir())
+    assert [p.name for p in report_out_of_version_captures(manifest, capture_dirs)] == [
+        "102"
+    ]
+
+    # Reporting only: the remap still runs over every capture it finds, and 102's rows
+    # end up unmapped exactly as before.
+    rows, mapped = remap_dump(map_path)
+    assert (rows, mapped) == (3, 2)
+
+
+def test_a_manifest_without_videos_names_nothing(tmp_path: Path) -> None:
+    """Unknown is not "none": every capture must stay unremarked-on, not flagged."""
+    map_path = tmp_path / "map"
+    _write_manifest(map_path)
+    capture_dirs = [_write_capture(map_path / "object-search" / "102", [1]).parent]
+    assert (
+        report_out_of_version_captures(load_map_manifest(map_path), capture_dirs) == []
+    )
